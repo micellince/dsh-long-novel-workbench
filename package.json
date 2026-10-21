@@ -1,0 +1,73 @@
+{
+  "name": "dsh-long-novel-workbench",
+  "version": "0.3.0",
+  "private": true,
+  "description": "长篇中文小说工作台：章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、9 个 Agent 分工、名家风格预设与 AI 生成/审稿。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "license": "MIT",
+  "author": {
+    "name": "micellince"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/micellince/dsh-long-novel-workbench.git"
+  },
+  "homepage": "https://github.com/micellince/dsh-long-novel-workbench#readme",
+  "bugs": {
+    "url": "https://github.com/micellince/dsh-long-novel-workbench/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "novel",
+    "fiction",
+    "writing",
+    "chinese",
+    "workbench",
+    "ai-writing",
+    "小说",
+    "写作",
+    "长篇",
+    "中文"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

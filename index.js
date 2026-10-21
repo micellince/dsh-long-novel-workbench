@@ -1,0 +1,605 @@
+/**
+ * 长篇中文小说工作台 · Host 半边
+ *
+ * 1) Web UI 的同源 API（/novel-desk/api）：作品、章节、账本、提案、审稿、AI 生成。
+ * 2) Agent 工具：读上下文、生成「工作单」、提交提案/审稿、按需直写。
+ */
+
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportMarkdown, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset } from './lib/store.js'
+import { builtinPresets } from './lib/defaults.js'
+import { runAi } from './lib/ai.js'
+
+const ROUTE = '/novel-desk/api'
+const MAX_BODY = 8 * 1024 * 1024
+
+export const name = 'novel-desk'
+export const inject = ['tools']
+
+function sendJson(res, status, value) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(JSON.stringify(value))
+}
+
+async function readBody(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_BODY) throw new Error('请求体过大')
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function guard(req, connection) {
+  const host = String(req.headers?.host ?? '')
+  const loopback = /^(127\.0\.0\.1|localhost|\[::1\]|\[::ffff:127\.0\.0\.1\])(:\d+)?$/.test(host)
+  let rejection
+  if (connection && typeof connection.requestRejection === 'function') {
+    try {
+      rejection = connection.requestRejection(req)
+    } catch {
+      rejection = 403
+    }
+  } else if (!loopback) {
+    rejection = 403
+  }
+  if (rejection === undefined) return undefined
+  // 同源浏览器请求放行：插件自己的回环路由在部分宿主版本上不在 Cookie 门内。
+  if (loopback && String(req.headers?.['sec-fetch-site'] ?? '') === 'same-origin') return undefined
+  return rejection
+}
+
+async function handleRpc(body, ctx) {
+  const op = String(body?.op ?? '')
+  const root = defaultRoot()
+  await ensureRoot(root)
+  switch (op) {
+    case 'ping':
+      return { root }
+    case 'library':
+      return getLibrary(root)
+    case 'bundle': {
+      const id = String(body.projectId ?? '')
+      if (!id) throw new Error('缺少 projectId')
+      return getBundle(root, id)
+    }
+    case 'project.create':
+      return createProject(root, body.input ?? {})
+    case 'project.update':
+      return updateProject(root, String(body.projectId ?? ''), body.patch ?? {})
+    case 'project.delete':
+      return deleteProject(root, String(body.projectId ?? ''))
+    case 'chapter.save':
+      return saveChapter(root, String(body.projectId ?? ''), body.chapter ?? {})
+    case 'chapter.delete':
+      return deleteChapter(root, String(body.projectId ?? ''), String(body.chapterId ?? ''))
+    case 'entity.upsert':
+      return upsertEntity(root, String(body.projectId ?? ''), String(body.kind ?? ''), body.item ?? {})
+    case 'entity.delete':
+      return deleteEntity(root, String(body.projectId ?? ''), String(body.kind ?? ''), String(body.entityId ?? ''))
+    case 'entity.list':
+      return getEntities(root, String(body.projectId ?? ''), String(body.kind ?? ''))
+    case 'proposal.create':
+      return createProposal(root, String(body.projectId ?? ''), body.proposal ?? {})
+    case 'proposal.accept':
+      return acceptProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
+    case 'proposal.reject':
+      return rejectProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
+    case 'proposal.feedback':
+      return addProposalFeedback(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), String(body.text ?? ''))
+    case 'preset.builtin':
+      return builtinPresets()
+    case 'preset.add': {
+      const template = builtinPresets().find((t) => t.id === body.templateId)
+      if (!template) throw new Error(`内置预设不存在：${body.templateId}`)
+      return addPresetFromTemplate(root, String(body.projectId ?? ''), template)
+    }
+    case 'preset.apply':
+      return applyPreset(root, String(body.projectId ?? ''), String(body.presetId ?? ''))
+    case 'export':
+      return exportMarkdown(root, String(body.projectId ?? ''))
+    case 'ai.run': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      const bundle = await getBundle(root, projectId)
+      const proposal = body.proposalId ? (bundle.proposals ?? []).find((p) => p.id === body.proposalId) : null
+      if (body.proposalId && !proposal) throw new Error(`提案不存在：${body.proposalId}`)
+      const feedback = proposal
+        ? (body.feedback ?? (proposal.feedback ?? []).map((f) => f.text).join('\n'))
+        : body.instruction
+      const result = await runAi(ctx, {
+        task: proposal ? 'revise-proposal' : String(body.task ?? 'next-chapter-plan'),
+        bundle,
+        chapter: body.chapter ?? proposal?.chapter,
+        instruction: body.instruction,
+        proposal,
+        feedback,
+      })
+      const saved = await persistAiResult(root, projectId, result, body)
+      return { task: result.task, saved, raw: result.raw.slice(0, 4000) }
+    }
+    default:
+      throw new Error(`未知操作：${op || '(空)'}`)
+  }
+}
+
+/** 把 AI 结果落成提案/审稿。 */
+async function persistAiResult(root, projectId, result, request) {
+  const json = result.json ?? {}
+  const bundle = await getBundle(root, projectId)
+  if (result.task === 'revise-proposal') {
+    const old = (bundle.proposals ?? []).find((p) => p.id === request.proposalId)
+    if (!old) throw new Error(`提案不存在：${request.proposalId}`)
+    const common = { kind: old.kind, chapter: old.chapter, title: `（修订）${old.title}`, revisedFrom: old.id }
+    let created
+    if (old.kind === 'plan' || old.kind === 'chapter' || old.kind === 'custom') {
+      created = await createProposal(root, projectId, { ...common, summary: json.summary ?? old.summary, data: { ...json, chapter: old.chapter ?? json.chapter }, rationale: '按作者修改意见重写。' })
+    } else {
+      const items = Array.isArray(json.items) ? json.items : (Array.isArray(json[old.kind]) ? json[old.kind] : [])
+      created = await createProposal(root, projectId, { ...common, summary: `按意见修订，共 ${items.length} 条`, items, rationale: '按作者修改意见重写。' })
+    }
+    await markProposalRevised(root, projectId, old.id, created.id)
+    return { kind: 'proposal', proposalId: created.id, revisedFrom: old.id }
+  }
+  const nextChapter = bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1
+  const chapter = Number(request.chapter) || Number(json.chapter) || nextChapter
+
+  if (result.task === 'review-chapter') {
+    const reviews = Array.isArray(json.reviews) ? json.reviews : []
+    for (const review of reviews) {
+      await upsertEntity(root, projectId, 'reviews', { ...review, chapter, source: 'ai', status: 'open' })
+    }
+    for (const highlight of Array.isArray(json.highlights) ? json.highlights : []) {
+      await upsertEntity(root, projectId, 'highlights', { ...highlight, chapter, source: 'ai' })
+    }
+    return { kind: 'reviews', count: reviews.length, overall: json.overall ?? '' }
+  }
+
+  if (result.task === 'next-chapter-plan') {
+    const proposal = await createProposal(root, projectId, {
+      kind: 'plan',
+      chapter,
+      title: json.title ?? `第 ${chapter} 章方案`,
+      summary: json.summary ?? '',
+      data: json,
+      rationale: 'AI 生成的章节方案，包含事件、事实、伏笔，可逐项采纳。',
+    })
+    return { kind: 'proposal', proposalId: proposal.id, chapter }
+  }
+
+  if (result.task === 'continue-chapter') {
+    const proposal = await createProposal(root, projectId, {
+      kind: 'chapter',
+      chapter,
+      title: json.title ?? `第 ${chapter} 章`,
+      summary: json.summary ?? '',
+      data: { ...json, chapter },
+      rationale: 'AI 生成的章节正文，采纳后会写入章节并备份旧稿。',
+    })
+    return { kind: 'proposal', proposalId: proposal.id, chapter, chars: String(json.content ?? '').length }
+  }
+
+  if (result.task === 'generate-timeline') {
+    const proposal = await createProposal(root, projectId, {
+      kind: 'events',
+      chapter,
+      title: `第 ${chapter} 章时间线（AI）`,
+      summary: `AI 生成 ${Array.isArray(json.events) ? json.events.length : 0} 条事件`,
+      items: Array.isArray(json.events) ? json.events : [],
+      rationale: '采纳后写入时间线。',
+    })
+    return { kind: 'proposal', proposalId: proposal.id }
+  }
+
+  if (result.task === 'extract-facts') {
+    const proposal = await createProposal(root, projectId, {
+      kind: 'facts',
+      chapter,
+      title: `第 ${chapter} 章事实抽取（AI）`,
+      items: Array.isArray(json.facts) ? json.facts : [],
+      rationale: '采纳后写入事实账本。',
+    })
+    const characterProposal = Array.isArray(json.characters) && json.characters.length > 0
+      ? await createProposal(root, projectId, {
+          kind: 'characters',
+          chapter,
+          title: `第 ${chapter} 章人物抽取（AI）`,
+          items: json.characters,
+          rationale: '采纳后写入人物库。',
+        })
+      : null
+    return { kind: 'proposal', proposalId: proposal.id, characterProposalId: characterProposal?.id }
+  }
+
+  // custom：模型返回 proposals 数组时逐条落提案
+  const list = Array.isArray(json.proposals) ? json.proposals : []
+  const ids = []
+  for (const item of list) {
+    const proposal = await createProposal(root, projectId, {
+      kind: item.kind ?? 'custom',
+      chapter: item.chapter || chapter,
+      title: item.title ?? 'AI 提案',
+      summary: item.summary ?? '',
+      data: item.data ?? {},
+      items: Array.isArray(item.items) ? item.items : [],
+      rationale: json.answer ?? '',
+    })
+    ids.push(proposal.id)
+  }
+  if (ids.length === 0) {
+    const proposal = await createProposal(root, projectId, {
+      kind: 'custom',
+      chapter,
+      title: 'AI 回答',
+      summary: String(json.answer ?? '').slice(0, 800),
+      data: json,
+      rationale: '自由指令结果。',
+    })
+    ids.push(proposal.id)
+  }
+  return { kind: 'proposal', proposalIds: ids }
+}
+
+function mountRoute(ctx) {
+  ctx.inject(['webServer'], (c) => {
+    const webServer = c.webServer
+    if (!webServer || typeof webServer.register !== 'function') return
+    const connection = c.get?.('connection')
+    const dispose = webServer.register({
+      kind: 'prefix',
+      path: ROUTE,
+      handler: async (req, res) => {
+        const rejection = guard(req, connection)
+        if (rejection !== undefined) {
+          res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+          return
+        }
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        if (req.method === 'GET' && url.pathname.endsWith('/ping')) {
+          sendJson(res, 200, { ok: true, value: await handleRpc({ op: 'ping' }, ctx) })
+          return
+        }
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { ok: false, error: { code: 'bad-request', message: '只支持 POST' } })
+          return
+        }
+        try {
+          const body = await readBody(req)
+          sendJson(res, 200, { ok: true, value: await handleRpc(body, ctx) })
+        } catch (error) {
+          sendJson(res, 200, { ok: false, error: { code: 'bad-request', message: error instanceof Error ? error.message : String(error) } })
+        }
+      },
+    })
+    c.effect(() => () => {
+      try {
+        if (typeof dispose === 'function') dispose()
+      } catch {
+        /* 已清理 */
+      }
+    }, 'novel-desk: api route')
+  })
+}
+
+// ── Agent 工具 ────────────────────────────────────────────────
+
+const textOutput = {
+  schema: { type: 'string' },
+  render: (_args, value) => [{ type: 'text', text: String(value) }],
+}
+
+async function resolveProject(nameOrId) {
+  const root = defaultRoot()
+  await ensureRoot(root)
+  const projects = await listProjects(root)
+  if (projects.length === 0) throw new Error('作品库为空：请先在工作台新建作品。')
+  if (!nameOrId) return projects.length === 1 ? projects[0] : null
+  const key = String(nameOrId).trim()
+  return projects.find((p) => p.id === key || p.name === key) ?? null
+}
+
+async function requireProject(nameOrId) {
+  const project = await resolveProject(nameOrId)
+  if (!project) throw new Error(`找不到作品「${nameOrId}」。先用 novel_desk_projects 查看列表。`)
+  return project
+}
+
+const projectsTool = {
+  name: 'novel_desk_projects',
+  description: '列出「长篇中文小说工作台」里的全部作品（名称、类型、章节数、字数、更新时间）。数据在 ~/StoryDesk，是普通 Markdown/JSON 文件。',
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+  output: textOutput,
+  async execute() {
+    const lib = await getLibrary(defaultRoot())
+    if (lib.projects.length === 0) return `作品库为空。数据根目录：${lib.root}\n请先在 Web UI 侧栏打开「长篇中文小说工作台」新建作品。`
+    const lines = [`# 作品库（${lib.projects.length} 部）`, `数据根目录：${lib.root}`, '']
+    for (const p of lib.projects) {
+      lines.push(`## ${p.name}（id: ${p.id}）`)
+      lines.push(`- 类型：${p.genre || '未填'} ｜ 章节：${p.chapters} ｜ 字数：${p.words}`)
+      lines.push(`- 更新：${p.updatedAt ?? '—'}`)
+    }
+    return lines.join('\n')
+  },
+}
+
+const bundleTool = {
+  name: 'novel_desk_bundle',
+  description: '读取作品的完整结构：作品设定、写作预设、章节列表、事实账本、时间线、伏笔、冲突、人物、高光、审稿、待采纳提案、计划对齐、一致性检查。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      kind: { type: 'string', enum: ['summary', 'chapters', 'facts', 'events', 'foreshadow', 'conflicts', 'characters', 'highlights', 'presets', 'reviews', 'proposals', 'agents', 'alignment', 'checks'], description: '要看的部分，默认 summary' },
+    },
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const bundle = await getBundle(defaultRoot(), project.id)
+    const kind = args?.kind ?? 'summary'
+    const lines = [`# ${bundle.project.name}`, '']
+    if (kind === 'summary' || kind === 'chapters') {
+      lines.push(`类型：${bundle.project.genre || '—'} ｜ 视角：${bundle.project.pov || '—'} ｜ 时态：${bundle.project.tense || '—'}`)
+      lines.push(`进度：${bundle.stats.chapters} 章 / ${bundle.stats.words} 字 ｜ 待采纳提案：${bundle.stats.pendingProposals} ｜ 未处理审稿：${bundle.stats.openReviews}`)
+      lines.push('', `## 章节（${bundle.chapters.length}）`, ...bundle.chapters.map((c) => `- 第 ${c.id} 章《${c.title}》 ${c.words} 字 ｜ ${c.status}${c.summary ? ` ｜ ${c.summary}` : ''}`))
+    }
+    if (kind === 'summary' || kind === 'checks') {
+      lines.push('', `## 一致性检查（${bundle.checks.length}）`, ...bundle.checks.map((c) => `- [${c.level}] ${c.title}：${c.detail}`))
+    }
+    if (kind === 'summary' || kind === 'alignment') {
+      const a = bundle.alignment
+      lines.push('', '## 计划对齐', `- 章节：${a.actualChapters} / ${a.plannedChapters || '未设'}（${a.chapterProgress ?? '—'}%）`)
+      lines.push(`- 字数：${a.actualWords} / ${a.totalWords || '未设'}（${a.wordProgress ?? '—'}%）｜ 每章目标 ${a.chapterWords || '未设'}`)
+      for (const row of a.perChapter) lines.push(`- 第 ${row.id} 章：${row.words} 字（${row.delta === null ? '无目标' : (row.delta >= 0 ? '+' : '') + row.delta}）｜事件 ${row.events}｜事实 ${row.facts}｜待审 ${row.openReviews}`)
+    }
+    if (kind === 'facts') lines.push('', `## 事实账本（${bundle.facts.length}）`, ...bundle.facts.map((f) => `- [第${f.chapter ?? '?'}章] ${f.subject} · ${f.attribute} = ${f.value}`))
+    if (kind === 'events') lines.push('', `## 时间线（${bundle.events.length}）`, ...bundle.events.map((e) => `- [第${e.chapter ?? '?'}章 ｜ ${e.storyTime || '时间未填'}] ${e.title}${e.summary ? `：${e.summary}` : ''}`))
+    if (kind === 'foreshadow') lines.push('', `## 伏笔（${bundle.foreshadow.length}）`, ...bundle.foreshadow.map((f) => `- ${f.title} ｜ 第${f.setupChapter ?? '?'}章 → 第${f.payoffChapter ?? '?'}章 ｜ ${f.status ?? 'open'}`))
+    if (kind === 'conflicts') lines.push('', `## 冲突（${bundle.conflicts.length}）`, ...bundle.conflicts.map((c) => `- ${c.title} ｜ ${c.type ?? ''} ｜ ${c.status ?? 'active'} ｜ 赌注：${c.stakes ?? '—'}`))
+    if (kind === 'characters') lines.push('', `## 人物（${bundle.characters.length}）`, ...bundle.characters.map((c) => `- ${c.name} ｜ ${c.role ?? ''} ｜ 目标：${c.goal ?? '—'} ｜ 缺陷：${c.flaw ?? '—'}`))
+    if (kind === 'highlights') lines.push('', `## 高光（${bundle.highlights.length}）`, ...bundle.highlights.map((x) => `- [第${x.chapter ?? '?'}章] ${x.text ?? ''}`))
+    if (kind === 'presets') lines.push('', `## 写作预设（${bundle.presets.length}）`, ...bundle.presets.map((p) => `- ${p.name} ｜ 计划 ${p.plannedChapters ?? '—'} 章 × ${p.chapterWords ?? '—'} 字 ｜ ${p.pov ?? ''} ｜ ${p.tone ?? ''}`))
+    if (kind === 'reviews') lines.push('', `## 审稿（${bundle.reviews.length}）`, ...bundle.reviews.map((r) => `- [第${r.chapter ?? '?'}章 ｜ ${r.severity ?? ''} ｜ ${r.dimension ?? ''}] ${r.issue ?? ''} → ${r.suggestion ?? ''}（${r.status ?? 'open'}）`))
+    if (kind === 'proposals') lines.push('', `## 提案（${bundle.proposals.length}）`, ...bundle.proposals.map((p) => `- [${p.status}] ${p.kind} · ${p.title}${p.summary ? `：${p.summary}` : ''}`))
+    if (kind === 'agents') lines.push('', `## Agent 分工（${bundle.agents.length}）`, ...bundle.agents.map((a) => `- ${a.order}. ${a.name}：${a.duty}`))
+    return lines.join('\n')
+  },
+}
+
+const contextTool = {
+  name: 'novel_desk_context',
+  description: '生成写作上下文：作品设定与写作预设（计划章数/每章字数/结构/风格/禁忌）、9 个 Agent 分工、人物卡、事实账本、时间线、未回收伏笔、进行中冲突、未处理审稿、待采纳提案、最近章节。写新章或审稿前调用。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      recent: { type: 'integer', minimum: 0, maximum: 10, description: '带入最近几章摘要与结尾，默认 2' },
+    },
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const bundle = await getBundle(defaultRoot(), project.id)
+    const recent = Number.isInteger(args?.recent) ? args.recent : 2
+    const preset = bundle.presets[0] ?? {}
+    const lines = [`# 写作上下文 · ${bundle.project.name}`, '']
+    lines.push('## 作品设定')
+    lines.push(`- 类型：${bundle.project.genre || '—'} ｜ 视角：${bundle.project.pov || '—'} ｜ 时态：${bundle.project.tense || '—'}`)
+    lines.push(`- 一句话：${bundle.project.logline || '—'}`)
+    lines.push(`- 进度：${bundle.stats.chapters} 章 / ${bundle.stats.words} 字`)
+    lines.push('', '## 写作预设')
+    lines.push(`- ${preset.name ?? '未设置'}：计划 ${preset.plannedChapters ?? '—'} 章 × ${preset.chapterWords ?? '—'} 字，总 ${preset.totalWords ?? '—'} 字`)
+    lines.push(`- 结构：${preset.structure ?? '—'}`)
+    lines.push(`- 风格规则：${Array.isArray(preset.styleRules) ? preset.styleRules.join('；') : preset.styleRules ?? '—'}`)
+    lines.push(`- 禁忌：${Array.isArray(preset.taboo) ? preset.taboo.join('；') : preset.taboo ?? '—'}`)
+    lines.push(`- 审稿重点：${Array.isArray(preset.reviewFocus) ? preset.reviewFocus.join('；') : preset.reviewFocus ?? '—'}`)
+    if (bundle.agents.length > 0) {
+      lines.push('', '## Agent 分工')
+      for (const a of bundle.agents) lines.push(`- ${a.name}：${a.duty}`)
+    }
+    if (bundle.characters.length > 0) {
+      lines.push('', '## 人物卡')
+      for (const c of bundle.characters) lines.push(`- ${c.name}（${c.role || '—'}）：目标=${c.goal || '—'}；缺陷=${c.flaw || '—'}；弧光=${c.arc || '—'}`)
+    }
+    if (bundle.facts.length > 0) {
+      lines.push('', '## 事实账本')
+      for (const f of bundle.facts) lines.push(`- ${f.subject} · ${f.attribute} = ${f.value}（第${f.chapter ?? '?'}章）`)
+    }
+    if (bundle.events.length > 0) {
+      lines.push('', '## 时间线')
+      for (const e of bundle.events) lines.push(`- [第${e.chapter ?? '?'}章 ｜ ${e.storyTime ?? '时间未填'}] ${e.title}`)
+    }
+    const openForeshadow = bundle.foreshadow.filter((f) => f.status !== 'paid' && f.status !== 'dropped')
+    if (openForeshadow.length > 0) {
+      lines.push('', '## 未回收伏笔')
+      for (const f of openForeshadow) lines.push(`- ${f.title}：第${f.setupChapter ?? '?'}章埋，第${f.payoffChapter ?? '?'}章收`)
+    }
+    const activeConflicts = bundle.conflicts.filter((c) => c.status === 'active')
+    if (activeConflicts.length > 0) {
+      lines.push('', '## 进行中的冲突')
+      for (const c of activeConflicts) lines.push(`- ${c.title}：赌注=${c.stakes || '—'}；升级=${c.escalation || '—'}`)
+    }
+    const openReviews = bundle.reviews.filter((r) => r.status !== 'fixed' && r.status !== 'wontfix')
+    if (openReviews.length > 0) {
+      lines.push('', '## 未处理审稿')
+      for (const r of openReviews.slice(0, 15)) lines.push(`- [第${r.chapter ?? '?'}章 ｜ ${r.severity ?? ''}] ${r.issue ?? ''} → ${r.suggestion ?? ''}`)
+    }
+    const pending = bundle.proposals.filter((p) => p.status === 'pending')
+    if (pending.length > 0) {
+      lines.push('', '## 待采纳提案')
+      for (const p of pending) lines.push(`- ${p.kind} · ${p.title}${p.summary ? `：${p.summary}` : ''}`)
+    }
+    if (recent > 0 && bundle.chapters.length > 0) {
+      lines.push('', `## 最近 ${recent} 章`)
+      for (const c of bundle.chapters.slice(-recent)) {
+        lines.push(`### 第 ${c.id} 章《${c.title}》`)
+        if (c.summary) lines.push(c.summary)
+        if (c.content) lines.push('', c.content.slice(-600))
+      }
+    }
+    return lines.join('\n')
+  },
+}
+
+const planTool = {
+  name: 'novel_desk_plan',
+  description: '为「下一章」生成一份精确的工作单：目标章号、预设章/字数目标、必须延续的时间线/事实/伏笔/冲突、上一章结尾、以及要求产出的 JSON 结构。作者说“写下一章/补下一章时间线/做下一章大纲”时先调用它，然后按工作单产出内容并调用 novel_desk_propose 提交提案，不要直接改账本。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      chapter: { type: 'integer', minimum: 1, maximum: 999, description: '目标章号；省略则自动取下一章' },
+    },
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const bundle = await getBundle(defaultRoot(), project.id)
+    const chapter = Number.isInteger(args?.chapter) ? args.chapter : (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1)
+    const preset = bundle.presets[0] ?? {}
+    const prev = bundle.chapters.find((c) => Number(c.id) === chapter - 1)
+    const lines = [`# 工作单 · 第 ${chapter} 章`, '']
+    lines.push(`作品：${bundle.project.name}（${bundle.project.genre || '未填类型'}）`)
+    lines.push(`目标：${preset.chapterWords || bundle.project.targetWords || 3000} 字左右；全书计划 ${preset.plannedChapters || bundle.project.targetChapters || '未设'} 章`)
+    lines.push(`写作口径：${preset.pov || bundle.project.pov || '—'} / ${preset.tense || bundle.project.tense || '—'} / ${preset.tone || '—'}`)
+    lines.push(`风格规则：${Array.isArray(preset.styleRules) ? preset.styleRules.join('；') : '—'}`)
+    lines.push(`禁忌：${Array.isArray(preset.taboo) ? preset.taboo.join('；') : '—'}`)
+    lines.push('', '## 必须延续的既有事实')
+    for (const f of bundle.facts.slice(-20)) lines.push(`- ${f.subject} · ${f.attribute} = ${f.value}（第${f.chapter ?? '?'}章）`)
+    lines.push('', '## 时间线（最近）')
+    for (const e of bundle.events.slice(-12)) lines.push(`- [第${e.chapter ?? '?'}章 ｜ ${e.storyTime ?? '时间未填'}] ${e.title}`)
+    const openForeshadow = bundle.foreshadow.filter((f) => f.status !== 'paid' && f.status !== 'dropped')
+    lines.push('', '## 未回收伏笔')
+    for (const f of openForeshadow) lines.push(`- ${f.title}（第${f.setupChapter ?? '?'}章埋，第${f.payoffChapter ?? '?'}章收）`)
+    lines.push('', '## 进行中的冲突')
+    for (const c of bundle.conflicts.filter((x) => x.status === 'active')) lines.push(`- ${c.title}：${c.stakes ?? ''}`)
+    if (prev) {
+      lines.push('', `## 上一章结尾（第 ${prev.id} 章《${prev.title}》）`)
+      lines.push(prev.content ? prev.content.slice(-500) : '（上一章还没有正文）')
+    }
+    lines.push('', '## 输出要求')
+    lines.push('只输出严格 JSON：')
+    lines.push('```json')
+    lines.push(`{"title":"第 ${chapter} 章标题","summary":"一句话","storyTime":"","location":"","characters":[],"beats":["节拍"],"events":[{"title":"","chapter":${chapter},"storyTime":"","location":"","participants":[],"summary":"","consequences":"","importance":"normal"}],"facts":[{"subject":"","attribute":"","value":"","chapter":${chapter},"note":""}],"foreshadow":[{"title":"","setupChapter":${chapter},"payoffChapter":0,"status":"open","note":""}]}`)
+    lines.push('```')
+    lines.push(`产出后调用 novel_desk_propose(kind="plan", chapter=${chapter}, title=..., data=上面的 JSON)。作者在工作台「提案」页对比后采纳。不要直接调用 novel_desk_upsert 改账本。`)
+    return lines.join('\n')
+  },
+}
+
+const proposeTool = {
+  name: 'novel_desk_propose',
+  description: '把 AI 生成的内容作为「提案」提交到工作台，等待作者在 UI 里对比采纳。用于下一章方案（kind=plan）、章节正文（kind=chapter）、时间线事件（kind=events）、事实（kind=facts）、人物（kind=characters）、伏笔（kind=foreshadow）。采纳动作由作者在 UI 点击完成，提交本身不改账本。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称' },
+      kind: { type: 'string', enum: ['plan', 'chapter', 'events', 'facts', 'characters', 'foreshadow', 'highlights', 'custom'], description: '提案类型' },
+      chapter: { type: 'integer', minimum: 1, maximum: 999, description: '章号' },
+      title: { type: 'string', description: '提案标题' },
+      summary: { type: 'string', description: '一句话摘要' },
+      data: { type: 'object', description: 'plan/chapter 用：完整 JSON（title/summary/content/events/facts/foreshadow…）' },
+      items: { type: 'array', description: 'events/facts/characters/foreshadow/highlights 用：条目数组', items: { type: 'object' } },
+      rationale: { type: 'string', description: '为什么这样写' },
+    },
+    additionalProperties: false,
+    required: ['kind', 'title'],
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const proposal = await createProposal(defaultRoot(), project.id, {
+      kind: args?.kind,
+      chapter: args?.chapter,
+      title: args?.title,
+      summary: args?.summary,
+      data: args?.data,
+      items: args?.items,
+      rationale: args?.rationale,
+    })
+    return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。\n作者需在工作台「提案」页对比后点采纳；采纳前不会改动任何账本或正文。`
+  },
+}
+
+const reviewTool = {
+  name: 'novel_desk_review',
+  description: '提交对某一章的审稿意见（写入工作台「审稿」）。每条含维度、严重度、问题、建议；作者可在 UI 里标记已修/忽略，也可让 AI 汇总修订单。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称' },
+      chapter: { type: 'integer', minimum: 1, maximum: 999, description: '章号' },
+      reviews: {
+        type: 'array',
+        description: '审稿意见数组',
+        items: {
+          type: 'object',
+          properties: {
+            dimension: { type: 'string', description: '情节/人物/文笔/连续性/节奏/对话/世界观/主题' },
+            severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'suggestion'] },
+            issue: { type: 'string' },
+            suggestion: { type: 'string' },
+          },
+        },
+      },
+    },
+    additionalProperties: false,
+    required: ['chapter', 'reviews'],
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const reviews = Array.isArray(args?.reviews) ? args.reviews : []
+    for (const review of reviews) {
+      await upsertEntity(defaultRoot(), project.id, 'reviews', { ...review, chapter: args?.chapter, source: 'ai', status: 'open' })
+    }
+    return `已写入 ${reviews.length} 条审稿意见到第 ${args?.chapter} 章。作者可在工作台「审稿」页处理。`
+  },
+}
+
+const upsertTool = {
+  name: 'novel_desk_upsert',
+  description: '直接写入工作台数据（仅在作者明确要求“直接改”时使用）：章节/事实/事件/伏笔/冲突/人物/高光/预设/审稿/分工。AI 生成的内容应优先用 novel_desk_propose 提交提案。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；kind=project 时省略' },
+      kind: { type: 'string', enum: ['project', 'chapter', 'facts', 'events', 'foreshadow', 'conflicts', 'characters', 'highlights', 'presets', 'reviews', 'agents'], description: '数据类型' },
+      item: { type: 'object', description: '数据内容，有 id 则更新、无 id 则新增' },
+    },
+    additionalProperties: false,
+    required: ['kind', 'item'],
+  },
+  output: textOutput,
+  async execute(args) {
+    const kind = String(args?.kind ?? '')
+    if (kind === 'project') {
+      const project = await createProject(defaultRoot(), args?.item ?? {})
+      return `已创建作品《${project.name}》（id: ${project.id}）。`
+    }
+    const project = await requireProject(args?.project)
+    if (kind === 'chapter') {
+      const chapter = await saveChapter(defaultRoot(), project.id, args?.item ?? {})
+      return `已写入章节：第 ${chapter.id} 章《${chapter.title}》 ${chapter.words} 字。`
+    }
+    const item = await upsertEntity(defaultRoot(), project.id, kind, args?.item ?? {})
+    return `已写入 ${kind}：${item.title ?? item.name ?? item.id}（id: ${item.id}）`
+  },
+}
+
+export function apply(ctx) {
+  mountRoute(ctx)
+  ctx.tools.register(projectsTool)
+  ctx.tools.register(bundleTool)
+  ctx.tools.register(contextTool)
+  ctx.tools.register(planTool)
+  ctx.tools.register(proposeTool)
+  ctx.tools.register(reviewTool)
+  ctx.tools.register(upsertTool)
+}
