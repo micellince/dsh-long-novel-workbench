@@ -1,7 +1,7 @@
 # HANDOVER · 长篇中文小说工作台
 
 > 交接时间：2026-10-22 凌晨（Asia/Shanghai）
-> 当前版本：**v0.4.0**（代码完成、测试全绿；**尚未发布到 npm**，npm `latest` 仍是 0.3.1）
+> 当前版本：**v0.4.0**（代码完成、测试全绿、**npm 已发布，latest = 0.4.0**）
 > 工作区：`/Users/micellince/Documents/deepseek-harness/dsh-long-novel-workbench`
 > GitHub：https://github.com/micellince/dsh-long-novel-workbench
 > npm：https://www.npmjs.com/package/dsh-long-novel-workbench
@@ -24,8 +24,8 @@
 | 项 | 状态 |
 |---|---|
 | 代码 | v0.4.0，commit `16a68f5`（tag `v0.4.0`），已推 `origin/main`；`npm test` 32 个真实用例全绿 |
-| npm | **未发布 0.4.0（阻塞：token 需要 OTP）**；`latest` 仍是 `0.3.1`。详见下方「npm 发布阻塞」 |
-| GitHub Release | 最新是 `v0.3.1`；v0.4.0 tag 已推，release 等 npm 发布后再建 |
+| npm | **已发布 0.4.0**，`latest` = 0.4.0（由 tag `v0.4.0` 触发的 Publish workflow 完成）。本地再跑 `npm publish` 会报「版本已存在」，属正常 |
+| GitHub Release | **v0.4.0 已建**，附免版本号 tarball；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
 | 社区目录 | PR #8520 已开、只加一个 YAML 文件；`PR check` 已通过，`Submission gate` 因仓库未满 24h 暂时失败；仓库创建于 2026-10-21 22:50，**24h 门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
 | 自动化测试 | `test/`：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
@@ -33,14 +33,13 @@
 | 浏览器截图 | **已换成 v0.4 真实截图**：总览 / 时间线泳道 / 预设 / 关系图 / 章节历史 / 导入（`docs/screenshots/`） |
 | 真实浏览器验收 | **已做**：临时 `accept` profile + 本地 link + 无头 Chrome 155（CDP），自动点检关系图/泳道/历史/自动保存/批量/导入/导出，0 exception、0 error。详见 `docs/releases/v0.4.0.md` 第三节 |
 
-### npm 发布阻塞（2026-10-22 00:40）
+### npm 0.4.0 发布记录（已解决）
 
-- token 已保存到本机安全路径：`~/.dsh-secrets/npm-token-dsh-long-novel-workbench`（`chmod 600`，目录 `700`）；同时配成了 GitHub repo secret `NPM_TOKEN`。
-- 但触发 publish workflow 后 npm 返回 **`EOTP`：This operation requires a one-time password** —— 这个 token 不是「Bypass 2FA」类型，CI 里无法输入 OTP。
-- 需要二选一才能发 0.4.0：
-  1. 提供一个新的 **granular token 并勾选 Bypass 2FA**（替换本地安全文件 + `gh secret set NPM_TOKEN`，再 `gh run rerun` publish workflow）；
-  2. 或者在本机交互执行 `npm publish --access public`，按提示完成 WebAuthn / OTP。
-- 发布成功后：`npm view dsh-long-novel-workbench version` 应为 0.4.0，然后建 GitHub Release `v0.4.0`（release notes 用 `docs/releases/v0.4.0.md`，tarball 用 `npm pack`）。
+- **0.4.0 已发布成功**：`npm view dsh-long-novel-workbench version` → `0.4.0`，`latest` → `0.4.0`。
+- 实际发布路径是 **tag 触发的 GitHub Actions**（`.github/workflows/publish.yml`，tag `v0.4.0`，run `39636747121`，14s success），使用 repo secret `NPM_TOKEN`。
+- 本机安全文件 `~/.dsh-secrets/npm-token-dsh-long-novel-workbench`（600）与 secret 同源；token 可用。**本地再 publish 同一版本会报「cannot publish over previously published versions」，这不是权限问题。**
+- 以后发版推荐流程：`npm version patch|minor` → 提交 → `git tag vX.Y.Z` → `git push origin main --tags` → 等 Publish workflow → `npm pack` + `gh release create`。
+- 如确实要在本地直接发：先 `npm view ... version` 确认版本未存在，再用带 Bypass 2FA 的 granular token；或者交互式 `npm publish` 走 WebAuthn/OTP（本机安全密钥注册曾失败，优先走 CI）。
 
 ### 关键路径
 
@@ -220,10 +219,7 @@ v0.4 没做这一步（Host 未重载 + 没拿到 authenticated URL）。下一�
 
 ### P0 · 发布与收尾
 
-1. **发 0.4.0（唯一阻塞项）**：
-   - 当前 `NPM_TOKEN`（`~/.dsh-secrets/npm-token-dsh-long-novel-workbench` 与 GitHub secret 同源）不是 Bypass 2FA 类型，publish workflow 报 `EOTP`；
-   - 换一个勾选 Bypass 2FA 的 granular token（更新本地安全文件 + `gh secret set NPM_TOKEN`，再 `gh run rerun 39636747121`），或本机交互 `npm publish --access public` 走 WebAuthn/OTP；
-   - 发布后：`npm view` 确认为 0.4.0 → `npm pack` → `gh release create v0.4.0 --notes-file docs/releases/v0.4.0.md ...` → 同步 PUBLISHING/README/HANDOVER。
+1. ~~发 0.4.0~~ **已完成**：npm 0.4.0 已上线；GitHub Release `v0.4.0` 已建（tarball 稳定链接）。
 2. **社区目录 PR #8520**：2026-10-22 22:50 后 gate 应自动转绿；转绿后确认目录页能搜到。
 3. ~~真实浏览器验收 + 换截图~~：**已完成**（见第 2 节与 `docs/releases/v0.4.0.md` 第三节）。
 4. ~~在真 GitHub Actions 上跑 CI~~：**已完成**，Node 22/24 全绿。
@@ -253,7 +249,7 @@ v0.4 没做这一步（Host 未重载 + 没拿到 authenticated URL）。下一�
 2. `git status` + `git log --oneline -5` 确认版本（v0.4.0 应已提交/推送）；
 3. 先跑 `npm test` 和两个 `node --check`，确认基线；
 4. 如果要做 UI：先按第 4 节重载 Host（`plugin_manager set_bundle`）再刷新页面，否则新 op 会 404；
-5. 如果要发版：先跑 `npm view dsh-long-novel-workbench version`（应还是 0.3.1），再按 `PUBLISHING.md` 发 0.4.0；
+5. 如果要发版：先跑 `npm view dsh-long-novel-workbench version`（应已是 0.4.0），改版本后走 tag → CI 发布，**不要**对已存在版本重跑本地 publish；
 6. 不要读 `~/StoryProject` 的正文来写测试数据——插件是通用的，用 `STORY_DESK_ROOT=/tmp/...` 自建临时作品。
 
 ---
