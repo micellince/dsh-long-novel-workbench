@@ -87,13 +87,24 @@ projects/<id>/.backups/             ← 采纳正文提案前的旧稿备份
 
 ## 安装
 
-从 npm（发布后）：
+**方式一：GitHub Release tarball（当前可用，无需 npm）**
 
 ```sh
-dsh plugin --profile web add dsh-long-novel-workbench
+dsh plugin --profile <你的 profile> add \
+  https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz
 ```
 
-或本地安装：
+也可以在 DSH 的插件安装框里直接粘贴上面这个 tarball 链接。
+
+**方式二：npm（发布后可用，最方便）**
+
+```sh
+dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
+```
+
+发布后，在 DSH 的「插件」里直接输入包名 `dsh-long-novel-workbench` 即可安装。
+
+**方式三：本地目录**
 
 ```
 plugin_manager({ action: "install_bundle", target: "/绝对路径/dsh-long-novel-workbench" })
@@ -119,3 +130,8 @@ plugin_manager({ action: "install_bundle", target: "/绝对路径/dsh-long-novel
 ## License
 
 MIT
+
+## 相关
+
+- 仓库：<https://github.com/micellince/dsh-long-novel-workbench>
+- 发布说明：[PUBLISHING.md](PUBLISHING.md)
