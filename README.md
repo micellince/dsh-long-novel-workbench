@@ -24,6 +24,10 @@
 
 ![预设](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/03-presets.png)
 
+> 截图来自 v0.3 的真实运行界面；v0.4 新增的人物关系图、时间线泳道在对应页签切换视图即可看到。
+
+> **版本状态**：`main` 分支已经是 **v0.4.0**（关系图、时间线泳道、自动保存 + 章节历史、批量审稿/采纳、Markdown 导入、EPUB/DOCX 导出、多预设对齐等）；npm 上最新发布仍是 **0.3.1**。想现在就用 v0.4 功能，按下面「从本地源码安装」把 profile 指向本仓库；等 0.4.0 发布到 npm 后，安装步骤会自动装到新版。
+
 ## 安装（30 秒）
 
 1. 打开 DeepSeek Harness；
@@ -45,11 +49,48 @@ dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 
 > 没有 npm 网络时，也可以从 [GitHub Release](https://github.com/micellince/dsh-long-novel-workbench/releases/latest) 下载 tarball 安装。
 
+### 从本地源码安装（v0.4 开发版）
+
+```sh
+git clone https://github.com/micellince/dsh-long-novel-workbench.git
+cd dsh-long-novel-workbench
+npm test            # 可选：先确认测试全绿
+```
+
+然后让 profile 的插件指向这个目录（在 DSH 里用插件管理工具 `install_bundle`，目标填上面的绝对路径），或把本地路径加进 profile 的依赖后再重载插件。改 Host 代码（`index.js`、`lib/*.js`）后需要重载插件才生效；改 `client.js` 后刷新页面即可。
+
 ## 第一次打开
 
 - 内置一部演示作品《长夜将明》，可以随便点、随便改，玩完在「设置」里一键删掉；
 - 点右上角「＋ 新建作品」，填书名、类型、目标章数/字数，开始你自己的书；
 - 数据默认存在 `~/StoryDesk`，全是普通 Markdown/JSON 文件，能备份、能进 Git、能用别的编辑器打开。
+
+## 功能一览
+
+工作台共有 14 个页签：总览、章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、对齐、分工、预设、设置。
+
+### 写和改
+
+- **章节编辑器**：标题、状态、故事内时间、地点、出场人物、摘要、正文；停止输入 5 秒自动保存，关闭时若有未保存改动会提示。
+- **章节历史**：覆盖已有章节且内容确实变化前，旧稿自动备份（每章最多保留最近 100 份）；可以查看历史版本与当前稿的逐行 diff，并恢复到指定版本——恢复前会先把当前正文再备份一份。
+- **批量处理**：提案页支持按类型筛选、全选、批量采纳 / 批量驳回；审稿页支持按严重度筛选、全选、批量「标记已修 / 忽略」。单条失败不影响其他条目，失败项会明确提示。
+
+### 视图
+
+- **人物关系图**：人物页可切换「列表 / 关系图」。关系图是 SVG 力导向布局，支持 `名字(关系)`、`名字（关系）`、`名字:关系` 等写法；目标人物还没建卡时显示为虚线幽灵节点；节点可拖拽，悬停高亮相邻节点与边，点击打开人物编辑卡。
+- **时间线泳道**：时间线页可切换「列表 / 泳道」。按卷（没有卷信息时每 20 章）分泳道，横轴是章号；事件按重要度着色，点击可编辑；伏笔的「埋设章 → 回收章」用曲线连接（未回收实线、已回收灰色虚线）；顶部有 0.5x–3x 缩放滑块。
+- **总览与计划对齐**：章数 / 字数进度、每章偏离、事件 / 事实 / 审稿 / 提案的覆盖情况；对齐页会显示当前使用的预设。
+
+### 数据与检查
+
+- **事实账本时间维度**：事实可以填「生效章 / 失效章」（`validFrom` / `validTo`），同一属性在不同阶段合法变化不会再被一刀切报成冲突。
+- **确定性检查**（不花 token）：同一属性在重叠章段出现不同取值、伏笔过了计划回收章还没回收、章节引用了没建卡的人物、审稿里的阻断 / 严重问题、计划章节 / 字数与实际进度的偏离。
+- **多预设 / 多卷**：预设页可以把某套预设「设为当前」，对齐按当前预设计算；预设也可以带章节范围，按卷汇总计划章数与字数。
+
+### 导入与导出
+
+- **导入 Markdown**：作品库页输入本机目录路径，先扫描预览（文件数、章节数、总字数、前 20 章标题），再填作品名导入；可新建作品，也可追加到现有作品并从现有最大章号续号。递归扫描，优先按 `#` / `##` 标题切章，没有标题则一个文件一章。
+- **导出**：Markdown 合集、EPUB（EPUB 3）、DOCX。实现零依赖，EPUB 的 `mimetype` 按规范放在第一条且不压缩，DOCX 章节标题使用 `Heading1` 样式。
 
 ## AI 帮你干活的两个入口
 
@@ -62,7 +103,7 @@ dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 
 **在聊天里**：直接说「给《长夜将明》补第 3 章时间线」「审一下第 2 章」。Agent 会先调 `novel_desk_plan` 拿精确工作单，再调 `novel_desk_propose` 提交提案。
 
-所有 AI 结果都先停在「提案」里：可以 **采纳 / 提修改意见 / 让 AI 按意见重写 / 驳回**。章节正文提案带逐行 diff，采纳前自动备份旧稿。**它不会背着你改正文。**
+所有 AI 结果都先停在「提案」里：可以 **采纳 / 提修改意见 / 让 AI 按意见重写 / 驳回**，也可以批量采纳或驳回一批提案。章节正文提案带逐行 diff，采纳前自动备份旧稿。**它不会背着你改正文。**
 
 ## 9 个 Agent 分工
 
@@ -76,30 +117,50 @@ dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
   projects/<id>/
     project.json
     chapters/NNNN.md      ← frontmatter + 正文
-    facts.json            ← 事实账本
+    facts.json            ← 事实账本（可带 validFrom / validTo）
     events.json           ← 时间线
     foreshadow.json       ← 伏笔
     conflicts.json        ← 冲突
-    characters.json       ← 人物
+    characters.json       ← 人物（可带 relationships）
     highlights.json       ← 高光
     reviews.json          ← 审稿
     proposals.json        ← 提案
     agents.json           ← 9 个 Agent 分工
-    presets.json          ← 写作预设
-    .backups/             ← 采纳正文提案前的旧稿
+    presets.json          ← 写作预设（可带 chapterFrom / chapterTo 做多卷）
+    .backups/             ← 章节历史版本（每章最多 100 份）与采纳正文提案前的旧稿
 ```
 
 没有数据库，没有私有格式。停用插件，数据还在。
+目录根可以用环境变量 `STORY_DESK_ROOT` 覆盖（测试 / 多套数据时很有用）。
 
 ## 它还会替你看这些
 
-- 同一个人的同一个属性出现两个不同取值 → 事实冲突
+- 同一个属性，在生效区间重叠的章段里出现两个不同取值 → 事实冲突；不同阶段合法变化不报
 - 伏笔过了计划回收章还没回收 → 报警
 - 章节引用了没建卡的人物 → 提示
 - 审稿里的阻断/严重问题 → 进总览
 - 计划章数/字数 vs 实际进度 → 对齐页
 
 这些规则都是确定性的，不花 token。
+
+## 开发与测试
+
+需要 **Node 22+**（`^22.19.0 || >=24.0.0`）。仓库没有第三方依赖，也没有构建步骤。
+
+```sh
+git clone https://github.com/micellince/dsh-long-novel-workbench.git
+cd dsh-long-novel-workbench
+
+npm test                 # node --test test/，零依赖
+node --check index.js    # 宿主入口语法检查
+node --check client.js   # 浏览器模块语法检查
+```
+
+- 测试自己用临时目录，正常不会碰 `~/StoryDesk`；手动调试请显式隔离：`STORY_DESK_ROOT=/tmp/storydesk-dev npm test`。
+- 本地开发：让 profile 的插件指向本仓库；改 Host 代码（`index.js`、`lib/*.js`）后重载插件，改 `client.js` 后刷新页面。
+- CI 在 Node 22 / 24 上跑上面这些检查；推送 `v*` tag 会用 `NPM_TOKEN` 发布 npm（见 `.github/workflows/`）。
+
+细节（热重载、发布流程、代码风格）见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 欢迎 Star，也欢迎来骂
 

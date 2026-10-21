@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 本仓库没有第三方运行时/开发依赖，也没有锁文件，
+# 所以不要用 `npm ci` / `npm install`（会因为没有 lockfile 而失败）。
+# 直接 `npm test` 即可：测试用 node:test，零依赖。
+jobs:
+  test:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 package.json 的 engines 保持一致：^22.19.0 || >=24.0.0
+        node-version: [22, 24]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Run tests
+        run: npm test
+
+      # host 半边是 ESM 入口；client.js 是浏览器模块，只做语法检查。
+      - name: Syntax check index.js
+        run: node --check index.js
+
+      - name: Syntax check client.js
+        run: node --check client.js

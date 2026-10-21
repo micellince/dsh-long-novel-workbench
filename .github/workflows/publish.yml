@@ -1,0 +1,54 @@
+name: Publish to npm
+
+# 打 tag 触发发布：git tag v0.4.0 && git push origin v0.4.0
+# 前置条件（由发布者本人完成，Lead 统一操作）：
+#   1. package.json 的 version、本 tag、CHANGELOG.md 顶部版本三者一致；
+#   2. 仓库 Settings → Secrets and variables → Actions 里配置好 NPM_TOKEN；
+#   3. 先走一遍 CI（本工作流也会先跑测试再发布）。
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # registry-url 会让 setup-node 生成 .npmrc，
+      # 发布时读取同一步 env 里的 NODE_AUTH_TOKEN。
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      # 仓库没有依赖/锁文件，不要用 npm ci；测试零依赖。
+      - name: Run tests
+        run: npm test
+
+      # 防止 tag 与 package.json 版本不一致（例如打了 v0.4.0 却还是 0.3.1）。
+      - name: Verify tag matches package.json version
+        run: |
+          PKG_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          if [ "v${PKG_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json version ${PKG_VERSION} 不一致"
+            exit 1
+          fi
+
+      # 需要在 repo secrets 里配置 NPM_TOKEN：
+      #   - 推荐 npm granular access token（只对 dsh-long-novel-workbench 有 read/write），
+      #     账号开了 2FA 时需勾选 Bypass 2FA，否则 CLI 发布会被拦；
+      #   - GitHub Actions 里用 NODE_AUTH_TOKEN 这个环境变量名，npm 会自动读取。
+      # 以后可换成 npm trusted publishing（OIDC）：去掉 NODE_AUTH_TOKEN，
+      # 加 permissions.id-token: write 并在 npm 包设置里绑定本仓库/工作流，
+      # 这样就不需要在仓库里存长期 token 了。
+      - name: Publish
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

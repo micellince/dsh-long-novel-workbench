@@ -5,7 +5,8 @@
  * 2) Agent 工具：读上下文、生成「工作单」、提交提案/审稿、按需直写。
  */
 
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportMarkdown, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews } from './lib/store.js'
+import { scanImport, runImport } from './lib/importer.js'
 import { builtinPresets } from './lib/defaults.js'
 import { runAi } from './lib/ai.js'
 
@@ -75,6 +76,29 @@ async function handleRpc(body, ctx) {
       return saveChapter(root, String(body.projectId ?? ''), body.chapter ?? {})
     case 'chapter.delete':
       return deleteChapter(root, String(body.projectId ?? ''), String(body.chapterId ?? ''))
+    case 'chapter.history': {
+      const projectId = String(body.projectId ?? '')
+      const chapterId = String(body.chapterId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      if (!chapterId) throw new Error('缺少 chapterId')
+      return listChapterHistory(root, projectId, chapterId)
+    }
+    case 'chapter.version': {
+      const projectId = String(body.projectId ?? '')
+      const chapterId = String(body.chapterId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      if (!chapterId) throw new Error('缺少 chapterId')
+      if (!body.file) throw new Error('缺少 file')
+      return readChapterHistoryVersion(root, projectId, chapterId, String(body.file))
+    }
+    case 'chapter.restore': {
+      const projectId = String(body.projectId ?? '')
+      const chapterId = String(body.chapterId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      if (!chapterId) throw new Error('缺少 chapterId')
+      if (!body.file) throw new Error('缺少 file')
+      return restoreChapterVersion(root, projectId, chapterId, String(body.file))
+    }
     case 'entity.upsert':
       return upsertEntity(root, String(body.projectId ?? ''), String(body.kind ?? ''), body.item ?? {})
     case 'entity.delete':
@@ -89,6 +113,22 @@ async function handleRpc(body, ctx) {
       return rejectProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
     case 'proposal.feedback':
       return addProposalFeedback(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), String(body.text ?? ''))
+    case 'proposal.batchAccept': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      return batchAcceptProposals(root, projectId, Array.isArray(body.ids) ? body.ids : [])
+    }
+    case 'proposal.batchReject': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      return batchRejectProposals(root, projectId, Array.isArray(body.ids) ? body.ids : [])
+    }
+    case 'review.batchUpdate': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      if (!body.status) throw new Error('缺少 status')
+      return batchUpdateReviews(root, projectId, Array.isArray(body.ids) ? body.ids : [], { status: String(body.status) })
+    }
     case 'preset.builtin':
       return builtinPresets()
     case 'preset.add': {
@@ -98,8 +138,21 @@ async function handleRpc(body, ctx) {
     }
     case 'preset.apply':
       return applyPreset(root, String(body.projectId ?? ''), String(body.presetId ?? ''))
+    case 'import.scan': {
+      const dirPath = String(body.path ?? '').trim()
+      if (!dirPath) throw new Error('缺少 path')
+      return scanImport(root, dirPath)
+    }
+    case 'import.run':
+      return runImport(root, {
+        path: body.path,
+        projectName: body.projectName,
+        genre: body.genre,
+        mode: body.mode,
+        projectId: body.projectId,
+      })
     case 'export':
-      return exportMarkdown(root, String(body.projectId ?? ''))
+      return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
     case 'ai.run': {
       const projectId = String(body.projectId ?? '')
       if (!projectId) throw new Error('缺少 projectId')

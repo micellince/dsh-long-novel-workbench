@@ -1,0 +1,80 @@
+name: 功能建议
+description: 想要新功能、改进某个页签，或者补充检查规则 / 预设 / Agent 分工
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个工作台的设计原则是：数据是普通文件、AI 产出先进入提案、确定性检查不花 token。
+        提建议时请说明它解决的是「写长篇时的哪个具体问题」，比单纯描述功能形态更有帮助。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题 / 使用场景
+      description: 现在哪里不顺手？在写多少字的书、写到哪个阶段时遇到的？
+      placeholder: 例如：写到 200 章后，时间线列表太长，想按卷看事件。
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望的方案
+      description: 你希望它长什么样、怎么操作？有参考产品也可以说。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 相关模块
+      options:
+        - 章节 / 编辑器
+        - 时间线
+        - 事实账本
+        - 伏笔
+        - 冲突
+        - 人物
+        - 高光
+        - 审稿
+        - 提案
+        - 计划对齐
+        - 写作预设
+        - Agent 分工 / Agent 工具
+        - 导入 / 导出
+        - 界面 / 交互
+        - 测试 / 工程 / 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 你现在是怎么绕过去的？
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: 参与意愿
+      options:
+        - label: 我愿意提交 PR 实现这个功能
+          required: false
+        - label: 我可以帮忙测试 / 提供真实使用场景
+          required: false
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: 约束确认
+      description: 如果你打算提 PR，请确认这些项目约束
+      options:
+        - label: 方案不新增第三方依赖、不引入构建步骤（项目硬约束）
+          required: false
+        - label: 涉及数据模型时会保持向后兼容（旧数据仍可读取）
+          required: false

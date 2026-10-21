@@ -104,12 +104,15 @@ window.__ModuleLoader__.load({
           { k: 'attribute', t: '属性' },
           { k: 'value', t: '取值' },
           { k: 'chapter', t: '章', w: '60px' },
+          { k: 'validFrom', t: '生效区间', w: '96px', format: (v, item) => formatFactRange(item.validFrom, item.validTo) },
         ],
         fields: [
           { k: 'subject', t: '主体', type: 'text', required: true, ph: '人物 / 地点 / 组织 / 物品' },
           { k: 'attribute', t: '属性', type: 'text', required: true, ph: '年龄 / 身份 / 持有物 / 所在地' },
           { k: 'value', t: '取值', type: 'text', required: true },
           { k: 'chapter', t: '首次出现章', type: 'number' },
+          { k: 'validFrom', t: '生效章（可选）', type: 'number', ph: '从第几章起有效，空 = 第 1 章' },
+          { k: 'validTo', t: '失效章（可选）', type: 'number', ph: '到第几章为止，空 = 一直有效' },
           { k: 'note', t: '备注', type: 'textarea', rows: 2 },
           { k: 'tags', t: '标签', type: 'tags', ph: '逗号分隔' },
         ],
@@ -130,6 +133,7 @@ window.__ModuleLoader__.load({
           { k: 'storyTime', t: '故事内时间', type: 'text', ph: '如 天宝十五载六月 / 第三日清晨' },
           { k: 'location', t: '地点', type: 'text' },
           { k: 'participants', t: '参与人物', type: 'tags' },
+          { k: 'volume', t: '卷（可选）', type: 'text', ph: '如 1 / 第一卷；有值时泳道按卷分道' },
           { k: 'summary', t: '经过', type: 'textarea', rows: 3 },
           { k: 'consequences', t: '后果', type: 'textarea', rows: 2 },
           { k: 'importance', t: '重要度', type: 'select', options: [['normal', '一般'], ['major', '关键'], ['climax', '高潮']] },
@@ -329,7 +333,7 @@ window.__ModuleLoader__.load({
         }
         setBusy(true)
         try {
-          await api('entity.upsert', { projectId, kind, item: form })
+          await api('entity.upsert', { projectId, kind, item: cleanEntityPayload(kind, form) })
           onSaved()
           onClose()
         } catch (error) {
@@ -379,7 +383,9 @@ window.__ModuleLoader__.load({
     function EntityTab({ kind, bundle, projectId, onChanged }) {
       const meta = KIND_META[kind]
       const [editing, setEditing] = useState(null)
+      const [mode, setMode] = useState('list')
       const items = bundle[kind] ?? []
+      const isCharacters = kind === 'characters'
       const grid = meta.columns.map((c) => c.w || '1fr').join(' ') + ' 96px'
 
       const remove = async (item) => {
@@ -399,9 +405,16 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc)),
-          h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'),
+          h(
+            'div',
+            { className: 'sd-pagehead-actions' },
+            isCharacters ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'graph', label: '关系图' }] }) : null,
+            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'),
+          ),
         ),
-        items.length === 0
+        isCharacters && mode === 'graph'
+          ? h(RelationshipGraph, { characters: items, onEdit: (item) => setEditing(item), onCreate: (name) => setEditing({ name }) })
+          : items.length === 0
           ? h(Empty, null, `还没有${meta.title}记录。点右上角「新增」开始。`)
           : h(
               'div',
@@ -412,7 +425,7 @@ window.__ModuleLoader__.load({
                   'div',
                   { key: item.id, className: 'sd-row', style: { gridTemplateColumns: grid } },
                   meta.columns.map((c) => {
-                    const text = c.format ? String(c.format(item[c.k])) : displayValue(c.k, item[c.k])
+                    const text = c.format ? String(c.format(item[c.k], item)) : displayValue(c.k, item[c.k])
                     return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
                   }),
                   h(
@@ -453,7 +466,7 @@ window.__ModuleLoader__.load({
           h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新建章节'),
         ),
         chapters.length === 0
-          ? h(Empty, null, '还没有章节。新建一章，或让 Agent 调用 story_desk_upsert 前先建章节。')
+          ? h(Empty, null, '还没有章节。新建一章，或让 Agent 调用 novel_desk_upsert 前先建章节。')
           : h(
               'div',
               { className: 'sd-chapter-list' },
@@ -479,6 +492,15 @@ window.__ModuleLoader__.load({
     function ChapterEditor({ chapter, projectId, onClose, onSaved }) {
       const [form, setForm] = useState(() => ({ ...chapter }))
       const [busy, setBusy] = useState(false)
+      const [autoState, setAutoState] = useState('')
+      const [historyOpen, setHistoryOpen] = useState(false)
+      const [notice, setNotice] = useState('')
+      const formRef = useRef(form)
+      formRef.current = form
+      const lastSavedRef = useRef(JSON.stringify({ ...chapter }))
+      const timerRef = useRef(null)
+      const onSavedRef = useRef(onSaved)
+      onSavedRef.current = onSaved
       const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
       const words = React.useMemo(() => {
         const text = String(form.content ?? '')
@@ -486,11 +508,48 @@ window.__ModuleLoader__.load({
         const latin = (text.match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g) ?? []).length
         return cjk + latin
       }, [form.content])
+      const dirty = JSON.stringify(form) !== lastSavedRef.current
+
+      // 内容改动后 5 秒防抖自动保存（只对已存在的章节；新章节首次保存仍走手动）
+      useEffect(() => {
+        if (!form.id) return undefined
+        if (JSON.stringify(formRef.current) === lastSavedRef.current) {
+          setAutoState('')
+          return undefined
+        }
+        setAutoState('未保存…')
+        clearTimeout(timerRef.current)
+        timerRef.current = setTimeout(async () => {
+          const payload = formRef.current
+          if (!payload.id || JSON.stringify(payload) === lastSavedRef.current) return
+          setAutoState('保存中…')
+          try {
+            await api('chapter.save', { projectId, chapter: payload })
+            lastSavedRef.current = JSON.stringify(payload)
+            setAutoState(`已自动保存 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`)
+            onSavedRef.current?.()
+          } catch (error) {
+            setAutoState('自动保存失败')
+            window.alert('自动保存失败：' + error.message)
+          }
+        }, 5000)
+        return () => clearTimeout(timerRef.current)
+      }, [form, projectId])
+
+      const requestClose = () => {
+        clearTimeout(timerRef.current)
+        if (dirty && !window.confirm('还有未保存的改动，确定关闭？')) return
+        onClose()
+      }
 
       const save = async () => {
         setBusy(true)
+        clearTimeout(timerRef.current)
+        const payload = { ...form, status: form.status || 'draft' }
         try {
-          await api('chapter.save', { projectId, chapter: form })
+          await api('chapter.save', { projectId, chapter: payload })
+          lastSavedRef.current = JSON.stringify(payload)
+          setAutoState('')
           onSaved()
           onClose()
         } catch (error) {
@@ -500,36 +559,64 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const handleRestored = (restored) => {
+        if (restored && typeof restored === 'object' && Object.keys(restored).length > 0) {
+          const next = { ...formRef.current, ...restored }
+          setForm(next)
+          lastSavedRef.current = JSON.stringify(next)
+        }
+        setAutoState('')
+        setNotice('已恢复历史版本，编辑器内容已同步。')
+        onSavedRef.current?.()
+      }
+
       return h(
-        'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        React.Fragment,
+        null,
         h(
           'div',
-          { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' }, h('strong', null, form.id ? `编辑 · 第 ${form.id} 章` : '新建章节'), h('span', { className: 'sd-hint' }, `${words} 字`), h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && requestClose() },
           h(
             'div',
-            { className: 'sd-modal-body' },
+            { className: 'sd-modal sd-modal-wide' },
             h(
               'div',
-              { className: 'sd-form sd-form-2' },
-              h(Field, { label: '标题' }, h(TextInput, { value: form.title, onChange: (v) => set('title', v), placeholder: '章节标题' })),
-              h(Field, { label: '状态' }, h(Select, { value: form.status || 'draft', options: [['draft', '草稿'], ['revised', '修订'], ['final', '定稿']], onChange: (v) => set('status', v) })),
-              h(Field, { label: '故事内时间' }, h(TextInput, { value: form.storyTime, onChange: (v) => set('storyTime', v) })),
-              h(Field, { label: '地点' }, h(TextInput, { value: form.location, onChange: (v) => set('location', v) })),
-              h(Field, { label: '出场人物', hint: '逗号分隔' }, h(TextInput, { value: Array.isArray(form.characters) ? form.characters.join('、') : form.characters ?? '', onChange: (v) => set('characters', v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean)) })),
-              h(Field, { label: '摘要' }, h(TextInput, { value: form.summary, onChange: (v) => set('summary', v), placeholder: '一句话概括本章' })),
+              { className: 'sd-modal-head' },
+              h('strong', null, form.id ? `编辑 · 第 ${form.id} 章` : '新建章节'),
+              autoState ? h('span', { className: 'sd-hint sd-autosave' }, autoState) : null,
+              h('span', { className: 'sd-hint' }, `${words} 字`),
+              form.id ? h(Btn, { small: true, onClick: () => setHistoryOpen(true) }, '历史版本') : null,
+              h(IconBtn, { onClick: requestClose, title: '关闭' }, '✕'),
             ),
-            h(Field, { label: '正文' }, h(TextArea, { value: form.content, rows: 20, placeholder: '在这里写正文，或让 Agent 生成后提交。', onChange: (v) => set('content', v) })),
+            h(
+              'div',
+              { className: 'sd-modal-body' },
+              notice ? h('div', { className: 'sd-notice' }, notice) : null,
+              h(
+                'div',
+                { className: 'sd-form sd-form-2' },
+                h(Field, { label: '标题' }, h(TextInput, { value: form.title, onChange: (v) => set('title', v), placeholder: '章节标题' })),
+                h(Field, { label: '状态' }, h(Select, { value: form.status || 'draft', options: [['draft', '草稿'], ['revised', '修订'], ['final', '定稿']], onChange: (v) => set('status', v) })),
+                h(Field, { label: '故事内时间' }, h(TextInput, { value: form.storyTime, onChange: (v) => set('storyTime', v) })),
+                h(Field, { label: '地点' }, h(TextInput, { value: form.location, onChange: (v) => set('location', v) })),
+                h(Field, { label: '出场人物', hint: '逗号分隔' }, h(TextInput, { value: Array.isArray(form.characters) ? form.characters.join('、') : form.characters ?? '', onChange: (v) => set('characters', v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean)) })),
+                h(Field, { label: '摘要' }, h(TextInput, { value: form.summary, onChange: (v) => set('summary', v), placeholder: '一句话概括本章' })),
+              ),
+              h(Field, { label: '正文', hint: form.id ? '改动后 5 秒自动保存；关闭前若仍有未保存改动会提示' : '新章节请点「保存」' }, h(TextArea, { value: form.content, rows: 20, placeholder: '在这里写正文，或让 Agent 生成后提交。', onChange: (v) => set('content', v) })),
+            ),
+            h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: requestClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存')),
           ),
-          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: onClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存')),
         ),
+        historyOpen && form.id
+          ? h(ChapterHistoryDialog, { projectId, chapterId: String(form.id), currentContent: form.content, onClose: () => setHistoryOpen(false), onRestored: (restored) => { setHistoryOpen(false); handleRestored(restored) } })
+          : null,
       )
     }
 
     // ── 时间线页 ──────────────────────────────────────────────
     function TimelineTab({ bundle, projectId, onChanged }) {
       const [editing, setEditing] = useState(null)
+      const [mode, setMode] = useState('list')
       const events = [...(bundle.events ?? [])].sort((a, b) => (Number(a.chapter) || 0) - (Number(b.chapter) || 0))
       return h(
         'div',
@@ -537,10 +624,17 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '🕰️ 时间线'), h('p', { className: 'sd-desc' }, '按章排列的事件流。故事内时间用于排序与检查。')),
-          h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增事件'),
+          h('div', null, h('h2', { className: 'sd-h2' }, '🕰️ 时间线'), h('p', { className: 'sd-desc' }, '按章排列的事件流。故事内时间用于排序与检查；泳道视图按卷或每 20 章分道，并画出伏笔埋收弧线。')),
+          h(
+            'div',
+            { className: 'sd-pagehead-actions' },
+            h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'lane', label: '泳道' }] }),
+            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增事件'),
+          ),
         ),
-        events.length === 0
+        mode === 'lane'
+          ? h(TimelineLanes, { events, foreshadow: bundle.foreshadow ?? [], onEdit: (item) => setEditing(item) })
+          : events.length === 0
           ? h(Empty, null, '还没有事件。把关键剧情点记进来，时间线会自动成列。')
           : h(
               'div',
@@ -554,6 +648,7 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'sd-tl-card', onClick: () => setEditing(event) },
                     h('div', { className: 'sd-tl-head' }, h('strong', null, event.title || event.id), h(Tag, { tone: 'muted' }, EVENT_IMPORTANCE[event.importance] || '一般'), event.storyTime ? h(Tag, { tone: 'brand' }, event.storyTime) : null),
+                    event.volume !== undefined && event.volume !== null && event.volume !== '' ? h(Tag, { tone: 'brand' }, String(event.volume).includes('卷') ? String(event.volume) : `第 ${event.volume} 卷`) : null,
                     event.location ? h('div', { className: 'sd-tl-meta' }, '📍 ' + event.location) : null,
                     event.summary ? h('div', { className: 'sd-tl-text' }, event.summary) : null,
                     Array.isArray(event.participants) && event.participants.length > 0 ? h('div', { className: 'sd-tl-meta' }, '👥 ' + event.participants.join('、')) : null,
@@ -631,17 +726,10 @@ window.__ModuleLoader__.load({
     // ── 设置页 ────────────────────────────────────────────────
     function SettingsTab({ bundle, projectId, onChanged, onProjectDeleted }) {
       const [busy, setBusy] = useState(false)
-      const exportMd = async () => {
+      const exportAs = async (format) => {
         setBusy(true)
         try {
-          const value = await api('export', { projectId })
-          const blob = new Blob([value.markdown], { type: 'text/markdown;charset=utf-8' })
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = value.filename
-          a.click()
-          setTimeout(() => URL.revokeObjectURL(url), 2000)
+          await downloadExport(projectId, format)
         } catch (error) {
           window.alert(error.message)
         } finally {
@@ -669,7 +757,11 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sd-code' }, bundle.root || '~/StoryDesk'),
           h('p', { className: 'sd-hint' }, '每个作品一个目录：project.json、chapters/*.md、facts.json、events.json、foreshadow.json、conflicts.json、characters.json、highlights.json、presets.json。'),
           h('h3', { className: 'sd-h3 sd-mt' }, '导出与维护'),
-          h('div', { className: 'sd-form-actions' }, h(Btn, { onClick: exportMd, disabled: busy }, '导出 Markdown 合集')),
+          h('div', { className: 'sd-form-actions' },
+            h(Btn, { onClick: () => exportAs('md'), disabled: busy }, '导出 Markdown 合集'),
+            h(Btn, { onClick: () => exportAs('epub'), disabled: busy }, '导出 EPUB'),
+            h(Btn, { onClick: () => exportAs('docx'), disabled: busy }, '导出 DOCX'),
+          ),
           h('h3', { className: 'sd-h3 sd-mt' }, '危险操作'),
           h('div', { className: 'sd-form-actions' }, h(Btn, { kind: 'danger', onClick: removeProject, disabled: busy }, '删除本作品')),
         ),
@@ -718,6 +810,13 @@ window.__ModuleLoader__.load({
     // ── 提案页（AI 结果对比 + 采纳）────────────────────────────
     const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', custom: '自由' }
 
+    /** 去掉章节文件 frontmatter，只留正文：历史版本存的是完整文件，和编辑器里的正文对比时要先剥掉。 */
+    function stripChapterFrontmatter(text) {
+      const raw = String(text ?? '')
+      const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(raw)
+      return match ? raw.slice(match[0].length) : raw
+    }
+
     function diffLines(aText, bText) {
       const A = String(aText ?? '').split('\n')
       const B = String(bText ?? '').split('\n')
@@ -750,8 +849,43 @@ window.__ModuleLoader__.load({
       const [feedbackFor, setFeedbackFor] = useState('')
       const [feedbackText, setFeedbackText] = useState('')
       const [showDone, setShowDone] = useState(false)
-      const pending = (bundle.proposals ?? []).filter((p) => p.status === 'pending')
+      const [selected, setSelected] = useState([])
+      const [kindFilter, setKindFilter] = useState('all')
+      const [bulkBusy, setBulkBusy] = useState(false)
+      const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending')
+      const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
+      const pending = pendingAll.filter((p) => kindFilter === 'all' || p.kind === kindFilter)
+      const selectedPending = pendingAll.filter((p) => selected.includes(p.id))
       const done = (bundle.proposals ?? []).filter((p) => p.status !== 'pending')
+      const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      const allSelected = pending.length > 0 && pending.every((p) => selected.includes(p.id))
+      const toggleAll = () => {
+        if (allSelected) setSelected((prev) => prev.filter((id) => !pending.some((p) => p.id === id)))
+        else setSelected((prev) => [...new Set([...prev, ...pending.map((p) => p.id)])])
+      }
+      const bulkAct = async (action) => {
+        const ids = selectedPending.map((p) => p.id)
+        if (ids.length === 0) {
+          window.alert('请先勾选要处理的提案')
+          return
+        }
+        if (!window.confirm(`批量${action === 'accept' ? '采纳' : '驳回'} ${ids.length} 条提案？`)) return
+        setBulkBusy(true)
+        try {
+          const value = await api(action === 'accept' ? 'proposal.batchAccept' : 'proposal.batchReject', { projectId, ids })
+          const failed = value?.failed ?? []
+          const okCount = action === 'accept' ? (value?.accepted?.length ?? 0) : (value?.rejected?.length ?? 0)
+          if (failed.length > 0) {
+            window.alert(`成功 ${okCount} 条，失败 ${failed.length} 条：\n${failed.map((f) => `${f.id}：${f.error ?? '未知错误'}`).join('\n')}`)
+          }
+          setSelected([])
+          onChanged()
+        } catch (error) {
+          window.alert(`批量${action === 'accept' ? '采纳' : '驳回'}失败：${error.message}`)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
       const act = async (p, action) => {
         if (!window.confirm(`${action === 'accept' ? '采纳' : '驳回'}提案「${p.title}」？`)) return
         setBusy(p.id)
@@ -814,8 +948,20 @@ window.__ModuleLoader__.load({
           h('div', null, h('h2', { className: 'sd-h2' }, '📥 提案'), h('p', { className: 'sd-desc' }, 'AI 或 Agent 生成的内容先停在这里。可以对比、采纳、驳回；不满意就写修改意见，再让 AI 按意见重写。采纳前不会改动任何账本或正文。')),
           h(Btn, { kind: 'primary', onClick: () => onAskAi('next-chapter-plan') }, '🤖 让 AI 生成下一章方案'),
         ),
-        pending.length === 0 ? h(Empty, null, '没有待采纳的提案。可以在右上角「让 AI 操作」生成。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
+        pendingAll.length > 0 ? h('div', { className: 'sd-bulkbar' },
+          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
+          h('span', { className: 'sd-hint' }, `待采纳 ${pendingAll.length} 条，已选 ${selectedPending.length} 条`),
+          h('select', { className: 'sd-input sd-select-inline', value: kindFilter, onChange: (e) => setKindFilter(e.target.value) },
+            h('option', { value: 'all' }, '全部类型'),
+            pendingKinds.map((kind) => h('option', { key: kind, value: kind }, PROPOSAL_KIND[kind] ?? kind))),
+          h('div', { className: 'sd-bulkbar-actions' },
+            h(Btn, { small: true, kind: 'primary', disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('accept') }, bulkBusy ? '处理中…' : `批量采纳（${selectedPending.length}）`),
+            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('reject') }, '批量驳回'),
+          ),
+        ) : null,
+        pendingAll.length === 0 ? h(Empty, null, '没有待采纳的提案。可以在右上角「让 AI 操作」生成。') : pending.length === 0 ? h(Empty, null, '当前筛选下没有待采纳的提案。换个类型看看。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
           h('div', { className: 'sd-proposal-head' },
+            h('label', { className: 'sd-cb sd-cb-only', title: '选择该提案' }, h('input', { type: 'checkbox', checked: selected.includes(p.id), onChange: () => toggle(p.id) })),
             h(Tag, { tone: 'brand' }, PROPOSAL_KIND[p.kind] ?? p.kind),
             h(Tag, { tone: 'muted' }, p.chapter ? `第 ${p.chapter} 章` : '全书'),
             h('strong', { className: 'sd-proposal-title' }, p.title),
@@ -855,10 +1001,16 @@ window.__ModuleLoader__.load({
     function AlignmentTab({ bundle }) {
       const a = bundle.alignment
       if (!a) return h(Empty, null, '暂无对齐数据。')
+      const presets = bundle.presets ?? []
+      const activeId = bundle.project?.activePresetId
+      const activePreset = presets.find((p) => p.id === activeId)
+      const presetName = activePreset?.name || (activeId ? '未找到当前预设（可能已删除）' : a.presetName || presets[0]?.name || '未设置')
+      const presetHint = activeId ? '来自「预设」页的当前预设' : '未设置当前预设，默认使用第一套'
       const bar = (pct) => h('div', { className: 'sd-progress' }, h('div', { className: 'sd-progress-fill', style: { width: `${pct ?? 0}%` } }))
       return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '🎯 计划对齐'), h('p', { className: 'sd-desc' }, '预设计划 vs 实际产出。目标来自「预设」页的写作方案。'))),
+        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '🎯 计划对齐'), h('p', { className: 'sd-desc' }, `当前预设：${presetName}。预设计划 vs 实际产出，目标来自「预设」页的写作方案。`))),
         h('div', { className: 'sd-align-cards' },
+          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '当前预设'), h('div', { className: 'sd-align-value sd-align-value-sm', title: presetName }, presetName), h('div', { className: 'sd-hint' }, presetHint)),
           h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '章节进度'), h('div', { className: 'sd-align-value' }, `${a.actualChapters} / ${a.plannedChapters || '—'}`), bar(a.chapterProgress)),
           h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '字数进度'), h('div', { className: 'sd-align-value' }, `${a.actualWords} / ${a.totalWords || '—'}`), bar(a.wordProgress)),
           h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '每章目标'), h('div', { className: 'sd-align-value' }, a.chapterWords ? `${a.chapterWords} 字` : '未设置'), h('div', { className: 'sd-hint' }, '在「预设」里设置')),
@@ -932,18 +1084,19 @@ window.__ModuleLoader__.load({
 
 
     // ── 预设页（作品预设 + 名家风格库）──────────────────────────
-    function PresetCard({ preset, mode, busy, onEdit, onApply, onDelete, onAdd }) {
+    function PresetCard({ preset, mode, busy, current, onEdit, onApply, onDelete, onAdd }) {
       const total = preset.plannedChapters && preset.chapterWords ? preset.plannedChapters * preset.chapterWords : preset.totalWords
       const actions = mode === 'builtin'
         ? [h(Btn, { key: 'add', kind: 'primary', small: true, disabled: busy, onClick: onAdd }, busy ? '添加中…' : '添加到作品')]
         : [
             h(Btn, { key: 'edit', small: true, onClick: onEdit }, '编辑'),
-            h(Btn, { key: 'apply', small: true, onClick: onApply }, '设为作品目标'),
+            h(Btn, { key: 'apply', small: true, kind: current ? undefined : 'primary', onClick: onApply }, current ? '重新应用目标' : '设为当前'),
             h(Btn, { key: 'del', small: true, kind: 'danger', onClick: onDelete }, '删除'),
           ]
-      return h('div', { className: 'sd-preset-card' },
+      return h('div', { className: 'sd-preset-card' + (current ? ' sd-preset-current' : '') },
         h('div', { className: 'sd-preset-head' },
           h('strong', null, preset.name),
+          current ? h(Tag, { tone: 'brand' }, '✓ 当前预设') : null,
           preset.authorStyle ? h(Tag, { tone: 'brand' }, preset.authorStyle) : null,
           preset.source === 'builtin' ? h(Tag, { tone: 'muted' }, '内置') : null),
         h('div', { className: 'sd-preset-meta' },
@@ -974,7 +1127,7 @@ window.__ModuleLoader__.load({
         } catch (error) { window.alert(error.message) } finally { setBusy('') }
       }
       const apply = async (preset) => {
-        if (!window.confirm(`把「${preset.name}」的章数/字数/类型/视角应用为作品目标？`)) return
+        if (!window.confirm(`把「${preset.name}」设为当前预设？会同时把章数/字数/类型/视角应用为作品目标。`)) return
         setBusy(preset.id)
         try {
           await api('preset.apply', { projectId, presetId: preset.id })
@@ -994,10 +1147,11 @@ window.__ModuleLoader__.load({
           h('div', null, h('h2', { className: 'sd-h2' }, '🎛️ 写作预设'), h('p', { className: 'sd-desc' }, '作品可以挂多套预设。预设里的计划章数/每章字数/总字数/结构/风格规则/禁忌/审稿重点，AI 写作与审稿都会读取。')),
           h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 自定义预设')),
         h('h3', { className: 'sd-h3' }, `当前作品预设（${(bundle.presets ?? []).length}）`),
+        (bundle.presets ?? []).length > 0 ? h('p', { className: 'sd-desc' }, `当前预设：${(bundle.presets ?? []).find((p) => p.id === bundle.project?.activePresetId)?.name || (bundle.project?.activePresetId ? '未找到（可能已删除）' : '未设置（对齐默认用第一套）')}。点「设为当前」会把该预设写为当前并应用章数/字数目标。`) : null,
         (bundle.presets ?? []).length === 0
           ? h(Empty, null, '还没有预设。从下面的名家风格库里添加一套，或自定义。')
           : h('div', { className: 'sd-preset-grid' }, (bundle.presets ?? []).map((preset) => h(PresetCard, {
-              key: preset.id, preset, mode: 'current', busy: busy === preset.id,
+              key: preset.id, preset, mode: 'current', busy: busy === preset.id, current: preset.id === bundle.project?.activePresetId,
               onEdit: () => setEditing(preset), onApply: () => apply(preset), onDelete: () => remove(preset),
             }))),
         h('h3', { className: 'sd-h3 sd-mt' }, `名家风格库（${templates.length}）`),
@@ -1011,6 +1165,811 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // ══ v0.4 新增：工具函数 ═══════════════════════════════════
+    function pad2(n) {
+      return String(n).padStart(2, '0')
+    }
+
+    function formatDateTime(value) {
+      if (!value) return ''
+      const date = new Date(value)
+      if (Number.isNaN(date.getTime())) return String(value)
+      return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+    }
+
+    // 事实生效区间文案：第3章起 / 第3–10章 / 全程；无值时返回空串（列表里不显示）
+    function formatFactRange(from, to) {
+      const hasFrom = from !== undefined && from !== null && from !== '' && Number.isFinite(Number(from))
+      const hasTo = to !== undefined && to !== null && to !== '' && Number.isFinite(Number(to))
+      if (!hasFrom && !hasTo) return ''
+      if (!hasFrom) return `至第${Number(to)}章`
+      if (!hasTo) return Number(from) <= 1 ? '全程' : `第${Number(from)}章起`
+      if (Number(from) === Number(to)) return `第${Number(from)}章`
+      return `第${Number(from)}–${Number(to)}章`
+    }
+
+    // 事实的生效区间：清空时发 null（后端 merge 写入 null，checks 把 null 当缺省），避免旧值残留
+    function cleanEntityPayload(kind, form) {
+      const item = { ...form }
+      if (kind === 'facts') {
+        for (const key of ['validFrom', 'validTo']) {
+          if (item[key] === '' || item[key] === null || item[key] === undefined) item[key] = null
+          else if (Number.isFinite(Number(item[key]))) item[key] = Number(item[key])
+        }
+      }
+      if (kind === 'events' && (item.volume === '' || item.volume === undefined)) item.volume = null
+      return item
+    }
+
+    function relationshipList(value) {
+      if (Array.isArray(value)) return value.map((s) => String(s).trim()).filter(Boolean)
+      if (typeof value === 'string' && value.trim()) return value.split(/[、,，;；\n]/).map((s) => s.trim()).filter(Boolean)
+      return []
+    }
+
+    // 关系条目：名字(关系) / 名字（关系） / 名字:关系 / 名字：关系
+    function parseRelationship(text) {
+      const raw = String(text ?? '').trim()
+      if (!raw) return null
+      const paren = raw.match(/^(.+?)[（(]([^（）()]*)[)）]$/)
+      if (paren) return { name: paren[1].trim(), relation: paren[2].trim() }
+      const colon = raw.match(/^([^:：]+)[:：](.+)$/)
+      if (colon) return { name: colon[1].trim(), relation: colon[2].trim() }
+      return { name: raw, relation: '' }
+    }
+
+    // 确定性伪随机：让关系图每次布局一致
+    function mulberry32(seed) {
+      let a = seed >>> 0
+      return function nextRandom() {
+        a = (a + 0x6d2b79f5) >>> 0
+        let t = a
+        t = Math.imul(t ^ (t >>> 15), t | 1)
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+    }
+
+    // 解析人物关系 -> 节点 + 边；目标不在人物库时生成虚线幽灵节点
+    function buildRelationshipGraph(characters) {
+      const nodes = []
+      const byName = new Map()
+      const ghosts = new Map()
+      const edges = []
+      const seen = new Set()
+      for (const character of characters ?? []) {
+        const name = String(character.name ?? '').trim()
+        if (!name) continue
+        const node = { id: 'c:' + String(character.id ?? name), name, role: character.role || 'minor', character, ghost: false }
+        nodes.push(node)
+        byName.set(name, node)
+      }
+      for (const character of characters ?? []) {
+        const source = byName.get(String(character.name ?? '').trim())
+        if (!source) continue
+        for (const raw of relationshipList(character.relationships)) {
+          const parsed = parseRelationship(raw)
+          if (!parsed || !parsed.name) continue
+          let target = byName.get(parsed.name) || byName.get(parsed.name.replace(/[（(].*$/, '').trim())
+          if (!target) {
+            const key = 'g:' + parsed.name
+            if (!ghosts.has(key)) {
+              const ghost = { id: key, name: parsed.name, role: 'ghost', character: null, ghost: true }
+              ghosts.set(key, ghost)
+              nodes.push(ghost)
+            }
+            target = ghosts.get(key)
+          }
+          if (!target || target.id === source.id) continue
+          const edgeKey = `${source.id}→${target.id}|${parsed.relation || ''}`
+          if (seen.has(edgeKey)) continue
+          seen.add(edgeKey)
+          edges.push({ id: edgeKey, source: source.id, target: target.id, relation: parsed.relation })
+        }
+      }
+      return { nodes, edges }
+    }
+
+    // 力导向布局：圆环确定性初值 + 约 80 次迭代
+    function layoutGraph(nodes, edges, width, height) {
+      const n = nodes.length
+      if (n === 0) return []
+      const index = new Map(nodes.map((node, i) => [node.id, i]))
+      const random = mulberry32(20261022)
+      const pos = nodes.map((node, i) => {
+        const angle = (i / n) * Math.PI * 2
+        const radius = Math.min(width, height) * 0.32
+        return {
+          id: node.id,
+          x: width / 2 + Math.cos(angle) * radius + (random() - 0.5) * 8,
+          y: height / 2 + Math.sin(angle) * radius + (random() - 0.5) * 8,
+        }
+      })
+      const k = Math.sqrt((width * height) / n) * 0.9
+      let temperature = Math.min(width, height) * 0.09
+      for (let iter = 0; iter < 80; iter += 1) {
+        const disp = pos.map(() => ({ x: 0, y: 0 }))
+        for (let i = 0; i < n; i += 1) {
+          for (let j = i + 1; j < n; j += 1) {
+            let dx = pos[i].x - pos[j].x
+            let dy = pos[i].y - pos[j].y
+            let d = Math.hypot(dx, dy)
+            if (d < 0.01) {
+              dx = (random() - 0.5) * 0.02
+              dy = (random() - 0.5) * 0.02
+              d = 0.01
+            }
+            const force = (k * k) / d
+            const ux = dx / d
+            const uy = dy / d
+            disp[i].x += ux * force
+            disp[i].y += uy * force
+            disp[j].x -= ux * force
+            disp[j].y -= uy * force
+          }
+        }
+        for (const edge of edges) {
+          const a = index.get(edge.source)
+          const b = index.get(edge.target)
+          if (a === undefined || b === undefined) continue
+          const dx = pos[a].x - pos[b].x
+          const dy = pos[a].y - pos[b].y
+          const d = Math.max(0.01, Math.hypot(dx, dy))
+          const force = (d * d) / k
+          const ux = dx / d
+          const uy = dy / d
+          disp[a].x -= ux * force
+          disp[a].y -= uy * force
+          disp[b].x += ux * force
+          disp[b].y += uy * force
+        }
+        for (let i = 0; i < n; i += 1) {
+          disp[i].x += (width / 2 - pos[i].x) * 0.06
+          disp[i].y += (height / 2 - pos[i].y) * 0.06
+          const d = Math.max(0.01, Math.hypot(disp[i].x, disp[i].y))
+          const stepLength = Math.min(d, temperature)
+          pos[i].x += (disp[i].x / d) * stepLength
+          pos[i].y += (disp[i].y / d) * stepLength
+          pos[i].x = Math.max(52, Math.min(width - 52, pos[i].x))
+          pos[i].y = Math.max(40, Math.min(height - 40, pos[i].y))
+        }
+        temperature *= 0.94
+      }
+      return pos
+    }
+
+    function triggerDownload(value) {
+      if (!value) throw new Error('导出返回为空')
+      let blob
+      if (value.base64) {
+        const binary = window.atob(value.base64)
+        const bytes = new Uint8Array(binary.length)
+        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+        blob = new Blob([bytes], { type: value.mime || 'application/octet-stream' })
+      } else {
+        blob = new Blob([value.markdown ?? ''], { type: value.mime || 'text/markdown;charset=utf-8' })
+      }
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = value.filename || 'export'
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 2000)
+    }
+
+    async function downloadExport(projectId, format) {
+      const value = await api('export', { projectId, format })
+      triggerDownload(value)
+      return value
+    }
+
+    function ViewToggle({ value, onChange, options }) {
+      return h('div', { className: 'sd-toggle' }, options.map((option) =>
+        h('button', {
+          key: option.value,
+          type: 'button',
+          className: `sd-toggle-btn${value === option.value ? ' sd-toggle-active' : ''}`,
+          onClick: () => onChange(option.value),
+        }, option.label),
+      ))
+    }
+
+    // ══ v0.4 新增：人物关系图 ═════════════════════════════════
+    const GRAPH_W = 900
+    const GRAPH_H = 540
+    const GRAPH_ROLE = { protagonist: '主角', antagonist: '反派', supporting: '配角', minor: '龙套' }
+
+    function RelationshipGraph({ characters, onEdit, onCreate }) {
+      const graph = React.useMemo(() => buildRelationshipGraph(characters), [JSON.stringify(characters ?? [])])
+      const [pos, setPos] = useState(() => layoutGraph(graph.nodes, graph.edges, GRAPH_W, GRAPH_H))
+      const [hover, setHover] = useState('')
+      const [drag, setDrag] = useState(null)
+      const svgRef = useRef(null)
+      const movedRef = useRef(false)
+
+      useEffect(() => {
+        setPos(layoutGraph(graph.nodes, graph.edges, GRAPH_W, GRAPH_H))
+        setHover('')
+        setDrag(null)
+      }, [graph])
+
+      const toSvg = (event) => {
+        const rect = svgRef.current?.getBoundingClientRect()
+        if (!rect || !rect.width) return { x: 0, y: 0 }
+        return { x: ((event.clientX - rect.left) / rect.width) * GRAPH_W, y: ((event.clientY - rect.top) / rect.height) * GRAPH_H }
+      }
+
+      useEffect(() => {
+        if (!drag) return undefined
+        const onMove = (event) => {
+          if (Math.hypot(event.clientX - drag.cx, event.clientY - drag.cy) > 3) movedRef.current = true
+          const point = toSvg(event)
+          setPos((prev) => prev.map((item) => (item.id === drag.id
+            ? { id: item.id, x: Math.max(46, Math.min(GRAPH_W - 46, point.x + drag.dx)), y: Math.max(36, Math.min(GRAPH_H - 36, point.y + drag.dy)) }
+            : item)))
+        }
+        const onUp = () => setDrag(null)
+        window.addEventListener('mousemove', onMove)
+        window.addEventListener('mouseup', onUp)
+        return () => {
+          window.removeEventListener('mousemove', onMove)
+          window.removeEventListener('mouseup', onUp)
+        }
+      }, [drag])
+
+      if ((characters ?? []).length === 0) {
+        return h(Empty, null, '还没有人物卡。先在「列表」里新建人物，再回来看关系图。')
+      }
+
+      const posById = new Map(pos.map((item) => [item.id, item]))
+      const neighborIds = new Set()
+      if (hover) {
+        neighborIds.add(hover)
+        for (const edge of graph.edges) {
+          if (edge.source === hover) neighborIds.add(edge.target)
+          if (edge.target === hover) neighborIds.add(edge.source)
+        }
+      }
+
+      const edgeEls = graph.edges.map((edge) => {
+        const a = posById.get(edge.source)
+        const b = posById.get(edge.target)
+        if (!a || !b) return null
+        const active = Boolean(hover && (edge.source === hover || edge.target === hover))
+        const dim = Boolean(hover && !active)
+        return h(
+          'g',
+          { key: edge.id, style: { opacity: dim ? 0.18 : 1 } },
+          h('line', { className: 'sd-graph-edge' + (active ? ' sd-graph-edge-hot' : ''), x1: a.x, y1: a.y, x2: b.x, y2: b.y }),
+          edge.relation ? h('text', { className: 'sd-graph-edge-label', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 4 }, edge.relation) : null,
+        )
+      })
+
+      const nodeEls = graph.nodes.map((node) => {
+        const point = posById.get(node.id)
+        if (!point) return null
+        const dim = Boolean(hover && !neighborIds.has(node.id))
+        const roleClass = node.ghost ? 'sd-graph-role-ghost' : 'sd-graph-role-' + (node.role || 'minor')
+        return h(
+          'g',
+          {
+            key: node.id,
+            className: `sd-graph-node ${roleClass}${node.ghost ? ' sd-graph-node-ghost' : ''}${hover === node.id ? ' sd-graph-node-hot' : ''}`,
+            style: { opacity: dim ? 0.28 : 1 },
+            transform: `translate(${point.x},${point.y})`,
+            onMouseEnter: () => setHover(node.id),
+            onMouseLeave: () => setHover(''),
+            onMouseDown: (event) => {
+              event.preventDefault()
+              movedRef.current = false
+              const point2 = toSvg(event)
+              setDrag({ id: node.id, dx: point.x - point2.x, dy: point.y - point2.y, cx: event.clientX, cy: event.clientY })
+            },
+            onClick: () => {
+              if (movedRef.current) {
+                movedRef.current = false
+                return
+              }
+              if (node.ghost) onCreate(node.name)
+              else onEdit(node.character)
+            },
+          },
+          h('circle', { r: node.ghost ? 15 : 17 }),
+          h('text', { y: 30 }, node.name),
+          node.ghost ? h('text', { className: 'sd-graph-ghost-tip', y: 44 }, '待建卡') : null,
+        )
+      })
+
+      return h(
+        'div',
+        { className: 'sd-graph' },
+        h(
+          'div',
+          { className: 'sd-graph-legend' },
+          h('span', { className: 'sd-graph-legend-title' }, `人物 ${graph.nodes.filter((node) => !node.ghost).length} · 关系 ${graph.edges.length}`),
+          ['protagonist', 'antagonist', 'supporting', 'minor'].map((role) => h('span', { key: role }, h('i', { className: 'sd-dot sd-dot-' + role }), GRAPH_ROLE[role])),
+          h('span', null, h('i', { className: 'sd-dot sd-dot-ghost' }), '幽灵节点（人物库未建卡）'),
+          graph.edges.length === 0 ? h('span', { className: 'sd-hint' }, '在人物卡的「关系」里填「华羽生(师徒)」这样的条目即可连线') : null,
+        ),
+        h(
+          'div',
+          { className: 'sd-graph-wrap' },
+          h('svg', { ref: svgRef, viewBox: `0 0 ${GRAPH_W} ${GRAPH_H}`, className: 'sd-graph-svg' },
+            h('g', null, edgeEls),
+            h('g', null, nodeEls),
+          ),
+        ),
+        h('div', { className: 'sd-hint' }, '拖拽节点可调整位置；悬停高亮相邻节点；点击节点打开人物编辑卡，点击虚线幽灵节点可直接新建人物卡。'),
+      )
+    }
+
+    // ══ v0.4 新增：时间线泳道图 ═══════════════════════════════
+    const LANE_IMPORTANCE = { normal: '一般', major: '关键', climax: '高潮' }
+
+    function TimelineLanes({ events, foreshadow, onEdit }) {
+      const [zoom, setZoom] = useState(1)
+      const list = [...(events ?? [])].sort((a, b) => (Number(a.chapter) || 0) - (Number(b.chapter) || 0))
+      const arcs = (foreshadow ?? []).filter((item) => Number(item.setupChapter) > 0 && Number(item.payoffChapter) > 0)
+      const chapterOf = (item) => {
+        const n = Number(item.chapter)
+        return Number.isFinite(n) && n > 0 ? n : 0
+      }
+      const volumeOf = (item) => {
+        const value = item.volume
+        if (value === undefined || value === null || String(value).trim() === '') return ''
+        const text = String(value).trim()
+        if (/^\d+$/.test(text)) return `第 ${text} 卷`
+        return text
+      }
+      const hasVolume = list.some((item) => volumeOf(item))
+      const maxChapter = Math.max(
+        1,
+        ...list.map(chapterOf),
+        ...arcs.map((item) => Number(item.setupChapter) || 0),
+        ...arcs.map((item) => Number(item.payoffChapter) || 0),
+      )
+      const lanes = []
+      const laneIndexByKey = new Map()
+      const ensureLane = (key, label) => {
+        if (!laneIndexByKey.has(key)) {
+          laneIndexByKey.set(key, lanes.length)
+          lanes.push({ key, label })
+        }
+        return laneIndexByKey.get(key)
+      }
+      if (hasVolume) {
+        const volumes = [...new Set(list.map(volumeOf))].filter(Boolean)
+        volumes.sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })).forEach((volume) => ensureLane('v:' + volume, volume))
+        if (list.some((item) => !volumeOf(item))) ensureLane('v:', '未标卷')
+      } else {
+        const addChapterLane = (chapter) => {
+          if (!Number.isFinite(chapter) || chapter <= 0) return
+          const index = Math.floor((chapter - 1) / 20)
+          ensureLane('c:' + index, `第 ${index * 20 + 1}–${index * 20 + 20} 章`)
+        }
+        list.forEach((item) => addChapterLane(chapterOf(item)))
+        if (list.some((item) => !chapterOf(item))) ensureLane('c:', '未标章')
+        // 伏笔埋收章所在泳道也要有，跨泳道弧线才画得准
+        arcs.forEach((item) => {
+          addChapterLane(Number(item.setupChapter))
+          addChapterLane(Number(item.payoffChapter))
+        })
+      }
+      if (lanes.length === 0 && arcs.length > 0) {
+        const maxArcChapter = Math.max(1, ...arcs.map((item) => Number(item.payoffChapter) || 1))
+        for (let index = 0; index <= Math.floor((maxArcChapter - 1) / 20); index += 1) {
+          ensureLane('c:' + index, `第 ${index * 20 + 1}–${index * 20 + 20} 章`)
+        }
+      }
+      if (lanes.length === 0) return h(Empty, null, '还没有事件，也没有可画的伏笔。先添加事件或伏笔，再回来看泳道。')
+
+      const laneForChapter = (chapter) => {
+        const n = Number(chapter)
+        if (!Number.isFinite(n) || n <= 0) return hasVolume ? (laneIndexByKey.get('v:') ?? 0) : (laneIndexByKey.get('c:') ?? 0)
+        if (hasVolume) {
+          const owner = list.find((item) => chapterOf(item) === n && volumeOf(item))
+          if (owner) return laneIndexByKey.get('v:' + volumeOf(owner)) ?? 0
+          return 0
+        }
+        return laneIndexByKey.get('c:' + Math.floor((n - 1) / 20)) ?? 0
+      }
+
+      const step = Math.max(16, Math.round(36 * zoom))
+      const cardW = Math.max(56, Math.round(120 * zoom))
+      const cardH = Math.max(20, Math.round(34 * zoom))
+      const laneH = Math.max(46, Math.round(72 * zoom))
+      const padLeft = 104
+      const padTop = 26
+      const width = padLeft + step * maxChapter + 60
+      const height = padTop + lanes.length * laneH + 16
+      const xOf = (chapter) => padLeft + (Math.max(1, Math.min(maxChapter, Number(chapter) || 1)) - 1) * step + step / 2
+      const laneTop = (index) => padTop + index * laneH
+
+      const groups = new Map()
+      for (const event of list) {
+        const laneKey = hasVolume
+          ? (volumeOf(event) ? 'v:' + volumeOf(event) : 'v:')
+          : (chapterOf(event) ? 'c:' + Math.floor((chapterOf(event) - 1) / 20) : 'c:')
+        const lane = laneIndexByKey.get(laneKey)
+        if (lane === undefined) continue
+        const key = `${lane}|${chapterOf(event)}`
+        if (!groups.has(key)) groups.set(key, [])
+        groups.get(key).push(event)
+      }
+      const placed = new Map()
+      for (const [key, group] of groups) {
+        const [lane, chapter] = key.split('|').map(Number)
+        const count = group.length
+        const spread = count > 1 ? (laneH - cardH - 10) / (count - 1) : 0
+        group.forEach((event, index) => {
+          const offset = count > 1 ? (index - (count - 1) / 2) * Math.min(spread, cardH + 6) : 0
+          placed.set(event.id, { lane, chapter, offset })
+        })
+      }
+
+      const laneEls = lanes.map((lane, index) => h(
+        'g',
+        { key: lane.key },
+        h('rect', { className: 'sd-lane-band' + (index % 2 ? ' sd-lane-band-alt' : ''), x: 0, y: laneTop(index), width, height: laneH }),
+        h('text', { className: 'sd-lane-label', x: 10, y: laneTop(index) + laneH / 2 + 4 }, lane.label),
+      ))
+
+      const tickStep = step >= 56 ? 5 : 10
+      const tickEls = []
+      for (let chapter = 1; chapter <= maxChapter; chapter += tickStep) {
+        const x = xOf(chapter)
+        tickEls.push(h('line', { key: 'tick-' + chapter, className: 'sd-lane-tick', x1: x, y1: padTop, x2: x, y2: height - 8 }))
+        tickEls.push(h('text', { key: 'tick-label-' + chapter, className: 'sd-lane-tick-label', x, y: 14, textAnchor: 'middle' }, `第${chapter}章`))
+      }
+
+      const arcEls = arcs.map((item, index) => {
+        const laneA = laneForChapter(item.setupChapter)
+        const laneB = laneForChapter(item.payoffChapter)
+        const x1 = xOf(item.setupChapter)
+        const x2 = xOf(item.payoffChapter)
+        const y1 = laneTop(laneA) + laneH / 2
+        const y2 = laneTop(laneB) + laneH / 2
+        const paid = item.status === 'paid'
+        const lift = Math.max(26, Math.min(70, Math.abs(x2 - x1) * 0.12))
+        const path = `M ${x1} ${y1} C ${x1} ${Math.min(y1, y2) - lift}, ${x2} ${Math.min(y1, y2) - lift}, ${x2} ${y2}`
+        return h(
+          'g',
+          { key: 'arc-' + (item.id ?? index) },
+          h('path', { className: 'sd-lane-arc' + (paid ? ' sd-lane-arc-paid' : ''), d: path }),
+          h('title', null, `${item.title || '伏笔'}：第 ${item.setupChapter} 章埋 → 第 ${item.payoffChapter} 章${paid ? '收（已回收）' : '计划回收'}`),
+        )
+      })
+
+      const eventEls = list.map((event) => {
+        const spot = placed.get(event.id)
+        if (!spot) return null
+        const centerX = xOf(spot.chapter)
+        const laneCenter = laneTop(spot.lane) + laneH / 2
+        const x = centerX - cardW / 2
+        const y = laneCenter - cardH / 2 + spot.offset
+        const importance = LANE_IMPORTANCE[event.importance] ? event.importance : 'normal'
+        const label = String(event.title || '未命名事件')
+        const maxChars = Math.max(2, Math.floor((cardW - 12) / 12))
+        return h(
+          'g',
+          { key: event.id, onClick: () => onEdit(event) },
+          h('rect', { className: `sd-lane-ev sd-lane-ev-${importance}`, x, y, width: cardW, height: cardH, rx: 6 }),
+          cardW >= 66 ? h('text', { className: 'sd-lane-ev-text', x: centerX, y: y + cardH / 2 + 4, textAnchor: 'middle' }, label.length > maxChars ? label.slice(0, maxChars) + '…' : label) : null,
+          h('title', null, `${label}${spot.chapter ? `（第 ${spot.chapter} 章）` : '（未标章）'}${event.storyTime ? ' · ' + event.storyTime : ''}`),
+        )
+      })
+
+      return h(
+        'div',
+        { className: 'sd-lane' },
+        h(
+          'div',
+          { className: 'sd-lane-tools' },
+          h('span', { className: 'sd-hint' }, '缩放'),
+          h('input', { type: 'range', min: 0.5, max: 3, step: 0.1, value: zoom, className: 'sd-zoom', onChange: (e) => setZoom(Number(e.target.value)) }),
+          h('span', { className: 'sd-hint sd-zoom-value' }, `${zoom.toFixed(1)}x`),
+          h('span', { className: 'sd-hint' }, '事件：'),
+          Object.keys(LANE_IMPORTANCE).map((key) => h('span', { key, className: 'sd-lane-legend' }, h('i', { className: 'sd-lane-swatch sd-lane-ev-' + key }), LANE_IMPORTANCE[key])),
+          h('span', { className: 'sd-hint' }, '弧线：实线 = 未回收，灰色虚线 = 已回收'),
+        ),
+        h(
+          'div',
+          { className: 'sd-lane-scroll' },
+          h('svg', { className: 'sd-lane-svg', width, height, viewBox: `0 0 ${width} ${height}` },
+            h('g', null, laneEls),
+            h('g', null, tickEls),
+            h('g', null, arcEls),
+            h('g', null, eventEls),
+          ),
+        ),
+      )
+    }
+
+    // ══ v0.4 新增：批量审稿 ═══════════════════════════════════
+    function ReviewsTab({ bundle, projectId, onChanged }) {
+      const meta = KIND_META.reviews
+      const [editing, setEditing] = useState(null)
+      const [selected, setSelected] = useState([])
+      const [severityFilter, setSeverityFilter] = useState('all')
+      const [bulkBusy, setBulkBusy] = useState(false)
+      const all = bundle.reviews ?? []
+      const items = all.filter((review) => severityFilter === 'all' || review.severity === severityFilter)
+      const selectedItems = all.filter((review) => selected.includes(review.id))
+      const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 96px'
+      const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      const allSelected = items.length > 0 && items.every((review) => selected.includes(review.id))
+      const toggleAll = () => {
+        if (allSelected) setSelected((prev) => prev.filter((id) => !items.some((review) => review.id === id)))
+        else setSelected((prev) => [...new Set([...prev, ...items.map((review) => review.id)])])
+      }
+      const remove = async (review) => {
+        if (!window.confirm(`删除这条审稿意见？\n${review.issue || review.id}`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'reviews', entityId: review.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
+      const batch = async (status) => {
+        if (selectedItems.length === 0) {
+          window.alert('请先勾选审稿意见')
+          return
+        }
+        if (!window.confirm(`把 ${selectedItems.length} 条审稿标记为「${status === 'fixed' ? '已修' : '忽略'}」？`)) return
+        setBulkBusy(true)
+        try {
+          const value = await api('review.batchUpdate', { projectId, ids: selectedItems.map((review) => review.id), status })
+          const missing = value?.missing ?? []
+          if (missing.length > 0) window.alert(`已更新 ${value?.updated ?? 0} 条，${missing.length} 条未找到：${missing.join('、')}`)
+          setSelected([])
+          onChanged()
+        } catch (error) {
+          window.alert(`批量更新失败：${error.message}`)
+        } finally {
+          setBulkBusy(false)
+        }
+      }
+      return h(
+        'div',
+        { className: 'sd-page' },
+        h(
+          'div',
+          { className: 'sd-pagehead' },
+          h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 支持按严重度筛选、全选后批量标记。')),
+          h('div', { className: 'sd-pagehead-actions' }, h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增')),
+        ),
+        all.length > 0 ? h('div', { className: 'sd-bulkbar' },
+          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
+          h('span', { className: 'sd-hint' }, `共 ${all.length} 条，当前显示 ${items.length} 条，已选 ${selectedItems.length} 条`),
+          h('select', { className: 'sd-input sd-select-inline', value: severityFilter, onChange: (e) => setSeverityFilter(e.target.value) },
+            h('option', { value: 'all' }, '全部严重度'),
+            [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']].map(([value, label]) => h('option', { key: value, value }, label))),
+          h('div', { className: 'sd-bulkbar-actions' },
+            h(Btn, { small: true, kind: 'primary', disabled: bulkBusy || selectedItems.length === 0, onClick: () => batch('fixed') }, bulkBusy ? '处理中…' : `标记已修（${selectedItems.length}）`),
+            h(Btn, { small: true, disabled: bulkBusy || selectedItems.length === 0, onClick: () => batch('wontfix') }, '忽略'),
+          ),
+        ) : null,
+        items.length === 0
+          ? h(Empty, null, all.length === 0 ? '还没有审稿意见。AI 审稿或手动新增都会出现在这里。' : '当前严重度筛选下没有审稿意见。')
+          : h('div', { className: 'sd-table' },
+              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } },
+                h('div', null, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll, title: '全选当前筛选' })),
+                meta.columns.map((c) => h('div', { key: c.k }, c.t)),
+                h('div', { className: 'sd-actions-col' }, '操作')),
+              items.map((review) => h('div', { key: review.id, className: 'sd-row', style: { gridTemplateColumns: grid } },
+                h('div', { className: 'sd-row-cb' }, h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) })),
+                meta.columns.map((c) => {
+                  const text = c.format ? String(c.format(review[c.k], review)) : displayValue(c.k, review[c.k])
+                  return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
+                }),
+                h('div', { className: 'sd-row-actions' },
+                  h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
+                  h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
+              )),
+            ),
+        editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    // ══ v0.4 新增：章节历史版本 ═══════════════════════════════
+    function ChapterHistoryDialog({ projectId, chapterId, currentContent, onClose, onRestored }) {
+      const [versions, setVersions] = useState(null)
+      const [error, setError] = useState('')
+      const [selectedFile, setSelectedFile] = useState('')
+      const [version, setVersion] = useState(null)
+      const [busy, setBusy] = useState(false)
+
+      useEffect(() => {
+        let alive = true
+        setVersions(null)
+        setError('')
+        setSelectedFile('')
+        setVersion(null)
+        api('chapter.history', { projectId, chapterId }).then((value) => {
+          if (!alive) return
+          setVersions(Array.isArray(value) ? value : (value?.versions ?? []))
+        }).catch((err) => {
+          if (!alive) return
+          setVersions([])
+          setError(err.message)
+          window.alert(`读取历史版本列表失败：${err.message}`)
+        })
+        return () => { alive = false }
+      }, [projectId, chapterId])
+
+      const openVersion = async (file) => {
+        setSelectedFile(file)
+        setVersion(null)
+        try {
+          const value = await api('chapter.version', { projectId, chapterId, file })
+          setVersion(value && typeof value === 'object' ? value : null)
+        } catch (err) {
+          window.alert(`读取历史版本失败：${err.message}`)
+        }
+      }
+
+      const restore = async () => {
+        if (!version) return
+        if (!window.confirm(`用 ${formatDateTime(version.savedAt) || version.file} 的版本覆盖当前正文？覆盖前会自动备份当前正文。`)) return
+        setBusy(true)
+        try {
+          const value = await api('chapter.restore', { projectId, chapterId, file: selectedFile })
+          const chapter = value?.chapter && typeof value.chapter === 'object' ? value.chapter : {}
+          if (typeof chapter.content !== 'string' && typeof version.content === 'string') chapter.content = version.content
+          window.alert('已恢复所选版本，恢复前的正文已自动备份。')
+          onRestored(chapter)
+        } catch (err) {
+          window.alert(`恢复失败：${err.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const diff = React.useMemo(() => (version ? diffLines(currentContent ?? '', stripChapterFrontmatter(version.content)) : []), [version, currentContent])
+      const changed = diff.filter((line) => line.type !== 'same').length
+
+      return h(
+        'div',
+        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h(
+          'div',
+          { className: 'sd-modal sd-modal-wide' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, `历史版本 · 第 ${chapterId} 章`),
+            h('span', { className: 'sd-hint' }, versions ? `${versions.length} 个备份` : '读取中…'),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          h(
+            'div',
+            { className: 'sd-modal-body' },
+            error ? h('div', { className: 'sd-error sd-error-inline' }, `读取历史失败：${error}`) : null,
+            versions === null
+              ? h('p', { className: 'sd-hint' }, '读取中…')
+              : versions.length === 0 && !error
+                ? h(Empty, null, '还没有历史版本。往后再保存已有章节且正文有变化时，旧正文会自动备份到 .backups/。')
+                : h('div', { className: 'sd-history' },
+                    h('div', { className: 'sd-history-list' }, versions.map((item) => h('button', {
+                      key: item.file,
+                      type: 'button',
+                      className: `sd-history-item${selectedFile === item.file ? ' sd-history-item-active' : ''}`,
+                      onClick: () => openVersion(item.file),
+                    },
+                      h('div', null, formatDateTime(item.savedAt) || item.file),
+                      h('div', { className: 'sd-hint' }, `${item.bytes ?? '?'} 字节`)),
+                    )),
+                    h('div', { className: 'sd-history-diff' },
+                      version
+                        ? h('div', null,
+                            h('div', { className: 'sd-hint' }, `${formatDateTime(version.savedAt) || version.file} ｜ 与当前正文对比：${changed} 行不同`),
+                            h('div', { className: 'sd-diff' }, diff.slice(0, 220).map((line, index) => h('div', { key: index, className: `sd-diff-${line.type}` }, `${line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '} ${line.text}`))),
+                          )
+                        : h('p', { className: 'sd-hint' }, '点左侧某个版本查看 diff。'),
+                    ),
+                  ),
+          ),
+          h('div', { className: 'sd-modal-foot' },
+            h(Btn, { onClick: onClose }, '关闭'),
+            h(Btn, { kind: 'primary', onClick: restore, disabled: !version || busy }, busy ? '恢复中…' : '恢复此版本')),
+        ),
+      )
+    }
+
+    // ══ v0.4 新增：导入 Markdown ══════════════════════════════
+    function ImportDialog({ onClose, onImported }) {
+      const [path, setPath] = useState('')
+      const [scan, setScan] = useState(null)
+      const [name, setName] = useState('')
+      const [genre, setGenre] = useState('')
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+
+      const doScan = async () => {
+        const dir = path.trim()
+        if (!dir) {
+          window.alert('请填写本机小说目录的绝对路径')
+          return
+        }
+        setBusy('scan')
+        setError('')
+        try {
+          const value = await api('import.scan', { path: dir })
+          setScan(value)
+          if (!name.trim()) {
+            const base = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '导入作品'
+            setName(base)
+          }
+        } catch (err) {
+          setScan(null)
+          setError(err.message)
+          window.alert(`扫描失败：${err.message}`)
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const doImport = async () => {
+        if (!scan) {
+          window.alert('请先点「扫描预览」确认章节')
+          return
+        }
+        if (!name.trim()) {
+          window.alert('请填写作品名')
+          return
+        }
+        const count = scan.chapters?.length ?? 0
+        if (!window.confirm(`把 ${count} 章（约 ${scan.totalWords ?? 0} 字）导入为新作品《${name.trim()}》？`)) return
+        setBusy('run')
+        try {
+          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), genre: genre.trim(), mode: 'new' })
+          if (!value?.projectId) throw new Error('导入没有返回作品 id')
+          onImported(value.projectId)
+          onClose()
+        } catch (err) {
+          window.alert(`导入失败：${err.message}`)
+        } finally {
+          setBusy('')
+        }
+      }
+
+      return h(
+        'div',
+        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && busy !== 'run' && onClose() },
+        h(
+          'div',
+          { className: 'sd-modal sd-modal-wide' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, '⬆ 导入 Markdown 作品'),
+            h('span', { className: 'sd-hint' }, '按 # / ## 标题切章；只读扫描，不会改动原目录'),
+            h(IconBtn, { onClick: () => busy !== 'run' && onClose(), title: '关闭' }, '✕')),
+          h(
+            'div',
+            { className: 'sd-modal-body' },
+            h(Field, { label: '本机目录路径 *', hint: '例如 /Users/you/Documents/我的小说' },
+              h('div', { className: 'sd-inline-row' },
+                h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说', onChange: setPath }),
+                h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
+            error ? h('div', { className: 'sd-error sd-error-inline' }, `扫描失败：${error}`) : null,
+            scan ? h('div', { className: 'sd-import-preview' },
+              h('div', null, h('strong', null, '扫描结果：'),
+                `${scan.files?.length ?? 0} 个文件 ｜ ${scan.chapters?.length ?? 0} 章 ｜ ${scan.totalWords ?? 0} 字`),
+              h('div', { className: 'sd-hint' }, scan.path || path),
+              (scan.chapters ?? []).slice(0, 20).map((chapter, index) => h('div', { key: index, className: 'sd-import-chapter' },
+                `第 ${chapter.index ?? index + 1} 章 · ${chapter.title || '（无标题）'}${chapter.words ? ` · ${chapter.words} 字` : ''}`)),
+              (scan.chapters?.length ?? 0) > 20 ? h('div', { className: 'sd-hint' }, `… 另有 ${scan.chapters.length - 20} 章` ) : null,
+            ) : null,
+            h('div', { className: 'sd-form sd-form-2' },
+              h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
+              h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
+          ),
+          h('div', { className: 'sd-modal-foot' },
+            h(Btn, { onClick: () => busy !== 'run' && onClose() }, '取消'),
+            h(Btn, { kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : '导入并打开')),
+        ),
+      )
+    }
+
     // ── 工作台主壳 ────────────────────────────────────────────
     function Workbench() {
       const open = useOpen()
@@ -1021,7 +1980,10 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
       const [creating, setCreating] = useState(false)
+      const [importing, setImporting] = useState(false)
       const [ai, setAi] = useState(null)
+      const [exportFormat, setExportFormat] = useState('md')
+      const [exporting, setExporting] = useState(false)
 
       const refresh = useCallback(async (preferred) => {
         setBusy(true)
@@ -1066,6 +2028,18 @@ window.__ModuleLoader__.load({
         refresh(id)
       }
 
+      const doExport = async () => {
+        if (!projectId) return
+        setExporting(true)
+        try {
+          await downloadExport(projectId, exportFormat)
+        } catch (error) {
+          window.alert(`导出失败：${error.message}`)
+        } finally {
+          setExporting(false)
+        }
+      }
+
       return h(
         'div',
         { className: 'sd-backdrop', onClick: (e) => e.target === e.currentTarget && setOpen(false) },
@@ -1077,7 +2051,15 @@ window.__ModuleLoader__.load({
               : null,
             h('div', { className: 'sd-head-actions' },
               busy ? h('span', { className: 'sd-hint' }, '同步中…') : null,
+              h(Btn, { small: true, onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
               h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setAi({ task: 'next-chapter-plan', chapter: bundle ? (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1) : 1 }) }, '🤖 让 AI 操作'),
+              bundle
+                ? h('select', { className: 'sd-input sd-export-select', value: exportFormat, title: '导出格式', onChange: (e) => setExportFormat(e.target.value) },
+                    h('option', { value: 'md' }, 'Markdown'),
+                    h('option', { value: 'epub' }, 'EPUB'),
+                    h('option', { value: 'docx' }, 'DOCX'))
+                : null,
+              h(Btn, { small: true, disabled: !bundle || exporting, onClick: doExport }, exporting ? '导出中…' : '⬇ 导出'),
               h(Btn, { onClick: () => setCreating(true) }, '＋ 新建作品'),
               h(Btn, { onClick: () => refresh() }, '刷新'),
               h(IconBtn, { onClick: () => setOpen(false), title: '关闭（Esc）' }, '✕'),
@@ -1087,8 +2069,11 @@ window.__ModuleLoader__.load({
           !bundle
             ? h('div', { className: 'sd-welcome' },
                 h('h2', null, '还没有作品'),
-                h('p', null, '工作台把作品数据存成普通文件（Markdown + JSON），可直接备份、进 Git。'),
-                h(Btn, { kind: 'primary', onClick: () => setCreating(true) }, '创建第一部作品'),
+                h('p', null, '工作台把作品数据存成普通文件（Markdown + JSON），可直接备份、进 Git。也可以把已有的 Markdown 小说目录导入成新作品。'),
+                h('div', { className: 'sd-form-actions' },
+                  h(Btn, { kind: 'primary', onClick: () => setCreating(true) }, '创建第一部作品'),
+                  h(Btn, { onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
+                ),
               )
             : h('div', { className: 'sd-body' },
                 h('nav', { className: 'sd-nav' }, TABS.map((t) => h('button', { key: t.id, type: 'button', className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`, onClick: () => setTab(t.id) }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label)))),
@@ -1096,9 +2081,10 @@ window.__ModuleLoader__.load({
                   tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
-                  ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'reviews', 'agents'].includes(tab)
+                  ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'agents'].includes(tab)
                     ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId) })
                     : null,
+                  tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
@@ -1106,6 +2092,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
+          importing ? h(ImportDialog, { onClose: () => setImporting(false), onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
           ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
         ),
       )
@@ -1256,6 +2243,96 @@ window.__ModuleLoader__.load({
 .sd-preset-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
 .sd-preset-desc{font-size:12px;color:var(--dsw-alias-label-secondary,#555);line-height:1.6}
 .sd-preset-block{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:6px}
+/* v0.4：视图切换 / 批量操作 / 导出导入 */
+.sd-pagehead > .sd-pagehead-actions{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.sd-toggle{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f6f6f6)}
+.sd-toggle-btn{border:0;background:transparent;color:var(--dsw-alias-label-secondary,#666);font:inherit;font-size:11.5px;line-height:1.6;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.sd-toggle-btn:hover{color:var(--dsw-alias-label-primary,#111)}
+.sd-toggle-active{background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
+.sd-bulkbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-bulkbar-actions{display:flex;gap:8px;margin-left:auto}
+.sd-cb{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;white-space:nowrap}
+.sd-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
+.sd-cb-only{padding:0}
+.sd-row-cb{display:flex;align-items:center;justify-content:center}
+.sd-row-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
+.sd-select-inline{width:auto;min-width:110px}
+.sd-export-select{width:auto;min-width:96px;padding:4px 6px;font-size:11px}
+.sd-inline-row{display:flex;gap:8px;align-items:center}
+.sd-inline-row .sd-input{flex:1}
+.sd-error-inline{margin:8px 0;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b);font-size:12px}
+.sd-notice{padding:7px 10px;border-radius:8px;margin-bottom:10px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent);color:var(--dsw-alias-state-success-primary,#1e8449);font-size:11.5px}
+.sd-autosave{color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-preset-current{border-color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-align-value-sm{font-size:14px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* v0.4：人物关系图 */
+.sd-graph{display:flex;flex-direction:column;gap:8px}
+.sd-graph-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);padding:2px 2px 0}
+.sd-graph-legend-title{font-weight:600;color:var(--dsw-alias-label-primary,#333)}
+.sd-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.sd-dot-protagonist{background:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-dot-antagonist{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-dot-supporting{background:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-dot-minor{background:#8a8a8a}
+.sd-dot-ghost{background:transparent;border:1px dashed var(--dsw-alias-label-tertiary,#999);box-sizing:border-box}
+.sd-graph-wrap{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);padding:4px;overflow:auto}
+.sd-graph-svg{display:block;width:100%;height:auto;min-height:420px;user-select:none;touch-action:none}
+.sd-graph-edge{stroke:var(--dsw-alias-border-l1,#c9c9c9);stroke-width:1.4;fill:none}
+.sd-graph-edge-hot{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.4}
+.sd-graph-edge-label{font-size:10px;fill:var(--dsw-alias-label-tertiary,#888);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;stroke-linejoin:round;text-anchor:middle}
+.sd-graph-node{cursor:grab}
+.sd-graph-node:active{cursor:grabbing}
+.sd-graph-node circle{stroke:var(--dsw-alias-bg-base,#fff);stroke-width:2}
+.sd-graph-node text{font-size:11px;fill:var(--dsw-alias-label-primary,#222);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;text-anchor:middle;pointer-events:none}
+.sd-graph-node-hot circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.5}
+.sd-graph-role-protagonist circle{fill:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-graph-role-antagonist circle{fill:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-graph-role-supporting circle{fill:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-graph-role-minor circle{fill:#8a8a8a}
+.sd-graph-role-ghost circle{fill:transparent;stroke:var(--dsw-alias-label-tertiary,#999);stroke-width:1.6;stroke-dasharray:4 3}
+.sd-graph-node-ghost text{fill:var(--dsw-alias-label-tertiary,#888)}
+.sd-graph-ghost-tip{font-size:9px !important;fill:var(--dsw-alias-label-tertiary,#aaa) !important}
+
+/* v0.4：时间线泳道图 */
+.sd-lane{display:flex;flex-direction:column;gap:8px}
+.sd-lane-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-zoom{width:180px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer}
+.sd-zoom-value{min-width:34px;font-variant-numeric:tabular-nums}
+.sd-lane-legend{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-lane-swatch{display:inline-block;width:9px;height:9px;border-radius:2px}
+.sd-lane-swatch.sd-lane-ev-normal{background:#8fa8bd}
+.sd-lane-swatch.sd-lane-ev-major{background:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-lane-swatch.sd-lane-ev-climax{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-lane-scroll{overflow:auto;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);max-height:min(64vh,620px)}
+.sd-lane-svg{display:block}
+.sd-lane-band{fill:var(--dsw-alias-bg-layer-2,#f7f7f7)}
+.sd-lane-band-alt{fill:var(--dsw-alias-bg-base,#fff)}
+.sd-lane-label{font-size:11px;font-weight:600;fill:var(--dsw-alias-label-secondary,#555)}
+.sd-lane-tick{stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1;stroke-dasharray:2 4}
+.sd-lane-tick-label{font-size:9px;fill:var(--dsw-alias-label-tertiary,#999)}
+.sd-lane-ev{stroke:var(--dsw-alias-bg-base,#fff);stroke-width:1.5;cursor:pointer}
+.sd-lane-ev:hover{stroke:var(--dsw-alias-label-primary,#333)}
+.sd-lane-ev-normal{fill:#8fa8bd}
+.sd-lane-ev-major{fill:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-lane-ev-climax{fill:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-lane-ev-text{font-size:10px;fill:#fff;pointer-events:none}
+.sd-lane-arc{fill:none;stroke:#b08968;stroke-width:1.4;opacity:.8}
+.sd-lane-arc-paid{stroke:#9a9a9a;stroke-dasharray:5 4;opacity:.6}
+
+/* v0.4：章节历史版本 */
+.sd-history{display:grid;grid-template-columns:200px minmax(0,1fr);gap:12px;min-height:240px}
+.sd-history-list{display:flex;flex-direction:column;gap:4px;max-height:360px;overflow:auto;border-right:1px solid var(--dsw-alias-border-l2,#eee);padding-right:8px}
+.sd-history-item{text-align:left;border:1px solid transparent;background:transparent;border-radius:7px;padding:6px 8px;font:inherit;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;line-height:1.5}
+.sd-history-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05))}
+.sd-history-item-active{border-color:var(--dsw-alias-brand-primary,#247bbf);background:var(--dsw-alias-interactive-bg-selected,rgba(36,123,191,.1));color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600}
+.sd-history-diff{min-width:0}
+.sd-history-diff .sd-diff{max-height:330px}
+
+/* v0.4：导入 Markdown */
+.sd-import-preview{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);font-size:12px;display:flex;flex-direction:column;gap:5px;max-height:260px;overflow:auto;margin:4px 0 12px}
+.sd-import-chapter{font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
