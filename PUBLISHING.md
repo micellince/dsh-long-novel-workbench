@@ -27,9 +27,16 @@ DSH 插件**没有“官方登记”这一步**。一个插件要能被别人安
 - GitHub Release：`v0.3.0`，附带免版本号的 tarball
   - `https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz`
 
+## 发布状态（2026-10-21）
+
+- [x] npm 已发布：`dsh-long-novel-workbench@0.3.0`，`latest` 指向 0.3.0
+  - https://www.npmjs.com/package/dsh-long-novel-workbench
+  - 发布时账号未开 2FA，npm 自动进入 staged publishing，随后版本正常上线；`0.0.0-stage` 是暂存占位版本，不影响安装
+- [ ] 社区目录 PR（仓库满 1 天后）
+
 ## 还差两步（需要你本人操作）
 
-### 1. 发布到 npm（需要 npm 账号登录）
+### 1. 发布到 npm（已完成，保留步骤供后续版本参考）
 
 ```sh
 cd dsh-long-novel-workbench
@@ -48,6 +55,8 @@ dsh plugin --profile web add dsh-long-novel-workbench
 > 目录条目里用 `tarball:` 字段指向它即可。
 
 ### 2. 提交社区目录（仓库创建满 1 天后）
+
+> 条目已经改为使用 npm 版本（不再依赖 tarball 字段）。
 
 目录仓库：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin>
 规则：一个 PR 加一个 `data/plugins/<owner>__<repo>.yml`，仓库需满 1 天、有 `dsh.bundle`、有 `dsh-plugin` topic。
@@ -76,6 +85,15 @@ gh pr create \
 
 CI 会检查：`dsh.bundle` 存在、仓库满 1 天、YAML 格式、描述与实际代码一致。
 维护者会读源码核对描述，所以 `description` 不要写营销词、不要夸大工具数量。
+
+## 后续发版
+
+1. 改代码，`npm version patch|minor`；
+2. `npm publish`（建议用带 Bypass 2FA 的 granular token，或交互式 2FA）；
+3. `npm pack` 生成 tarball，重命名去掉版本号，`gh release create vX.Y.Z dsh-long-novel-workbench.tgz`；
+4. 目录条目不用改（npm 有新版本会自动体现）。
+
+> 注意：带 Bypass 2FA 的 granular token 不能执行 unpublish / 修改 dist-tag 等治理动作，这是 npm 的策略。
 
 ## 清单（发布前自查）
 

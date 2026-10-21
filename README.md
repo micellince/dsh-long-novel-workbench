@@ -1,5 +1,8 @@
 # 长篇中文小说工作台 · Long-form Chinese Novel Workbench
 
+[![npm version](https://img.shields.io/npm/v/dsh-long-novel-workbench.svg)](https://www.npmjs.com/package/dsh-long-novel-workbench)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 DeepSeek Harness 的通用长篇中文小说工作台插件。**不限文体、不绑定任何作品**，数据全部是普通文件，UI 与 Agent 共享同一套账本。
 
 ## 界面
@@ -87,22 +90,20 @@ projects/<id>/.backups/             ← 采纳正文提案前的旧稿备份
 
 ## 安装
 
-**方式一：GitHub Release tarball（当前可用，无需 npm）**
-
-```sh
-dsh plugin --profile <你的 profile> add \
-  https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz
-```
-
-也可以在 DSH 的插件安装框里直接粘贴上面这个 tarball 链接。
-
-**方式二：npm（发布后可用，最方便）**
+**方式一：npm（推荐）**
 
 ```sh
 dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 ```
 
-发布后，在 DSH 的「插件」里直接输入包名 `dsh-long-novel-workbench` 即可安装。
+或在 DSH 的「插件」安装框里直接输入包名 `dsh-long-novel-workbench`。
+
+**方式二：GitHub Release tarball（不发 npm 时的备用）**
+
+```sh
+dsh plugin --profile <你的 profile> add \
+  https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz
+```
 
 **方式三：本地目录**
 
