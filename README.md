@@ -10,23 +10,35 @@
 
 不限文体：武侠、悬疑、科幻、言情、文学都可以。内置金庸、古龙、梁羽生、柯南·道尔、阿加莎·克里斯蒂、东野圭吾、刘慈欣、村上春树八套风格预设，也可以自己调。
 
-## 先看三张图
+## 先看几张图
 
 **总览：一本书现在写到哪、有没有前后矛盾**
 
 ![总览](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/01-overview.png)
 
-**时间线：按章排列的事件，故事内时间、地点、参与人、后果**
+**时间线：列表 / 泳道两种视图，按章排列事件，伏笔埋收用弧线连起来**
 
-![时间线](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/02-timeline.png)
+![时间线泳道](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/02-timeline.png)
 
 **预设：计划章数、每章字数、结构、风格规则、禁忌、审稿重点，都能改**
 
 ![预设](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/03-presets.png)
 
-> 截图来自 v0.3 的真实运行界面；v0.4 新增的人物关系图、时间线泳道在对应页签切换视图即可看到。
+**人物关系图：按角色着色、可拖拽、悬停高亮邻接、关系目标未建卡时显示幽灵节点**
 
-> **版本状态**：`main` 分支已经是 **v0.4.0**（关系图、时间线泳道、自动保存 + 章节历史、批量审稿/采纳、Markdown 导入、EPUB/DOCX 导出、多预设对齐等）；npm 上最新发布仍是 **0.3.1**。想现在就用 v0.4 功能，按下面「从本地源码安装」把 profile 指向本仓库；等 0.4.0 发布到 npm 后，安装步骤会自动装到新版。
+![人物关系图](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/04-relationships.png)
+
+**章节历史：每次覆盖前自动备份，可查看与当前稿的逐行 diff 并恢复**
+
+![章节历史](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/05-chapter-history.png)
+
+**导入 Markdown：扫描本机目录、预览切章结果、导入为新作品**
+
+![导入 Markdown](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/06-import.png)
+
+> 以上截图来自 **v0.4.0 的真实运行界面**（2026-10-22，临时 DSH profile + 无头 Chrome 自动验收，使用演示数据，不含任何真实作品）。
+
+> **版本状态**：当前版本 **v0.4.0**（关系图、时间线泳道、自动保存 + 章节历史、批量审稿/采纳、Markdown 导入、EPUB/DOCX 导出、多预设对齐等）。npm 上最新发布见 [npm 页面](https://www.npmjs.com/package/dsh-long-novel-workbench)；想从源码用最新代码，按下面「从本地源码安装」把 profile 指向本仓库。
 
 ## 安装（30 秒）
 
@@ -61,8 +73,8 @@ npm test            # 可选：先确认测试全绿
 
 ## 第一次打开
 
-- 内置一部演示作品《长夜将明》，可以随便点、随便改，玩完在「设置」里一键删掉；
 - 点右上角「＋ 新建作品」，填书名、类型、目标章数/字数，开始你自己的书；
+- 已经有 Markdown 稿子？点「⬆ 导入 Markdown」，填本机目录，先扫描预览再导入（只读扫描，不改原目录）；
 - 数据默认存在 `~/StoryDesk`，全是普通 Markdown/JSON 文件，能备份、能进 Git、能用别的编辑器打开。
 
 ## 功能一览

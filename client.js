@@ -1576,12 +1576,14 @@ window.__ModuleLoader__.load({
         return laneIndexByKey.get('c:' + Math.floor((n - 1) / 20)) ?? 0
       }
 
-      const step = Math.max(16, Math.round(36 * zoom))
       const cardW = Math.max(56, Math.round(120 * zoom))
+      // 步长至少要比卡片宽，否则章节少时事件卡片会叠在一起
+      const step = Math.max(16, Math.round(36 * zoom), cardW + 12)
       const cardH = Math.max(20, Math.round(34 * zoom))
       const laneH = Math.max(46, Math.round(72 * zoom))
       const padLeft = 104
-      const padTop = 26
+      // 顶部留出伏笔弧线的空间，否则跨章弧线会被裁掉
+      const padTop = 88
       const width = padLeft + step * maxChapter + 60
       const height = padTop + lanes.length * laneH + 16
       const xOf = (chapter) => padLeft + (Math.max(1, Math.min(maxChapter, Number(chapter) || 1)) - 1) * step + step / 2
