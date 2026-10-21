@@ -23,13 +23,13 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.4.0，功能完成，`npm test` 32 个真实用例全绿（`node --test` 自动发现时多算一个空文件，共 33 pass） |
+| 代码 | v0.4.0，commit `d9cc562`，已推 `origin/main`；`npm test` 32 个真实用例全绿（`node --test` 自动发现时多算一个空文件，共 33 pass） |
 | npm | **未发布 0.4.0**；`latest` 仍是 `0.3.1`（2026-10-21 发布） |
 | GitHub Release | 最新是 `v0.3.1`（附带免版本号 tarball）；0.4.0 未打 tag |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
-| 社区目录 | PR #8520 已开、只加一个 YAML 文件；仓库创建于 2026-10-21 22:50，**24h 年龄门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
+| 社区目录 | PR #8520 已开、只加一个 YAML 文件；`PR check` 已通过，`Submission gate` 因仓库未满 24h 暂时失败；仓库创建于 2026-10-21 22:50，**24h 门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
 | 自动化测试 | `test/` 已补：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
-| CI | `.github/workflows/ci.yml`（Node 22/24：`npm test` + 两个 `node --check`）、`publish.yml`（tag `v*` 发布，需配 `NPM_TOKEN`） |
+| CI | `.github/workflows/ci.yml`（Node 22/24：`npm test` + 两个 `node --check`）、`publish.yml`（tag `v*` 发布，需配 `NPM_TOKEN`）；首次 push 已绿：<https://github.com/micellince/dsh-long-novel-workbench/actions/runs/39632560813> |
 | 浏览器截图 | 仍是 v0.3 的三张（`docs/screenshots/`）；v0.4 没来得及重截 |
 | 真实浏览器验收 | **未做**：当前 GUI 需要 authenticated URL，且运行中的 Host 仍是旧代码（新 op 会 404）。详见第 6 节 |
 
