@@ -23,15 +23,24 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.4.0，commit `d9cc562`，已推 `origin/main`；`npm test` 32 个真实用例全绿（`node --test` 自动发现时多算一个空文件，共 33 pass） |
-| npm | **未发布 0.4.0**；`latest` 仍是 `0.3.1`（2026-10-21 发布） |
-| GitHub Release | 最新是 `v0.3.1`（附带免版本号 tarball）；0.4.0 未打 tag |
+| 代码 | v0.4.0，commit `16a68f5`（tag `v0.4.0`），已推 `origin/main`；`npm test` 32 个真实用例全绿 |
+| npm | **未发布 0.4.0（阻塞：token 需要 OTP）**；`latest` 仍是 `0.3.1`。详见下方「npm 发布阻塞」 |
+| GitHub Release | 最新是 `v0.3.1`；v0.4.0 tag 已推，release 等 npm 发布后再建 |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
 | 社区目录 | PR #8520 已开、只加一个 YAML 文件；`PR check` 已通过，`Submission gate` 因仓库未满 24h 暂时失败；仓库创建于 2026-10-21 22:50，**24h 门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
-| 自动化测试 | `test/` 已补：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
-| CI | `.github/workflows/ci.yml`（Node 22/24：`npm test` + 两个 `node --check`）、`publish.yml`（tag `v*` 发布，需配 `NPM_TOKEN`）；首次 push 已绿：<https://github.com/micellince/dsh-long-novel-workbench/actions/runs/39632560813> |
-| 浏览器截图 | 仍是 v0.3 的三张（`docs/screenshots/`）；v0.4 没来得及重截 |
-| 真实浏览器验收 | **未做**：当前 GUI 需要 authenticated URL，且运行中的 Host 仍是旧代码（新 op 会 404）。详见第 6 节 |
+| 自动化测试 | `test/`：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
+| CI | CI（Node 22/24）已绿：<https://github.com/micellince/dsh-long-novel-workbench/actions/runs/39636720312> |
+| 浏览器截图 | **已换成 v0.4 真实截图**：总览 / 时间线泳道 / 预设 / 关系图 / 章节历史 / 导入（`docs/screenshots/`） |
+| 真实浏览器验收 | **已做**：临时 `accept` profile + 本地 link + 无头 Chrome 155（CDP），自动点检关系图/泳道/历史/自动保存/批量/导入/导出，0 exception、0 error。详见 `docs/releases/v0.4.0.md` 第三节 |
+
+### npm 发布阻塞（2026-10-22 00:40）
+
+- token 已保存到本机安全路径：`~/.dsh-secrets/npm-token-dsh-long-novel-workbench`（`chmod 600`，目录 `700`）；同时配成了 GitHub repo secret `NPM_TOKEN`。
+- 但触发 publish workflow 后 npm 返回 **`EOTP`：This operation requires a one-time password** —— 这个 token 不是「Bypass 2FA」类型，CI 里无法输入 OTP。
+- 需要二选一才能发 0.4.0：
+  1. 提供一个新的 **granular token 并勾选 Bypass 2FA**（替换本地安全文件 + `gh secret set NPM_TOKEN`，再 `gh run rerun` publish workflow）；
+  2. 或者在本机交互执行 `npm publish --access public`，按提示完成 WebAuthn / OTP。
+- 发布成功后：`npm view dsh-long-novel-workbench version` 应为 0.4.0，然后建 GitHub Release `v0.4.0`（release notes 用 `docs/releases/v0.4.0.md`，tarball 用 `npm pack`）。
 
 ### 关键路径
 
@@ -211,14 +220,13 @@ v0.4 没做这一步（Host 未重载 + 没拿到 authenticated URL）。下一�
 
 ### P0 · 发布与收尾
 
-1. **发 0.4.0**（需要你本人/有 token 的会话）：
-   - `npm test` 全绿后 `npm publish --access public`
-   - `npm pack` → 重命名去版本号 → `gh release create v0.4.0 ...`
-   - 确认 GitHub Actions 的 `NPM_TOKEN` secret 已配（或改 trusted publishing）
-   - 同步 PUBLISHING/README/HANDOVER 的版本状态
+1. **发 0.4.0（唯一阻塞项）**：
+   - 当前 `NPM_TOKEN`（`~/.dsh-secrets/npm-token-dsh-long-novel-workbench` 与 GitHub secret 同源）不是 Bypass 2FA 类型，publish workflow 报 `EOTP`；
+   - 换一个勾选 Bypass 2FA 的 granular token（更新本地安全文件 + `gh secret set NPM_TOKEN`，再 `gh run rerun 39636747121`），或本机交互 `npm publish --access public` 走 WebAuthn/OTP；
+   - 发布后：`npm view` 确认为 0.4.0 → `npm pack` → `gh release create v0.4.0 --notes-file docs/releases/v0.4.0.md ...` → 同步 PUBLISHING/README/HANDOVER。
 2. **社区目录 PR #8520**：2026-10-22 22:50 后 gate 应自动转绿；转绿后确认目录页能搜到。
-3. **真实浏览器验收 + 换截图**：按第 4 节方法重载 Host、拿 authenticated URL，逐项点：关系图拖拽/悬停/幽灵建卡、泳道缩放/弧线、自动保存/历史 diff/恢复、批量提案/审稿、事实区间清空、导入预览/导入、EPUB/DOCX 下载、预设当前标记。
-4. **在真 GitHub Actions 上跑一次 CI**（本地只做了 YAML 语法/结构校验）。
+3. ~~真实浏览器验收 + 换截图~~：**已完成**（见第 2 节与 `docs/releases/v0.4.0.md` 第三节）。
+4. ~~在真 GitHub Actions 上跑 CI~~：**已完成**，Node 22/24 全绿。
 
 ### P1 · 继续做厚
 
