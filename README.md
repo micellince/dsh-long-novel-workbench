@@ -32,13 +32,13 @@
 
 ![章节历史](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/05-chapter-history.png)
 
-**导入 Markdown：扫描本机目录、预览切章结果、导入为新作品**
+**导入 Markdown：整个目录或单个文件，默认一个文件一章、H1 作标题、按章号排序**
 
 ![导入 Markdown](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/06-import.png)
 
 > 以上截图来自 **v0.4.0 的真实运行界面**（2026-10-22，临时 DSH profile + 无头 Chrome 自动验收，使用演示数据，不含任何真实作品）。
 
-> **版本状态**：当前版本 **v0.4.0**（关系图、时间线泳道、自动保存 + 章节历史、批量审稿/采纳、Markdown 导入、EPUB/DOCX 导出、多预设对齐等）。npm 上最新发布见 [npm 页面](https://www.npmjs.com/package/dsh-long-novel-workbench)；想从源码用最新代码，按下面「从本地源码安装」把 profile 指向本仓库。
+> **版本状态**：当前版本 **v0.4.1**（关系图、时间线泳道、自动保存 + 章节历史、批量审稿/采纳、Markdown 导入、EPUB/DOCX 导出、多预设对齐等）。npm 上最新发布见 [npm 页面](https://www.npmjs.com/package/dsh-long-novel-workbench)；想从源码用最新代码，按下面「从本地源码安装」把 profile 指向本仓库。
 
 ## 安装（30 秒）
 
@@ -74,7 +74,7 @@ npm test            # 可选：先确认测试全绿
 ## 第一次打开
 
 - 点右上角「＋ 新建作品」，填书名、类型、目标章数/字数，开始你自己的书；
-- 已经有 Markdown 稿子？点「⬆ 导入 Markdown」，填本机目录，先扫描预览再导入（只读扫描，不改原目录）；
+- 已经有 Markdown 稿子？点「⬆ 导入 Markdown」，填本机目录（或单个 `.md` 文件），先扫描预览再导入。默认一个文件一章、`#` 标题作章节名、按中文数字章号排序，`##` 小节留在正文里；只读扫描，不改原文件；
 - 数据默认存在 `~/StoryDesk`，全是普通 Markdown/JSON 文件，能备份、能进 Git、能用别的编辑器打开。
 
 ## 功能一览

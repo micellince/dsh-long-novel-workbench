@@ -1881,6 +1881,7 @@ window.__ModuleLoader__.load({
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
     function ImportDialog({ onClose, onImported }) {
       const [path, setPath] = useState('')
+      const [split, setSplit] = useState('auto')
       const [scan, setScan] = useState(null)
       const [name, setName] = useState('')
       const [genre, setGenre] = useState('')
@@ -1896,7 +1897,7 @@ window.__ModuleLoader__.load({
         setBusy('scan')
         setError('')
         try {
-          const value = await api('import.scan', { path: dir })
+          const value = await api('import.scan', { path: dir, split })
           setScan(value)
           if (!name.trim()) {
             const base = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '导入作品'
@@ -1924,7 +1925,7 @@ window.__ModuleLoader__.load({
         if (!window.confirm(`把 ${count} 章（约 ${scan.totalWords ?? 0} 字）导入为新作品《${name.trim()}》？`)) return
         setBusy('run')
         try {
-          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), genre: genre.trim(), mode: 'new' })
+          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), genre: genre.trim(), mode: 'new', split })
           if (!value?.projectId) throw new Error('导入没有返回作品 id')
           onImported(value.projectId)
           onClose()
@@ -1943,15 +1944,21 @@ window.__ModuleLoader__.load({
           { className: 'sd-modal sd-modal-wide' },
           h('div', { className: 'sd-modal-head' },
             h('strong', null, '⬆ 导入 Markdown 作品'),
-            h('span', { className: 'sd-hint' }, '按 # / ## 标题切章；只读扫描，不会改动原目录'),
+            h('span', { className: 'sd-hint' }, '支持整个目录或单个 .md 文件；默认一个文件一章，H1 作标题；只读扫描，不会改动原文件'),
             h(IconBtn, { onClick: () => busy !== 'run' && onClose(), title: '关闭' }, '✕')),
           h(
             'div',
             { className: 'sd-modal-body' },
-            h(Field, { label: '本机目录路径 *', hint: '例如 /Users/you/Documents/我的小说' },
+            h(Field, { label: '本机路径 *', hint: '小说目录（如 .../正文）或单个 .md 文件' },
               h('div', { className: 'sd-inline-row' },
-                h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说', onChange: setPath }),
+                h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说/正文', onChange: setPath }),
                 h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
+            h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
+              h(Select, { value: split, options: [
+                { value: 'auto', label: '自动（推荐）' },
+                { value: 'file', label: '一个文件一章' },
+                { value: 'h1', label: '按一级标题 # 切章' },
+              ], onChange: setSplit })),
             error ? h('div', { className: 'sd-error sd-error-inline' }, `扫描失败：${error}`) : null,
             scan ? h('div', { className: 'sd-import-preview' },
               h('div', null, h('strong', null, '扫描结果：'),

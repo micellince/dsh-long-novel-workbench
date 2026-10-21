@@ -72,7 +72,7 @@ async function makeExportProject(t) {
 
 // ── 导入 ──────────────────────────────────────────────────────
 
-test('scanImport：递归扫描、按 # / ## 切章、无标题按文件名、空章节跳过', async (t) => {
+test('scanImport：递归扫描、默认一文件一章、H1 作标题、按章号排序、空章节跳过', async (t) => {
   const root = await makeRoot(t)
   const dir = await makeMarkdownDir(t)
   const importer = await loadImporter()
@@ -87,10 +87,10 @@ test('scanImport：递归扫描、按 # / ## 切章、无标题按文件名、�
     '契约 §3.3：扫描应跳过隐藏目录与 node_modules',
   )
 
-  assert.equal(scan.chapters.length, 4, '4 个非空文件按标题切成 4 章（空文件跳过）')
+  assert.equal(scan.chapters.length, 4, '4 个非空文件默认一文件一章（空文件跳过）')
   const titles = scan.chapters.map((c) => c.title)
   assert.equal(titles[0], '第一章 初见', '# 一级标题应作为章节标题，且 frontmatter 被忽略')
-  assert.equal(titles[1], '第二章 重逢', '## 二级标题应作为章节标题')
+  assert.equal(titles[1], 'a-02', '没有 H1 的文件以文件名为标题，## 留在正文里')
   assert.match(titles[2], /^b-03(\.md)?$/, '无标题文件应以文件名为标题')
   assert.equal(titles[3], '第三章 夜雨', '多文件时按文件名顺序切章')
   for (const row of scan.chapters) {
@@ -105,6 +105,53 @@ test('scanImport：递归扫描、按 # / ## 切章、无标题按文件名、�
     scan.totalWords === sumChapters || scan.totalWords === sumFiles,
     `scanImport.totalWords 应等于章节字数合计（${sumChapters}）或文件字数合计（${sumFiles}），实际 ${scan.totalWords}`,
   )
+})
+
+test('runImport：中文数字文件名排序，一个文件一章，## 小节保留在正文里', async (t) => {
+  const root = await makeRoot(t)
+  const dir = await mkdtemp(join(tmpdir(), 'storydesk-cn-'))
+  t.after(async () => { await rm(dir, { recursive: true, force: true }) })
+  const book = join(dir, '正文')
+  await mkdir(book, { recursive: true })
+  await writeFile(join(book, '第一章正文.md'), '# 第一回 剑影迷踪\n\n**【七律·少年下山】**\n\n诗。\n\n## 第一节 出山\n\n正文一。\n\n## 第二节 送别\n\n正文二。\n', 'utf8')
+  await writeFile(join(book, '第二章正文.md'), '# 第二回 驿道相逢\n\n## 第一节 茶棚\n\n正文三。\n', 'utf8')
+  await writeFile(join(book, '第七章正文.md'), '# 第七回 灵武即位\n\n## 第一节 安葬\n\n正文七。\n', 'utf8')
+
+  const importer = await loadImporter()
+  const scanImport = needFn(importer, 'scanImport', 'lib/importer.js')
+  const scan = await scanImport(root, book)
+  assert.equal(scan.chapters.length, 3, '3 个文件应为 3 章，不按 ## 小节切碎')
+  assert.deepEqual(scan.chapters.map((c) => c.title), ['第一回 剑影迷踪', '第二回 驿道相逢', '第七回 灵武即位'], '应按中文数字章号排序')
+
+  const runImport = needFn(importer, 'runImport', 'lib/importer.js')
+  const result = await runImport(root, { path: book, projectName: '章回体导入' })
+  const chapters = await store.listChapters(root, result.projectId)
+  assert.equal(chapters.length, 3)
+  assert.match(chapters[0].content, /## 第一节 出山/, '## 小节应保留在正文里')
+  assert.match(chapters[0].content, /## 第二节 送别/)
+  assert.equal(chapters[1].title, '第二回 驿道相逢')
+  assert.equal(chapters[2].title, '第七回 灵武即位')
+})
+
+test('runImport：单个整本 Markdown 文件按 # 自动切章，split=file 时切成一章', async (t) => {
+  const root = await makeRoot(t)
+  const dir = await mkdtemp(join(tmpdir(), 'storydesk-single-'))
+  t.after(async () => { await rm(dir, { recursive: true, force: true }) })
+  const file = join(dir, '全书.md')
+  await writeFile(file, '# 第一章 初见\n\n正文一。\n\n# 第二章 重逢\n\n正文二。\n', 'utf8')
+
+  const importer = await loadImporter()
+  const scanImport = needFn(importer, 'scanImport', 'lib/importer.js')
+  const runImport = needFn(importer, 'runImport', 'lib/importer.js')
+
+  const scan = await scanImport(root, file)
+  assert.equal(scan.chapters.length, 2, '单文件多 H1 应自动切 2 章')
+  assert.deepEqual(scan.chapters.map((c) => c.title), ['第一章 初见', '第二章 重逢'])
+
+  const asOne = await runImport(root, { path: file, projectName: '整本一章', split: 'file' })
+  const oneChapter = await store.listChapters(root, asOne.projectId)
+  assert.equal(oneChapter.length, 1, 'split=file 时整本文件应只导入一章')
+  assert.match(oneChapter[0].content, /# 第二章 重逢/, '未切章时后续 H1 留在正文里')
 })
 
 test('runImport（new）：新建作品并写入章节，字数与 listChapters 一致', async (t) => {

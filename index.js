@@ -141,7 +141,7 @@ async function handleRpc(body, ctx) {
     case 'import.scan': {
       const dirPath = String(body.path ?? '').trim()
       if (!dirPath) throw new Error('缺少 path')
-      return scanImport(root, dirPath)
+      return scanImport(root, dirPath, { split: body.split })
     }
     case 'import.run':
       return runImport(root, {
@@ -150,6 +150,7 @@ async function handleRpc(body, ctx) {
         genre: body.genre,
         mode: body.mode,
         projectId: body.projectId,
+        split: body.split,
       })
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')

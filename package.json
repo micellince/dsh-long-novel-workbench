@@ -1,6 +1,6 @@
 {
   "name": "dsh-long-novel-workbench",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "长篇中文小说工作台：章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、9 个 Agent 分工、名家风格预设与 AI 生成/审稿。",
   "type": "module",
   "main": "index.js",

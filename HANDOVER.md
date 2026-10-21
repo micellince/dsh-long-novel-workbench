@@ -1,7 +1,7 @@
 # HANDOVER · 长篇中文小说工作台
 
 > 交接时间：2026-10-22 凌晨（Asia/Shanghai）
-> 当前版本：**v0.4.0**（代码完成、测试全绿、**npm 已发布，latest = 0.4.0**）
+> 当前版本：**v0.4.1**（修复目录导入切章/排序；npm 已发布 0.4.1）
 > 工作区：`/Users/micellince/Documents/deepseek-harness/dsh-long-novel-workbench`
 > GitHub：https://github.com/micellince/dsh-long-novel-workbench
 > npm：https://www.npmjs.com/package/dsh-long-novel-workbench
@@ -23,7 +23,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.4.0，commit `16a68f5`（tag `v0.4.0`），已推 `origin/main`；`npm test` 32 个真实用例全绿 |
+| 代码 | v0.4.1，tag `v0.4.1`；`npm test` 35 个用例全绿 |
 | npm | **已发布 0.4.0**，`latest` = 0.4.0（由 tag `v0.4.0` 触发的 Publish workflow 完成）。本地再跑 `npm publish` 会报「版本已存在」，属正常 |
 | GitHub Release | **v0.4.0 已建**，附免版本号 tarball；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
