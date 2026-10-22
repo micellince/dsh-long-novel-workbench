@@ -249,19 +249,60 @@ async function handleRpc(body, ctx) {
       const byTaskRows = Object.entries(byTask).map(([task, rows]) => ({ task, ...sum(rows) })).sort((a, b) => b.totalTokens - a.totalTokens)
       const imports = await listImportRecords(root, projectId)
       const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
-      let visibleSessionIds = null
+      let rootSessions = []
+      let subagentSessions = []
+      let subagentCount = 0
       try {
         const sessionController = ctx.get('sessionController')
         if (sessionController?.list && rootPath) {
           const listed = await sessionController.list({}, AbortSignal.timeout(15000))
-          visibleSessionIds = (listed.items ?? [])
-            .filter((item) => item.cwd === rootPath && !item.origin && !item.parentSessionId && !item.blank)
-            .map((item) => item.sessionId)
+          const allItems = listed.items ?? []
+          const roots = allItems.filter((item) => item.cwd === rootPath && !item.origin && !item.parentSessionId && !item.blank)
+          const byParent = new Map()
+          for (const item of allItems) {
+            if (!item.parentSessionId) continue
+            if (!byParent.has(item.parentSessionId)) byParent.set(item.parentSessionId, [])
+            byParent.get(item.parentSessionId).push(item.sessionId)
+          }
+          const descendantIds = new Set()
+          let frontier = new Set(roots.map((item) => item.sessionId))
+          while (frontier.size > 0) {
+            const next = new Set()
+            for (const id of frontier) {
+              for (const childId of byParent.get(id) ?? []) {
+                if (descendantIds.has(childId)) continue
+                descendantIds.add(childId)
+                next.add(childId)
+              }
+            }
+            frontier = next
+          }
+          subagentCount = descendantIds.size
+          const selected = [...roots, ...allItems.filter((item) => descendantIds.has(item.sessionId))]
+          const groups = new Map()
+          for (const item of selected) {
+            const cwd = item.cwd || rootPath
+            if (!groups.has(cwd)) groups.set(cwd, [])
+            groups.get(cwd).push(item.sessionId)
+          }
+          const loaded = []
+          for (const [cwd, ids] of groups) {
+            const part = await loadChatUsage(cwd, { sessionIds: ids })
+            loaded.push(...part.sessions)
+          }
+          rootSessions = loaded.filter((session) => roots.some((item) => item.sessionId === session.id))
+          subagentSessions = loaded.filter((session) => descendantIds.has(session.id))
         }
       } catch {
-        visibleSessionIds = null
+        rootSessions = []
+        subagentSessions = []
+        subagentCount = 0
       }
-      const chat = await loadChatUsage(rootPath, visibleSessionIds ? { sessionIds: visibleSessionIds } : undefined)
+      if (rootSessions.length === 0) {
+        const fallback = await loadChatUsage(rootPath)
+        rootSessions = fallback.sessions
+      }
+      const allChatSessions = [...rootSessions, ...subagentSessions]
       const prices = await loadModelPrices()
       let chatCostUSD = 0
       let chatCostCNY = 0
@@ -275,7 +316,7 @@ async function handleRpc(body, ctx) {
         }, prices)
         if (cost) workbenchCostUSD += cost.usd
       }
-      const chatSessions = chat.sessions.map((session) => {
+      const costOf = (session) => {
         const cost = estimateSessionCost(session, prices)
         if (cost) {
           chatCostUSD += cost.usd
@@ -283,23 +324,36 @@ async function handleRpc(body, ctx) {
         } else {
           unpricedSessions += 1
         }
-        return {
-          id: session.id,
-          cwd: session.cwd,
-          createdAt: session.createdAt,
-          lastAt: session.lastAt,
-          messages: session.messages,
-          inputTokens: session.inputTokens,
-          outputTokens: session.outputTokens,
-          cacheReadTokens: session.cacheReadTokens,
-          totalTokens: session.totalTokens,
-          model: session.model,
-          provider: session.provider,
-          costUSD: cost?.usd ?? null,
-          costCNY: cost?.cny ?? null,
-        }
+        return cost
+      }
+      const shapeSession = (session, cost, isSubagent = false) => ({
+        id: session.id,
+        cwd: session.cwd,
+        createdAt: session.createdAt,
+        lastAt: session.lastAt,
+        messages: session.messages,
+        inputTokens: session.inputTokens,
+        outputTokens: session.outputTokens,
+        cacheReadTokens: session.cacheReadTokens,
+        totalTokens: session.totalTokens,
+        model: session.model,
+        provider: session.provider,
+        isSubagent,
+        costUSD: cost?.usd ?? null,
+        costCNY: cost?.cny ?? null,
       })
-      chat.sessions = chatSessions
+      const chatSessions = rootSessions.map((session) => shapeSession(session, costOf(session)))
+      const subagentRows = subagentSessions.map((session) => shapeSession(session, costOf(session), true))
+      const subagentTokens = subagentRows.reduce((sum, row) => sum + row.totalTokens, 0)
+      const subagentCostUSD = subagentRows.reduce((sum, row) => sum + (row.costUSD ?? 0), 0)
+      const subagentCostCNY = subagentRows.reduce((sum, row) => sum + (row.costCNY ?? 0), 0)
+      const totalChatTokens = allChatSessions.reduce((sum, session) => sum + (session.totalTokens || 0), 0)
+      const chat = {
+        cwd: rootPath,
+        sessions: chatSessions,
+        subagents: { count: subagentCount, sessions: subagentRows, totalTokens: subagentTokens, costUSD: Math.round(subagentCostUSD * 10000) / 10000, costCNY: Math.round(subagentCostCNY * 10000) / 10000 },
+        totalTokens: totalChatTokens,
+      }
       const context = estimateContext(bundle)
       const backupCount = await countBackupFiles(root, projectId)
       const acceptedProposals = (bundle.proposals ?? []).filter((row) => row.status === 'accepted').length
@@ -314,7 +368,7 @@ async function handleRpc(body, ctx) {
         bucket.workbenchTokens += Number(row.totalTokens) || 0
         bucket.aiCalls += 1
       }
-      for (const session of chat.sessions) {
+      for (const session of [...rootSessions, ...subagentSessions]) {
         for (const [key, value] of Object.entries(session.days ?? {})) {
           if (!days.has(key)) days.set(key, { date: key, workbenchTokens: 0, chatTokens: 0, aiCalls: 0, chatMessages: 0 })
           const bucket = days.get(key)
@@ -339,6 +393,8 @@ async function handleRpc(body, ctx) {
           pendingProposals: bundle.stats.pendingProposals,
           imports: imports.length,
           aiCalls: records.length,
+          sessionCount: rootSessions.length,
+          subagentCount,
           activeDays,
           chatHours: Math.round((chatSpanMs / 3600000) * 10) / 10,
           aiMinutes: Math.round(((sum(records).durationMs) / 60000) * 10) / 10,
