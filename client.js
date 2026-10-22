@@ -1128,6 +1128,17 @@ window.__ModuleLoader__.load({
           setBusy('')
         }
       }
+      const reopen = async (p) => {
+        setBusy(p.id)
+        try {
+          await api('proposal.reopen', { projectId, proposalId: p.id })
+          onChanged()
+        } catch (error) {
+          window.alert(`重新打开失败：${error.message}`)
+        } finally {
+          setBusy('')
+        }
+      }
       const submitFeedback = async (p) => {
         const text = feedbackText.trim()
         if (!text) { window.alert('请先写修改意见'); return }
@@ -1277,7 +1288,10 @@ window.__ModuleLoader__.load({
         )),
         done.length > 0 ? h('div', { className: 'sd-section' },
           h('div', { className: 'sd-pagehead' }, h('h3', { className: 'sd-h3' }, `已处理（${done.length}）`), h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开')),
-          showDone ? h('div', { className: 'sd-mini-list' }, done.slice(-20).reverse().map((p) => h('div', { key: p.id, className: 'sd-mini-row' }, h(Tag, { tone: 'muted' }, p.status === 'accepted' ? '已采纳' : '已驳回'), h('span', { className: 'sd-mini-title' }, p.title)))) : null,
+          showDone ? h('div', { className: 'sd-mini-list' }, done.slice(-20).reverse().map((p) => h('div', { key: p.id, className: 'sd-mini-row' },
+            h(Tag, { tone: 'muted' }, { accepted: '已采纳', rejected: '已驳回', revised: '已修订', superseded: '已替代' }[p.status] ?? p.status),
+            h('span', { className: 'sd-mini-title' }, p.title),
+            h(Btn, { small: true, onClick: () => reopen(p), disabled: busy === p.id }, busy === p.id ? '处理中…' : '重新打开')))) : null,
         ) : null,
       )
     }

@@ -161,3 +161,26 @@ test('markProposalRevised：旧提案标记 revised，新提案回链 revisedFro
   assert.equal(oldRow.status, 'revised', '旧提案状态应变为 revised')
   assert.equal(oldRow.revisedTo, next.id, '旧提案应带 revisedTo 指向新提案')
 })
+
+test('reopenProposal：已驳回/已修订的提案可以重新打开为待处理', async (t) => {
+  const { root, project } = await newProject(t)
+  const rejected = await store.createProposal(root, project.id, { kind: 'facts', title: '会被驳回', items: [] })
+  await store.rejectProposal(root, project.id, rejected.id)
+  const reopened = await store.reopenProposal(root, project.id, rejected.id)
+  assert.equal(reopened.status, 'pending', '驳回后应能重新打开')
+
+  const old = await store.createProposal(root, project.id, { kind: 'decision', title: '原决策' })
+  const next = await store.createProposal(root, project.id, {
+    kind: 'facts',
+    title: '按决策产生的修改',
+    items: [{ subject: '甲', attribute: '年龄', value: '30' }],
+    resolvesProposalId: old.id,
+  })
+  let proposals = await store.getEntities(root, project.id, 'proposals')
+  assert.equal(proposals.find((p) => p.id === old.id).status, 'pending', '新提案创建时原决策应保持 pending')
+  await store.acceptProposal(root, project.id, next.id)
+  proposals = await store.getEntities(root, project.id, 'proposals')
+  assert.equal(proposals.find((p) => p.id === old.id).status, 'revised', '新提案被采纳后原决策才标记 revised')
+  const reopenedOld = await store.reopenProposal(root, project.id, old.id)
+  assert.equal(reopenedOld.status, 'pending', '已修订的原决策也应能重新打开')
+})

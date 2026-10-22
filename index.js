@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
@@ -115,6 +115,8 @@ async function handleRpc(body, ctx) {
       return acceptProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), { optionId: body.optionId })
     case 'proposal.reject':
       return rejectProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
+    case 'proposal.reopen':
+      return reopenProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
     case 'proposal.feedback':
       return addProposalFeedback(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), String(body.text ?? ''))
     case 'proposal.batchAccept': {
@@ -1234,16 +1236,10 @@ const proposeTool = {
       data: args?.data,
       items: args?.items,
       rationale: args?.rationale,
+      resolvesProposalId: args?.data?.resolvesProposalId ?? null,
     })
     const resolves = args?.data?.resolvesProposalId
-    if (resolves) {
-      try {
-        await markProposalRevised(defaultRoot(), project.id, String(resolves), proposal.id)
-      } catch {
-        // 原决策可能已被处理；不影响新提案
-      }
-    }
-    return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。${resolves ? `\n已把原决策 ${resolves} 标记为「已修订」。` : ''}\n作者需在工作台「提案」页对比后点采纳；采纳前不会改动任何账本或正文。`
+    return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。${resolves ? `\n这份提案关联原决策 ${resolves}，在它被采纳时工作台会把原决策标记为「已修订」。` : ''}\n作者需在工作台「提案」页对比后处理；采纳前不会改动任何账本或正文。`
   },
 }
 
