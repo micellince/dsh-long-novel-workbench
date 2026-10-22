@@ -236,3 +236,10 @@
 - pipeline.finalize / pipeline.backfill RPC + MCP finalize；补跑收尾 prompt + 新会话。
 - 前端：done 收尾报告卡/未收尾横幅/收尾按钮/补跑收尾按钮/总览「待收尾」/running 收尾文案。
 - 测试 162/162；未真机试跑。
+
+
+### 修 bug：审阅全选加入清单只进一条
+
+- 原因：`addToCart` forEach 逐条调 `onAddCart`，`addCart` 用 `[...cart, item]` 基于同一渲染快照，14 次互相覆盖，只剩最后一条。
+- 修复：审阅页一次 `onAddCart(array)`；`addCart` 用函数式更新 + `mergeCartItems`（kind+id 去重）；localStorage 持久化改由 effect 统一处理（载入 key 完成前不写，避免串项目）。
+- 验证：渲染 harness 新增 TASK-21（全选 14 条 → 一次 dispatch 14 条；合并去重=15/16），全部通过；`node --test` 162/162。

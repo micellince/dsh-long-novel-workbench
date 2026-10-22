@@ -5172,13 +5172,13 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           return
         }
         if (!onAddCart) return
-        list.forEach((review) => onAddCart({
+        onAddCart(list.map((review) => ({
           kind: 'review',
           id: review.id,
           chapter: review.chapter,
           title: (review.issue ?? '').slice(0, 50),
           detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；'),
-        }))
+        })))
         setSelected([])
       }
       const renderRows = (rows) => h('div', { className: 'sd-table' },
@@ -5909,6 +5909,16 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
     }
 
     // ── 工作台主壳 ────────────────────────────────────────────
+    /** 合并清单条目：去重（kind+id），支持一次传多条；纯函数，便于测试。 */
+    function mergeCartItems(prev, items) {
+      const next = Array.isArray(prev) ? [...prev] : []
+      for (const row of Array.isArray(items) ? items : [items]) {
+        if (!row?.id) continue
+        if (!next.some((existing) => existing.kind === row.kind && existing.id === row.id)) next.push(row)
+      }
+      return next
+    }
+
     function Workbench() {
       const open = useOpen()
       const [tab, setTab] = useState('overview')
@@ -5927,18 +5937,12 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const [pipelineWizard, setPipelineWizard] = useState(null)
       const [expansionIntent, setExpansionIntent] = useState(null)
       const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
-      const saveCart = (next) => {
-        setCart(next)
-        try {
-          if (cartKey) window.localStorage.setItem(cartKey, JSON.stringify(next))
-        } catch {
-          /* ignore */
-        }
-      }
+      const saveCart = (next) => setCart(next)
+      // 支持一次加入多条（审阅页全选批量加入）：用函数式更新合并，避免同一轮多次调用互相覆盖。
       const addCart = (item) => {
-        if (!item?.id) return
-        if (cart.some((row) => row.kind === item.kind && row.id === item.id)) return
-        saveCart([...cart, item])
+        const items = (Array.isArray(item) ? item : [item]).filter((row) => row?.id)
+        if (items.length === 0) return
+        setCart((prev) => mergeCartItems(prev, items))
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
@@ -5975,7 +5979,9 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const [exportFormat, setExportFormat] = useState('md')
       const [exporting, setExporting] = useState(false)
 
+      const [cartLoadedKey, setCartLoadedKey] = useState('')
       useEffect(() => {
+        setCartLoadedKey('')
         if (!cartKey) {
           setCart([])
           return
@@ -5986,7 +5992,16 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         } catch {
           setCart([])
         }
+        setCartLoadedKey(cartKey)
       }, [cartKey])
+      useEffect(() => {
+        if (!cartKey || cartLoadedKey !== cartKey) return
+        try {
+          window.localStorage.setItem(cartKey, JSON.stringify(cart))
+        } catch {
+          /* ignore */
+        }
+      }, [cart, cartKey, cartLoadedKey])
 
       const refresh = useCallback(async (preferred) => {
         setBusy(true)
