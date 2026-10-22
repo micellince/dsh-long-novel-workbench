@@ -3132,6 +3132,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           diagnosis: toArray(plan.diagnosis),
           capacity: toArray(plan.capacity),
           outlineChanges: toArray(plan.outlineChanges),
+          confirmations: toArray(plan.confirmations),
           notes: toArray(plan.notes),
         },
         outlineChanges: toArray(raw.outlineChanges),
@@ -3216,6 +3217,35 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       }
     }
 
+    function expansionOutlineKey(change, index) {
+      return String(change?.id ?? change?.title ?? `outline-change-${index}`)
+    }
+
+    function expansionApprovedChangeKeys(expansion) {
+      const keys = new Set()
+      for (const change of expansion.approvedOutlineChanges ?? []) {
+        for (const candidate of [change?.id, change?.title, change?.proposalId]) {
+          if (candidate !== undefined && candidate !== null && String(candidate)) keys.add(String(candidate))
+        }
+      }
+      return keys
+    }
+
+    function expansionOutlineIsApproved(expansion, change, index) {
+      const keys = expansionApprovedChangeKeys(expansion)
+      return [change?.id, change?.title, change?.proposalId, expansionOutlineKey(change, index)]
+        .filter((value) => value !== undefined && value !== null && String(value))
+        .some((value) => keys.has(String(value)))
+    }
+
+    function expansionConfirmationNotes(expansion) {
+      const keywords = ['待作者批准', '需确认', '请确认', '待确认', '请拍板']
+      return (expansion.plan.notes ?? []).filter((note) => {
+        const text = typeof note === 'string' ? note : expansionEntryText(note)
+        return keywords.some((keyword) => text.includes(keyword))
+      })
+    }
+
     function openChatSessionById(sessionId) {
       if (!sessionId) {
         window.alert('还没有生成会话：先开始一次生成或扩写。')
@@ -3231,19 +3261,28 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
     }
 
     // ── 扩写子模块：配置 / 方案 / 大纲闸门 / 执行 / 报告 ─────────
-    function ExpansionPanel({ bundle, projectId, intent, onChanged }) {
+    function ExpansionPanel({ bundle, projectId, intent, onChanged, onStatusChange }) {
       const chapters = bundle.chapters ?? []
       const maxChapter = chapters.reduce((max, chapter) => Math.max(max, Number(chapter.id) || 0), 0) || Number(bundle.project?.targetChapters) || 1
       const [live, setLive] = useState(null)
       const [busy, setBusy] = useState('')
       const [planConfirmed, setPlanConfirmed] = useState(false)
       const [targets, setTargets] = useState(null)
+      const [outlineApproved, setOutlineApproved] = useState([])
       const intentTokenRef = useRef(null)
       const expansion = normalizeExpansion(live?.expansion ?? bundle.expansion)
       const statusMeta = EXPANSION_STATUS_META[expansion.status] ?? EXPANSION_STATUS_META.idle
       const budgetInfo = expansionBudgetInfo(expansion)
       const active = expansion.status === 'planning' || expansion.status === 'structuring' || expansion.status === 'running'
       const hasChapters = chapters.length > 0
+      const outlineChangeList = expansion.plan.outlineChanges.length > 0 ? expansion.plan.outlineChanges : expansion.outlineChanges
+      const outlineChangeSignature = JSON.stringify(outlineChangeList.map((change, index) => expansionOutlineKey(change, index)))
+      const approvedOutlineSignature = JSON.stringify((expansion.approvedOutlineChanges ?? []).map((change) => [change?.id ?? '', change?.title ?? '', change?.proposalId ?? '']))
+      const confirmations = expansion.plan.confirmations
+      const fallbackNotes = expansionConfirmationNotes(expansion)
+      const confirmationCount = confirmations.length > 0 ? confirmations.length : fallbackNotes.length
+      const outlineApprovedCount = outlineChangeList.filter((change, index) => outlineApproved.includes(expansionOutlineKey(change, index))).length
+      const allOutlineApproved = outlineChangeList.length > 0 && outlineApprovedCount >= outlineChangeList.length
       const [form, setForm] = useState(() => ({
         mode: intent?.mode === 'chapter' ? 'chapter' : 'book',
         chapter: Number(intent?.chapter) || maxChapter,
@@ -3292,6 +3331,24 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         setTargets(expansion.chapterTargets.length > 0 ? expansion.chapterTargets.map((item) => ({ ...item })) : fallback)
         setPlanConfirmed(expansion.planConfirmed === true)
       }, [expansion.status, targetsSignature])
+      useEffect(() => {
+        onStatusChange?.(expansion.status)
+      }, [expansion.status, onStatusChange])
+      useEffect(() => {
+        if (expansion.status !== 'plan-ready') return
+        const approvedKeys = expansionApprovedChangeKeys(expansion)
+        const defaults = []
+        outlineChangeList.forEach((change, index) => {
+          const aliases = [change?.id, change?.title, change?.proposalId, expansionOutlineKey(change, index)]
+            .filter((value) => value !== undefined && value !== null && String(value))
+            .map(String)
+          if (aliases.some((alias) => approvedKeys.has(alias))) defaults.push(expansionOutlineKey(change, index))
+        })
+        setOutlineApproved(defaults)
+      }, [expansion.status, outlineChangeSignature, approvedOutlineSignature])
+      const toggleOutlineChange = (key) => setOutlineApproved((prev) => (prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]))
+      const approveAllOutline = () => setOutlineApproved(outlineChangeList.map((change, index) => expansionOutlineKey(change, index)))
+      const clearAllOutline = () => setOutlineApproved([])
       const run = async (label, action) => {
         if (busy) return
         setBusy(label)
@@ -3333,6 +3390,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         try {
           await api('expansion.confirmPlan', {
             projectId,
+            approvedOutlineIds: outlineApproved.slice(),
             chapterTargets: list.map((item) => ({
               chapter: Number(item.chapter),
               targetWords: Number(item.targetWords) || 0,
@@ -3407,6 +3465,86 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                 h('span', { className: 'sd-exp-note-text' }, note.text)))),
           usage ? h('span', { className: 'sd-hint' }, `${formatPipelineTokens(usage.tokens)} token · ${formatPipelineMoney(usage.costCNY)}`) : null)
       }
+      const renderConfirmationItem = (item, index) => {
+        if (item === null || item === undefined) return null
+        if (typeof item === 'string' || typeof item === 'number') {
+          return h('div', { key: `confirmation-${index}`, className: 'sd-exp-confirm-item' },
+            h('div', { className: 'sd-exp-confirm-question' }, String(item)))
+        }
+        const question = item.question ?? item.title ?? item.text ?? `待确认事项 ${index + 1}`
+        const impact = item.impact ?? item.reason ?? item.note ?? ''
+        const options = Array.isArray(item.options) ? item.options : []
+        return h('div', { key: item.id ?? `confirmation-${index}`, className: 'sd-exp-confirm-item' },
+          h('div', { className: 'sd-exp-confirm-question' }, String(question)),
+          impact ? h('div', { className: 'sd-exp-confirm-impact' }, `影响：${String(impact)}`) : null,
+          options.length > 0
+            ? h('div', { className: 'sd-exp-confirm-options' }, options.map((option, position) => {
+                const label = typeof option === 'string' ? option : option?.label ?? option?.text ?? option?.title ?? JSON.stringify(option)
+                return h(Tag, { key: position, tone: 'muted' }, String(label))
+              }))
+            : null)
+      }
+      const confirmationsBlock = h('section', { className: 'sd-exp-confirm' },
+        h('div', { className: 'sd-exp-confirm-head' },
+          h('h3', { className: 'sd-h3' }, `⚠ 需要你确认（${confirmationCount}）`),
+          h('span', { className: 'sd-hint' }, confirmations.length > 0 ? 'AI 把需要你拍板的事项列在这里' : fallbackNotes.length > 0 ? '来自方案备注' : '')),
+        confirmations.length > 0
+          ? h('div', { className: 'sd-exp-confirm-list' }, confirmations.map(renderConfirmationItem))
+          : fallbackNotes.length > 0
+            ? h('div', { className: 'sd-exp-confirm-list' }, fallbackNotes.map((note, index) => h('div', { key: index, className: 'sd-exp-confirm-item sd-exp-confirm-fallback' },
+                h('div', { className: 'sd-exp-confirm-question' }, expansionEntryText(note)),
+                h('div', { className: 'sd-exp-confirm-impact' }, '方案备注里提到需要你确认（AI 没有单列 confirmations）'))))
+            : h('p', { className: 'sd-exp-confirm-empty' }, '无待确认事项'))
+      const outlineChangeTitle = (change, index) => {
+        if (typeof change === 'string') return change
+        return String(change?.title ?? change?.note ?? change?.change ?? `大纲变更 ${index + 1}`)
+      }
+      const outlineChangeMeta = (change) => {
+        if (!change || typeof change !== 'object') return []
+        const meta = []
+        if (change.priority) meta.push(`优先级：${change.priority}`)
+        if (change.kind) meta.push(`类型：${change.kind}`)
+        const chaptersValue = Array.isArray(change.chapters) && change.chapters.length > 0 ? change.chapters.join('、') : change.chapter
+        if (chaptersValue) meta.push(`章：${chaptersValue}`)
+        if (change.change) meta.push(String(change.change))
+        if (change.note && change.note !== change.change) meta.push(String(change.note))
+        if (change.reason) meta.push(`原因：${change.reason}`)
+        if (change.affects) meta.push(`影响：${Array.isArray(change.affects) ? change.affects.join('、') : String(change.affects)}`)
+        if (Array.isArray(change.newElements) && change.newElements.length > 0) meta.push(`新增元素：${change.newElements.map((item) => (typeof item === 'string' ? item : item?.title ?? item?.name ?? JSON.stringify(item))).join('、')}`)
+        return meta
+      }
+      const outlineConfirmBlock = outlineChangeList.length === 0
+        ? null
+        : h('section', { className: 'sd-exp-outline-confirm' },
+            h('div', { className: 'sd-exp-outline-confirm-head' },
+              h('h3', { className: 'sd-h3' }, `大纲变更清单（${outlineApprovedCount}/${outlineChangeList.length} 已勾选）`),
+              h('div', { className: 'sd-exp-outline-bulk' },
+                h(Btn, { small: true, onClick: approveAllOutline, disabled: !!busy }, '全部同意'),
+                h(Btn, { small: true, onClick: clearAllOutline, disabled: !!busy }, '全部取消'))),
+            h('div', { className: 'sd-exp-outline-list' }, outlineChangeList.map((change, index) => {
+              const key = expansionOutlineKey(change, index)
+              const checked = outlineApproved.includes(key)
+              const already = expansionOutlineIsApproved(expansion, change, index)
+              const meta = outlineChangeMeta(change)
+              return h('label', { key, className: `sd-exp-outline-row${already ? ' sd-exp-outline-row-approved' : ''}` },
+                h('input', { type: 'checkbox', checked, onChange: () => toggleOutlineChange(key) }),
+                h('div', { className: 'sd-exp-outline-main' },
+                  h('div', { className: 'sd-exp-outline-title' }, outlineChangeTitle(change, index), already ? h(Tag, { tone: 'success' }, '已批准') : null),
+                  meta.length > 0 ? h('div', { className: 'sd-exp-outline-meta' }, meta.join(' ｜ ')) : null))
+            })),
+            h('p', { className: 'sd-exp-confirm-footer' },
+              `已批准 ${outlineApprovedCount} / 共 ${outlineChangeList.length} 条大纲变更`,
+              !allOutlineApproved ? '；仍有未批准的条目，执行时会被闸门拦住，AI 不会使用' : ''))
+      const waitingOutlineList = (changes) => h('div', { className: 'sd-exp-outline-list' }, changes.map((change, index) => {
+        const already = expansionOutlineIsApproved(expansion, change, index)
+        const meta = outlineChangeMeta(change)
+        return h('div', { key: `${expansionOutlineKey(change, index)}-${index}`, className: `sd-exp-outline-row sd-exp-outline-row-readonly${already ? ' sd-exp-outline-row-approved' : ''}` },
+          h('span', { className: 'sd-exp-outline-checkmark' }, already ? '✓' : '○'),
+          h('div', { className: 'sd-exp-outline-main' },
+            h('div', { className: 'sd-exp-outline-title' }, outlineChangeTitle(change, index)),
+            meta.length > 0 ? h('div', { className: 'sd-exp-outline-meta' }, meta.join(' ｜ ')) : null),
+          h(Tag, { tone: already ? 'success' : 'warn' }, already ? '已确认' : '待确认'))
+      }))
       const statusHint = h('div', { className: 'sd-exp-head' },
         h('div', null,
           h('h3', { className: 'sd-h3' }, '✍️ 扩写'),
@@ -3467,7 +3605,6 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           ? [{ chapter: Number(form.chapter) || maxChapter, targetWords: Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }]
           : chapters.map((chapter) => ({ chapter: Number(chapter.id), targetWords: Number(expansion.targetWords) || Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }))
         const targetRows = targets ?? (expansion.chapterTargets.length > 0 ? expansion.chapterTargets : fallbackRows)
-        const outlineChangeList = expansion.plan.outlineChanges.length > 0 ? expansion.plan.outlineChanges : expansion.outlineChanges
         const metaRow = h('div', { className: 'sd-exp-meta-row' },
           h(Tag, { tone: 'brand' }, expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
           h('span', null, `目标字数：${expansion.targetWords}`),
@@ -3504,16 +3641,17 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           !planConfirmed
             ? h(Btn, { kind: 'primary', onClick: confirmPlan, disabled: !!busy || targetRows.length === 0 }, busy === 'confirm' ? '确认中…' : '确认方案')
             : h(React.Fragment, null,
-                h(Tag, { tone: 'success' }, '方案已确认'),
+                h(Tag, { tone: 'success' }, outlineChangeList.length > 0 ? `方案已确认 · 已批准 ${outlineApprovedCount}/${outlineChangeList.length} 条` : '方案已确认'),
                 h(Btn, { kind: 'primary', onClick: start, disabled: !!busy }, busy === 'start' ? '启动中…' : expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
                 sessionButton))
         return h('div', { className: 'sd-exp-panel' },
           statusHint,
           section('方案概览', metaRow),
+          confirmationsBlock,
+          outlineConfirmBlock,
           section('诊断', list(expansion.plan.diagnosis, '方案没有提供诊断。')),
           section('每章容量', capacityTable),
           section('逐章目标（可修改）', targetTable),
-          outlineChangeList.length > 0 ? section('大纲变更清单（执行时会再次要求确认）', list(outlineChangeList, '无')) : section('大纲变更', h('p', { className: 'sd-exp-empty' }, '方案未提出大纲变更。')),
           section('方案备注', list(expansion.plan.notes, '无')),
           planActions)
       }
@@ -3522,7 +3660,8 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         return h('div', { className: 'sd-exp-panel' },
           statusHint,
           h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 执行中发现需要动大纲，等你确认：确认后 AI 才会按新的结构继续扩写；不确认则只按大纲内可容纳的字数执行。'),
-          section('待确认的大纲变更', list(changes, '没有大纲变更条目。')),
+          confirmationsBlock,
+          section('待确认的大纲变更', changes.length > 0 ? waitingOutlineList(changes) : h('p', { className: 'sd-exp-empty' }, '没有大纲变更条目。')),
           h('div', { className: 'sd-exp-actions' },
             h(Btn, { kind: 'primary', onClick: approveOutline, disabled: !!busy }, busy === 'approve' ? '确认中…' : '确认大纲变更并继续'),
             sessionButton),
@@ -3593,12 +3732,17 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
     function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard, expansionIntent, onExpansionConsumed }) {
       const [section, setSection] = useState('pipeline')
       const [pendingIntent, setPendingIntent] = useState(expansionIntent ?? null)
+      const [expansionStatus, setExpansionStatus] = useState(() => normalizeExpansion(bundle.expansion).status)
+      useEffect(() => {
+        setExpansionStatus(normalizeExpansion(bundle.expansion).status)
+      }, [bundle.expansion])
       useEffect(() => {
         if (!expansionIntent) return
         setPendingIntent(expansionIntent)
         setSection('expansion')
         onExpansionConsumed?.()
       }, [expansionIntent])
+      const needsExpansionConfirm = expansionStatus === 'plan-ready' || expansionStatus === 'waiting-outline'
       return h('div', { className: 'sd-page sd-pipe-page' },
         h('div', { className: 'sd-pipe-subnav' },
           h('button', {
@@ -3610,9 +3754,9 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
             type: 'button',
             className: `sd-pipe-subtab${section === 'expansion' ? ' sd-pipe-subtab-active' : ''}`,
             onClick: () => { setPendingIntent(null); setSection('expansion') },
-          }, '✍️ 扩写')),
+          }, '✍️ 扩写', needsExpansionConfirm ? h('span', { className: 'sd-exp-badge' }, '待确认') : null)),
         section === 'expansion'
-          ? h(ExpansionPanel, { bundle, projectId, intent: pendingIntent, onChanged, onGoTab })
+          ? h(ExpansionPanel, { bundle, projectId, intent: pendingIntent, onChanged, onGoTab, onStatusChange: setExpansionStatus })
           : h(PipelineRunPanel, { bundle, projectId, onChanged, onGoTab, onOpenWizard }))
     }
 
@@ -7008,7 +7152,34 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-exp-report-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666)}
 .sd-exp-report-value{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
 .sd-exp-empty{margin:4px 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
-@media (max-width:760px){.sd-pipe-subnav{overflow-x:auto}.sd-exp-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-exp-budget-bar{grid-column:1/-1}.sd-exp-config-grid{grid-template-columns:1fr 1fr}.sd-exp-table{overflow-x:auto}.sd-exp-tr{min-width:420px}.sd-exp-actions .sd-btn{flex:1 1 auto}.sd-exp-status{margin-left:0}}
+/* 待确认区块 + 大纲变更勾选 + 子导航徽标 */
+.sd-exp-confirm{padding:12px 14px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent),transparent 70%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-exp-confirm-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sd-exp-confirm-head .sd-h3{margin:0 0 6px}
+.sd-exp-confirm-list{display:flex;flex-direction:column;gap:6px}
+.sd-exp-confirm-item{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
+.sd-exp-confirm-question{font-size:12.5px;line-height:1.6;font-weight:600;color:var(--dsw-alias-label-primary,#222);word-break:break-word}
+.sd-exp-confirm-impact{margin-top:2px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-word}
+.sd-exp-confirm-options{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.sd-exp-confirm-fallback{border-style:dashed}
+.sd-exp-confirm-empty{margin:4px 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-exp-confirm-footer{margin:8px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555)}
+.sd-exp-outline-confirm{margin-top:10px;padding-top:10px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2)}
+.sd-exp-outline-confirm-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sd-exp-outline-confirm-head .sd-h3{margin:0 0 6px}
+.sd-exp-outline-bulk{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.sd-exp-outline-list{display:flex;flex-direction:column;gap:4px}
+.sd-exp-outline-row{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:8px;align-items:flex-start;padding:7px 9px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);cursor:pointer}
+.sd-exp-outline-row-readonly{cursor:default}
+.sd-exp-outline-row-approved{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 6%,var(--dsw-alias-bg-base,#fff))}
+.sd-exp-outline-row input[type="checkbox"]{margin-top:3px}
+.sd-exp-outline-checkmark{margin-top:2px;text-align:center;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.sd-exp-outline-row-approved .sd-exp-outline-checkmark{color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-exp-outline-main{min-width:0}
+.sd-exp-outline-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;font-weight:600;line-height:1.6;color:var(--dsw-alias-label-primary,#222);word-break:break-word}
+.sd-exp-outline-meta{margin-top:2px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-word}
+.sd-exp-badge{display:inline-flex;align-items:center;margin-left:6px;padding:0 6px;border-radius:999px;font-size:10px;line-height:17px;font-weight:700;color:var(--dsw-alias-state-error-primary,#c0392b);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
+@media (max-width:760px){.sd-pipe-subnav{overflow-x:auto}.sd-exp-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-exp-budget-bar{grid-column:1/-1}.sd-exp-config-grid{grid-template-columns:1fr 1fr}.sd-exp-table{overflow-x:auto}.sd-exp-tr{min-width:420px}.sd-exp-actions .sd-btn{flex:1 1 auto}.sd-exp-status{margin-left:0}.sd-exp-outline-row{grid-template-columns:18px minmax(0,1fr)}.sd-exp-outline-row>.sd-tag{grid-column:2;justify-self:start}}
 @media (max-width:760px){.sd-pipe-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-pipe-budget-bar{grid-column:1/-1}.sd-pipe-stage{grid-template-columns:20px minmax(80px,1fr) auto}.sd-pipe-stage-range{display:none}.sd-pipe-actions .sd-btn{flex:1 1 auto}.sd-pipe-overview-head .sd-btn{margin-left:0}.sd-pipe-status-session{margin-left:0}}
 @media (max-width:900px){.sd-principle-bar .sd-principle-hint{display:none}.sd-principle-hero{grid-template-columns:1fr}.sd-principle-hero-actions{grid-column:auto}}
 @media (max-width:760px){.sd-principle-bar .sd-principle-sub{display:none}.sd-principle-hero{padding:12px 14px}.sd-principle-hero-slogan{font-size:18px}.sd-principle-hero-stats{grid-template-columns:1fr 1fr}.sd-principle-inline{gap:4px}}

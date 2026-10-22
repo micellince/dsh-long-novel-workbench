@@ -636,7 +636,7 @@ async function handleRpc(body, ctx) {
         budget: body.budget,
       }, ctx)
     case 'expansion.confirmPlan':
-      return confirmExpansionPlan(root, String(body.projectId ?? ''), { plan: body.plan, chapterTargets: body.chapterTargets })
+      return confirmExpansionPlan(root, String(body.projectId ?? ''), { plan: body.plan, chapterTargets: body.chapterTargets, approvedOutlineIds: body.approvedOutlineIds })
     case 'expansion.start':
       return startExpansion(root, String(body.projectId ?? ''), ctx)
     case 'expansion.approveOutline':
@@ -2146,7 +2146,7 @@ function expansionScopeText(expansion) {
 }
 
 /** 第一步宏观方案 prompt：只出方案，禁止写正文。 */
-const EXPANSION_ADDITION_LABELS = { subplots: '旁线', characters: '新人物', locations: '新地点', foreshadow: '新伏笔', conflicts: '新冲突' }
+const EXPANSION_ADDITION_LABELS = { subplot: '旁线', subplots: '旁线', person: '新人物', characters: '新人物', place: '新地点', locations: '新地点', foreshadow: '新伏笔', conflict: '新冲突', conflicts: '新冲突' }
 
 function expansionOptionsText(expansion = {}) {
   const options = expansion.options ?? {}
@@ -2184,8 +2184,9 @@ export function buildExpansionPlanPrompt(bundle, expansionInput = {}) {
     '1. 诊断 diagnosis：每章当前字数、大纲节拍数、与目标字数的差距；',
     '2. 大纲容量评估 capacity：按现有节拍判断每章最多能自然写到多少字，逐章标「可达 / 超出容量」；',
     '3. 逐章方案 chapterTargets：每章 targetWords、type（enrich|scene|structure）、additions（加什么）、outlineChangeIds、是否触碰主线；全局目标允许单章覆盖；',
-    '4. 大纲变更清单 outlineChanges（仅确实需要时）：加/改哪些节拍、影响哪些章；默认不新增，必须等用户确认；',
-    '5. 预算估计 estimate：预计 token/费用与样张建议。',
+    '4. 大纲变更清单 outlineChanges（仅确实需要时）：加/改哪些节拍、影响哪些章；每条必须有 id、chapter、title、change、reason、affects；默认不新增，必须等用户确认；',
+    '5. 需要作者拍板的事项 confirmations：数组，每项 {id, question, options?, impact?}；把“字数口径/覆盖值/容量封顶/是否接受某条大纲变更/样张选择”等需要作者决定的事项全部列在这里，不要只写在 notes 里（工作台会把它渲染成待确认清单）；',
+    '6. 预算估计 estimate：预计 token/费用与样张建议。',
     '',
     '## 硬规则',
     '- 本阶段禁止写正文、禁止提交 chapter 提案；',
@@ -2226,6 +2227,12 @@ export function buildExpansionGoalPrompt(bundle, expansionInput = {}) {
       return `- 第${row.chapter}章 现 ${current} 字 → 目标 ${target} 字（增量 ${Math.max(0, target - current)}，类型 ${row.type}${additions}）`
     }) : ['- （没有可扩写章节）']),
     `已批准的大纲变更：${approved.length > 0 ? approved.map((row) => row.title ?? row.proposalId ?? '变更').join('、') : '（无）'}`,
+    (() => {
+      const pendingChanges = Array.isArray(expansion.outlineChanges) ? expansion.outlineChanges : []
+      const approvedIds = new Set(approved.map((row) => String(row.id ?? row.title ?? '')))
+      const unapproved = pendingChanges.filter((row) => !approvedIds.has(String(row.id ?? row.title ?? '')))
+      return unapproved.length > 0 ? `未批准的大纲变更（不得使用）：${unapproved.map((row) => row.title ?? row.id ?? '变更').join('、')}；若必须使用，先走大纲闸门等作者确认。` : '未批准的大纲变更：（无）'
+    })(),
     expansionOptionsText(expansion),
     '方案之外不得新增情节、人物、地点、设定；主线不动。',
     '',
@@ -2350,13 +2357,19 @@ export async function confirmExpansionPlan(root, projectId, input = {}) {
   }
   if (input.plan && typeof input.plan === 'object') {
     const plan = { ...current.plan }
-    for (const key of ['diagnosis', 'capacity', 'outlineChanges', 'notes']) {
+    for (const key of ['diagnosis', 'capacity', 'outlineChanges', 'confirmations', 'notes']) {
       if (Array.isArray(input.plan[key])) plan[key] = input.plan[key]
     }
     patch.plan = plan
     if (Array.isArray(input.plan.outlineChanges)) patch.outlineChanges = input.plan.outlineChanges
   }
   if (Array.isArray(input.chapterTargets)) patch.chapterTargets = sanitizeChapterTargets(input.chapterTargets)
+  if (Array.isArray(input.approvedOutlineIds)) {
+    const pending = (patch.plan?.outlineChanges ?? current.outlineChanges ?? []).filter(Boolean)
+    const approved = pending.filter((change) => input.approvedOutlineIds.map(String).includes(String(change.id ?? change.title ?? '')))
+    patch.approvedOutlineChanges = approved
+    patch.notes = expansionPushNote(current, `作者确认 ${approved.length}/${pending.length} 条大纲变更`)
+  }
   return saveExpansion(root, projectId, patch)
 }
 
@@ -2375,6 +2388,9 @@ export async function startExpansion(root, projectId, ctx = null) {
   const pendingOutlineChanges = Array.isArray(current.outlineChanges) && current.outlineChanges.length > 0
     ? current.outlineChanges
     : (Array.isArray(current.plan?.outlineChanges) ? current.plan.outlineChanges : [])
+  const approvedOutlineChanges = Array.isArray(current.approvedOutlineChanges) ? current.approvedOutlineChanges : []
+  const approvedIds = new Set(approvedOutlineChanges.map((change) => String(change?.id ?? change?.title ?? '')))
+  const unapprovedOutlineChanges = pendingOutlineChanges.filter((change) => !approvedIds.has(String(change?.id ?? change?.title ?? '')))
   const usageBefore = await summarizeUsage(root, projectId, ctx)
   const budget = {
     maxTokens: Number(current.budget.maxTokens) || 0,
@@ -2383,13 +2399,13 @@ export async function startExpansion(root, projectId, ctx = null) {
     usedCostCNY: 0,
     baseline: { tokens: usageBefore.tokens, costCNY: usageBefore.costCNY },
   }
-  const status = pendingOutlineChanges.length > 0 ? 'structuring' : 'running'
+  const status = unapprovedOutlineChanges.length > 0 ? 'structuring' : 'running'
   const saved = await saveExpansion(root, projectId, {
     status,
     runId: current.runId || `exp-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`,
     chapterTargets: targets,
     outlineChanges: pendingOutlineChanges,
-    approvedOutlineChanges: [],
+    approvedOutlineChanges,
     budget,
     sessionId: '',
     notes: expansionPushNote(current, `启动扩写执行（${status === 'structuring' ? '先补地基/大纲闸门' : '全自动'}）`),
@@ -3601,6 +3617,7 @@ function createExpansionTool(ctx) {
             diagnosis: Array.isArray(data.diagnosis) ? data.diagnosis : current.plan.diagnosis,
             capacity: Array.isArray(data.capacity) ? data.capacity : current.plan.capacity,
             outlineChanges: Array.isArray(data.outlineChanges) ? data.outlineChanges : current.plan.outlineChanges,
+            confirmations: Array.isArray(data.confirmations) ? data.confirmations : (current.plan.confirmations ?? []),
             notes: Array.isArray(data.notes) ? data.notes : current.plan.notes,
           },
           notes: expansionPushNote(current, 'AI 提交宏观扩写方案，等待作者确认'),

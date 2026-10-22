@@ -169,6 +169,37 @@ test('confirmPlan：plan-ready，用户编辑的 chapterTargets 按白名单保�
   assert.equal(ready.chapterTargets[1].type, 'structure')
 })
 
+test('confirmPlan + approvedOutlineIds：全部批准→running，部分批准→structuring，goal prompt 标出未批准', async (t) => {
+  const { root, project } = await makeProject(t)
+  const { ctx } = makeCtx()
+  await planExpansion(root, project.id, { mode: 'book', targetWords: 2000 }, ctx)
+  const plan = {
+    diagnosis: [],
+    capacity: [],
+    outlineChanges: [
+      { id: 'oc-1', chapter: 1, title: 'A', change: '加半节', reason: '容量' },
+      { id: 'oc-2', chapter: 2, title: 'B', change: '重排', reason: '容量' },
+    ],
+    confirmations: [{ id: 'q1', question: '第 6 章保持不裁？', options: ['是', '否'] }],
+    notes: ['【待作者批准】oc-2 后再上调目标'],
+  }
+  const ready = await confirmExpansionPlan(root, project.id, { plan, approvedOutlineIds: ['oc-1'] })
+  assert.equal(ready.plan.confirmations.length, 1, 'confirmations 应保存')
+  assert.deepEqual(ready.approvedOutlineChanges.map((row) => row.id), ['oc-1'])
+
+  const partial = await startExpansion(root, project.id, ctx)
+  assert.equal(partial.expansion.status, 'structuring', '仍有未批准大纲变更 → 先走闸门')
+  assert.match(partial.prompt, /未批准的大纲变更（不得使用）：B/)
+
+  await store.saveExpansion(root, project.id, {
+    status: 'plan-ready',
+    approvedOutlineChanges: plan.outlineChanges,
+  })
+  const all = await startExpansion(root, project.id, ctx)
+  assert.equal(all.expansion.status, 'running', '全部批准 → 直接 running')
+  assert.match(all.prompt, /已批准的大纲变更：A、B/)
+})
+
 // ── 3. start / goal prompt ─────────────────────────────────
 
 test('start 需要 plan-ready；未确认方案直接开始 → 拒绝', async (t) => {

@@ -19,6 +19,7 @@
 
 ### 修复
 
+- **扩写方案里"要改大纲/要你确认"在工作台看不到**：AI 把确认事项写在 `plan.notes` 里、大纲变更存在 `plan.outlineChanges`，但方案页只把它们当普通备注展示，没有可操作入口。现在 plan-ready 顶部有「⚠ 需要你确认（N）」区块（渲染 `plan.confirmations`，无则回退含「待作者批准/需确认」的 notes），大纲变更逐条 checkbox + 全部同意/取消，确认方案时提交 `approvedOutlineIds` 写入 `approvedOutlineChanges`；全部批准后 start 直接 running，未批准则 structuring 走大纲闸门；「✍️ 扩写」子导航在 plan-ready / waiting-outline 时显示「待确认」徽标。计划 prompt 也要求 AI 把需要拍板的事项写进 `plan.confirmations`。
 - **审阅页全选加入清单只进一条**：之前批量加入时逐条调用 `onAddCart`，同一轮渲染里每次都用旧的 `cart` 快照覆盖，最终只剩最后一条。现在审阅页一次传数组，清单用函数式更新批量合并（kind+id 去重），并统一由 effect 持久化 localStorage（避免切项目时把旧清单写进新项目）。
 - 扩写 plan 丢弃 `additions/additionLimit/sampleChapters` 的问题（RPC 透传并持久化到 `expansion.options`）。
 - 扩写完成时没有报告数据的问题。

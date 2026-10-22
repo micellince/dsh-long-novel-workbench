@@ -243,3 +243,11 @@
 - 原因：`addToCart` forEach 逐条调 `onAddCart`，`addCart` 用 `[...cart, item]` 基于同一渲染快照，14 次互相覆盖，只剩最后一条。
 - 修复：审阅页一次 `onAddCart(array)`；`addCart` 用函数式更新 + `mergeCartItems`（kind+id 去重）；localStorage 持久化改由 effect 统一处理（载入 key 完成前不写，避免串项目）。
 - 验证：渲染 harness 新增 TASK-21（全选 14 条 → 一次 dispatch 14 条；合并去重=15/16），全部通过；`node --test` 162/162。
+
+
+### 扩写方案确认可见性修复
+
+- 问题：AI 把「要改哪些大纲/待作者批准」写在 plan.notes 与 plan.outlineChanges，工作台只当普通备注显示，无确认入口；用户以为没输出。
+- 修复：plan.confirmations（AI 待拍板事项，无则回退 notes 关键词）；plan-ready「⚠ 需要你确认（N）」+ 大纲变更逐条 checkbox + 全同意/取消；confirmPlan 提交 approvedOutlineIds → approvedOutlineChanges；全批准 start→running，未批准→structuring 走闸门；子导航「待确认」徽标。
+- 后端：confirmPlan 支持 approvedOutlineIds、start 保留已批准变更、goal prompt 标出未批准变更、MCP plan 保存 confirmations、plan prompt 要求 confirmations。
+- 测试 163/163；harness TASK-21 EXPANSION CONFIRM 通过。
