@@ -6,7 +6,7 @@
 版本号遵循 [语义化版本（SemVer）](https://semver.org/lang/zh-CN/)。
 数据格式保持向后兼容：旧版本产生的 `~/StoryDesk` 数据可以直接被新版本读取。
 
-## [Unreleased]
+## [0.5.1] - 2026-10-22
 
 ### 新增
 

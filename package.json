@@ -1,6 +1,6 @@
 {
   "name": "dsh-long-novel-workbench",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "长篇中文小说工作台：注意力优先（每章 0–100 分）+ 事实账本/时间线/世界地点自洽 + 章节地图 + 整本书全自动生成；19 个页签、11 个 Agent 分工、8 套名家风格预设、审稿/提案/对齐与 AI 生成。",
   "type": "module",
   "main": "index.js",

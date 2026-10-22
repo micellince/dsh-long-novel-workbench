@@ -23,9 +23,9 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.5.0，tag `v0.5.0`；`npm test` 132 个用例全绿 |
-| npm | **已发布 0.5.0**（tag `v0.5.0` 触发 Publish workflow；`latest` = 0.5.0） |
-| GitHub Release | **v0.5.0 已建**（附稳定版 tarball）；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
+| 代码 | v0.5.1，tag `v0.5.1`；`npm test` 164 个用例全绿 |
+| npm | **已发布 0.5.1**（tag `v0.5.1` 触发 Publish workflow） |
+| GitHub Release | **v0.5.1 已建**（附稳定版 tarball）；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
 | 社区目录 | PR #8520 已开、只加一个 YAML 文件；`PR check` 已通过，`Submission gate` 因仓库未满 24h 暂时失败；仓库创建于 2026-10-21 22:50，**24h 门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
 | 自动化测试 | `test/`：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
