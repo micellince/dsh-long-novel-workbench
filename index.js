@@ -866,6 +866,12 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
     else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
   }
+  const agents = (bundle.agents ?? []).filter((agent) => agent.enabled !== false && agent.name)
+  if (body.multiAgent && agents.length > 0) {
+    lines.push('', `本项目启用多 Agent 分工（${agents.length} 个角色）：`)
+    agents.forEach((agent, index) => lines.push(`${index + 1}. ${agent.name}：${agent.duty ?? ''}`))
+    lines.push('', '执行方式：先由总编拆单，按任务相关性派给对应角色；可用 subagent 工具（有 Team 能力更好）让每个子 Agent 只做一个维度，各自把审稿/提案写回工作台，最后由责任编辑汇总、按严重度排序。不要只用一个 Agent 从头做到尾；如果宿主没有 subagent 工具，就按角色顺序逐个执行并在结果里标明角色。')
+  }
   const tasks = new Set(items.map((item) => item.task).filter(Boolean))
   if (tasks.has('full-review')) lines.push('', '任务：从头审阅整个项目。先用 novel_desk_bundle / novel_desk_context 读取项目，再逐章检查人物、时间线、事实、伏笔、大纲、文风与连续性；问题写审稿（novel_desk_review），需要补设定/改正文的提交提案（novel_desk_propose）。按 blocker → major → minor 排序。')
   if (tasks.has('import-review')) lines.push('', '任务：导入后审阅。先补齐缺失的人物/时间线/大纲（提案），再对照设定核查正文冲突（审稿）。')

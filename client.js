@@ -2191,12 +2191,13 @@ window.__ModuleLoader__.load({
     function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
       const [allowContinue, setAllowContinue] = useState(false)
       const [target, setTarget] = useState(defaultTarget)
+      const [multiAgent, setMultiAgent] = useState(true)
       const [preview, setPreview] = useState('')
       const [busy, setBusy] = useState(false)
       const showPreview = async () => {
         setBusy(true)
         try {
-          const value = await api('chat.send', { projectId, items, allowContinue, newSession: target === 'new', dryRun: true })
+          const value = await api('chat.send', { projectId, items, allowContinue, multiAgent, newSession: target === 'new', dryRun: true })
           setPreview(value.prompt)
         } catch (error) {
           window.alert(`生成预览失败：${error.message}`)
@@ -2224,14 +2225,15 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sd-send-options' },
               h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'current', onChange: () => setTarget('current') }), '发送到当前对话并执行'),
               h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'new', onChange: () => setTarget('new') }), '在本工作区新开对话并执行'),
-              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）')),
+              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
+              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: multiAgent, onChange: (e) => setMultiAgent(e.target.checked) }), '按分工派子 Agent（总编拆单 / 多角色执行）')),
             h('div', { className: 'sd-form-actions' },
               h(Btn, { onClick: showPreview, disabled: busy || items.length === 0 }, busy ? '生成中…' : '预览发过去的 Prompt')),
             preview ? h('pre', { className: 'sd-ai-result' }, preview) : null,
           ),
           h('div', { className: 'sd-modal-foot' },
             h(Btn, { onClick: () => !sending && onClose() }, '取消'),
-            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target), disabled: sending || items.length === 0 }, sending ? '发送中…' : (target === 'new' ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到当前对话`)))),
+            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target, multiAgent), disabled: sending || items.length === 0 }, sending ? '发送中…' : (target === 'new' ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到当前对话`)))),
       )
     }
 
@@ -2411,11 +2413,11 @@ window.__ModuleLoader__.load({
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
-      const sendCart = async (allowContinue, target = 'current') => {
+      const sendCart = async (allowContinue, target = 'current', multiAgent = true) => {
         if (cart.length === 0) return
         setSendingCart(true)
         try {
-          await sendToChat({ projectId, items: cart, allowContinue, newSession: target === 'new' })
+          await sendToChat({ projectId, items: cart, allowContinue, multiAgent, newSession: target === 'new' })
           saveCart([])
           setCartOpen(false)
         } catch (error) {
