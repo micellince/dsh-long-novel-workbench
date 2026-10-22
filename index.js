@@ -152,6 +152,13 @@ async function handleRpc(body, ctx) {
         projectId: body.projectId,
         split: body.split,
       })
+    case 'import.review': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      const bundle = await getBundle(root, projectId)
+      if (bundle.chapters.length === 0) throw new Error('作品还没有章节，无法审阅')
+      return persistImportReview(ctx, root, projectId, bundle)
+    }
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
     case 'ai.run': {
@@ -296,6 +303,59 @@ async function persistAiResult(root, projectId, result, request) {
   return { kind: 'proposal', proposalIds: ids }
 }
 
+/** 导入后的 AI 补全 + 冲突核查：缺什么补什么，冲突进审稿。 */
+async function persistImportReview(ctx, root, projectId, bundle) {
+  const proposalIds = []
+  const counts = { characters: 0, events: 0, outlines: 0, conflicts: 0 }
+  const errors = []
+
+  const fill = async (task, kind, title, key) => {
+    try {
+      const result = await runAi(ctx, { task, bundle })
+      const items = Array.isArray(result.json?.[key]) ? result.json[key] : []
+      if (items.length === 0) return
+      const proposal = await createProposal(root, projectId, {
+        kind,
+        chapter: items[0]?.chapter ?? null,
+        title,
+        summary: `AI 识别到 ${items.length} 条可补充的${kind === 'characters' ? '人物' : kind === 'events' ? '事件' : '大纲'}，采纳后写入账本。`,
+        items,
+        rationale: '基于正文与已导入设定生成，未自动写入。',
+      })
+      proposalIds.push(proposal.id)
+      counts[kind] = items.length
+    } catch (error) {
+      errors.push(`${task}: ${error.message}`)
+    }
+  }
+
+  if (bundle.characters.length === 0) await fill('import-fill-characters', 'characters', '人物卡补全（AI）', 'characters')
+  if (bundle.events.length === 0) await fill('import-fill-events', 'events', '时间线补全（AI）', 'events')
+  if (bundle.outlines.length === 0) await fill('import-fill-outlines', 'outlines', '大纲补全（AI）', 'outlines')
+
+  try {
+    const result = await runAi(ctx, { task: 'import-conflicts', bundle })
+    const conflicts = Array.isArray(result.json?.conflicts) ? result.json.conflicts : []
+    for (const conflict of conflicts) {
+      await upsertEntity(root, projectId, 'reviews', {
+        chapter: conflict.chapter,
+        dimension: conflict.dimension ?? '连续性',
+        severity: conflict.severity ?? 'major',
+        issue: conflict.issue ?? '',
+        suggestion: conflict.suggestion ?? '',
+        status: 'open',
+        source: 'ai',
+        against: conflict.against ?? '',
+      })
+      counts.conflicts += 1
+    }
+  } catch (error) {
+    errors.push(`import-conflicts: ${error.message}`)
+  }
+
+  return { proposalIds, counts, reviews: counts.conflicts, errors }
+}
+
 function mountRoute(ctx) {
   ctx.inject(['webServer'], (c) => {
     const webServer = c.webServer
@@ -386,7 +446,7 @@ const bundleTool = {
     type: 'object',
     properties: {
       project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
-      kind: { type: 'string', enum: ['summary', 'chapters', 'facts', 'events', 'foreshadow', 'conflicts', 'characters', 'highlights', 'presets', 'reviews', 'proposals', 'agents', 'alignment', 'checks'], description: '要看的部分，默认 summary' },
+      kind: { type: 'string', enum: ['summary', 'chapters', 'facts', 'events', 'foreshadow', 'conflicts', 'characters', 'highlights', 'presets', 'outlines', 'reviews', 'proposals', 'agents', 'alignment', 'checks'], description: '要看的部分，默认 summary' },
     },
     additionalProperties: false,
   },
@@ -416,6 +476,7 @@ const bundleTool = {
     if (kind === 'conflicts') lines.push('', `## 冲突（${bundle.conflicts.length}）`, ...bundle.conflicts.map((c) => `- ${c.title} ｜ ${c.type ?? ''} ｜ ${c.status ?? 'active'} ｜ 赌注：${c.stakes ?? '—'}`))
     if (kind === 'characters') lines.push('', `## 人物（${bundle.characters.length}）`, ...bundle.characters.map((c) => `- ${c.name} ｜ ${c.role ?? ''} ｜ 目标：${c.goal ?? '—'} ｜ 缺陷：${c.flaw ?? '—'}`))
     if (kind === 'highlights') lines.push('', `## 高光（${bundle.highlights.length}）`, ...bundle.highlights.map((x) => `- [第${x.chapter ?? '?'}章] ${x.text ?? ''}`))
+    if (kind === 'outlines') lines.push('', `## 章节大纲（${bundle.outlines.length}）`, ...bundle.outlines.slice(0, 60).map((o) => `- 第${o.chapter}章 ${o.title}${o.summary ? `：${String(o.summary).slice(0, 80)}` : ''}`))
     if (kind === 'presets') lines.push('', `## 写作预设（${bundle.presets.length}）`, ...bundle.presets.map((p) => `- ${p.name} ｜ 计划 ${p.plannedChapters ?? '—'} 章 × ${p.chapterWords ?? '—'} 字 ｜ ${p.pov ?? ''} ｜ ${p.tone ?? ''}`))
     if (kind === 'reviews') lines.push('', `## 审稿（${bundle.reviews.length}）`, ...bundle.reviews.map((r) => `- [第${r.chapter ?? '?'}章 ｜ ${r.severity ?? ''} ｜ ${r.dimension ?? ''}] ${r.issue ?? ''} → ${r.suggestion ?? ''}（${r.status ?? 'open'}）`))
     if (kind === 'proposals') lines.push('', `## 提案（${bundle.proposals.length}）`, ...bundle.proposals.map((p) => `- [${p.status}] ${p.kind} · ${p.title}${p.summary ? `：${p.summary}` : ''}`))
@@ -467,6 +528,10 @@ const contextTool = {
     if (bundle.events.length > 0) {
       lines.push('', '## 时间线')
       for (const e of bundle.events) lines.push(`- [第${e.chapter ?? '?'}章 ｜ ${e.storyTime ?? '时间未填'}] ${e.title}`)
+    }
+    if (bundle.outlines.length > 0) {
+      lines.push('', `## 章节大纲（共 ${bundle.outlines.length}）`)
+      for (const outline of bundle.outlines.slice(0, 8)) lines.push(`- 第${outline.chapter}章 ${outline.title}${outline.summary ? `：${String(outline.summary).slice(0, 100)}` : ''}`)
     }
     const openForeshadow = bundle.foreshadow.filter((f) => f.status !== 'paid' && f.status !== 'dropped')
     if (openForeshadow.length > 0) {
@@ -524,6 +589,12 @@ const planTool = {
     lines.push(`写作口径：${preset.pov || bundle.project.pov || '—'} / ${preset.tense || bundle.project.tense || '—'} / ${preset.tone || '—'}`)
     lines.push(`风格规则：${Array.isArray(preset.styleRules) ? preset.styleRules.join('；') : '—'}`)
     lines.push(`禁忌：${Array.isArray(preset.taboo) ? preset.taboo.join('；') : '—'}`)
+    const targetOutline = (bundle.outlines ?? []).find((o) => Number(o.chapter) === chapter)
+    if (targetOutline) {
+      lines.push('', `## 本章大纲（第 ${chapter} 章）`, `- ${targetOutline.title}`)
+      if (targetOutline.summary) lines.push(targetOutline.summary)
+      if (Array.isArray(targetOutline.beats) && targetOutline.beats.length > 0) lines.push(...targetOutline.beats.map((b) => `- ${b}`))
+    }
     lines.push('', '## 必须延续的既有事实')
     for (const f of bundle.facts.slice(-20)) lines.push(`- ${f.subject} · ${f.attribute} = ${f.value}（第${f.chapter ?? '?'}章）`)
     lines.push('', '## 时间线（最近）')

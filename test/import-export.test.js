@@ -107,6 +107,88 @@ test('scanImport：递归扫描、默认一文件一章、H1 作标题、按章�
   )
 })
 
+test('runImport：作品包深度导入（章节 + 人物卡 + 大纲 + 追踪 + 规范）', async (t) => {
+  const root = await makeRoot(t)
+  const dir = await mkdtemp(join(tmpdir(), 'storydesk-pack-'))
+  t.after(async () => { await rm(dir, { recursive: true, force: true }) })
+  await mkdir(join(dir, '正文'), { recursive: true })
+  await mkdir(join(dir, 'wiki', 'entities'), { recursive: true })
+  await mkdir(join(dir, 'wiki', 'raw'), { recursive: true })
+
+  await writeFile(join(dir, '正文', '第一章正文.md'), '# 第一回 少年下山\n\n## 第一节 辞别\n\n山门初开。\n', 'utf8')
+  await writeFile(join(dir, '正文', '第二章正文.md'), '# 第二回 驿道相逢\n\n## 第一节 茶棚\n\n故人重逢。\n', 'utf8')
+  await writeFile(join(dir, 'wiki', 'entities', 'hua.md'), `---
+title: 华羽生
+tags:
+  - protagonist
+---
+
+## 身份
+
+终南派弟子。
+
+## 性格
+
+内敛沉稳。
+`, 'utf8')
+  await writeFile(join(dir, 'wiki', 'raw', '大纲.md'), '- 第一回：少年下山\n  - 辞别师父，下山遇乱\n- 第二回：驿道相逢\n  - 茶棚遇李墨白\n', 'utf8')
+  await writeFile(join(dir, 'wiki', 'raw', '追踪.md'), `## 第一回 少年下山
+
+时间：天宝十四载冬
+地点：终南山云隐村
+
+人物：华羽生（16岁，终南派，颈佩雄玉佩）、公孙子丘（师父）
+
+事件：
+- 华羽生辞别师父下山
+- 小蝶送药囊
+
+物品：雄玉佩、药囊
+
+伏笔：
+- 身世与二十年前惨案有关
+
+---
+`, 'utf8')
+  await writeFile(join(dir, 'wiki', 'raw', '章回体写作规范.md'), '# 写作规范\n\n- 禁止心理独白\n- 回目要对仗\n- 每回分三节\n', 'utf8')
+
+  const importer = await loadImporter()
+  const scanImport = needFn(importer, 'scanImport', 'lib/importer.js')
+  const scan = await scanImport(root, dir)
+  assert.equal(scan.counts.chapters, 2)
+  assert.equal(scan.counts.characters, 1)
+  assert.equal(scan.counts.outlines, 2)
+  assert.ok(scan.counts.events >= 2, '追踪的事件应被解析')
+  assert.ok(scan.counts.facts >= 2, '追踪的人物信息应转成事实')
+  assert.ok(scan.counts.foreshadow >= 1)
+  assert.equal(scan.counts.presets, 1)
+  assert.equal(scan.detected.characters, true)
+
+  const runImport = needFn(importer, 'runImport', 'lib/importer.js')
+  const result = await runImport(root, { path: dir, projectName: '作品包测试' })
+  assert.equal(result.counts.chapters, 2)
+  assert.equal(result.counts.characters, 1)
+  assert.equal(result.counts.outlines, 2)
+
+  const bundle = await store.getBundle(root, result.projectId)
+  assert.equal(bundle.characters.length, 1)
+  assert.equal(bundle.characters[0].name, '华羽生')
+  assert.equal(bundle.characters[0].role, 'protagonist')
+  assert.equal(bundle.outlines.length, 2)
+  assert.equal(bundle.outlines[0].chapter, 1)
+  assert.equal(bundle.events.length >= 2, true)
+  assert.equal(bundle.facts.length >= 2, true)
+  assert.equal(bundle.foreshadow.length >= 1, true)
+  assert.ok(bundle.presets.some((preset) => /导入预设/.test(preset.name)), '应导入写作规范预设')
+  assert.ok(bundle.presets.length >= 1)
+  assert.equal(bundle.chapters[0].storyTime, '天宝十四载冬')
+  assert.equal(bundle.chapters[0].location, '终南山云隐村')
+  assert.ok(bundle.chapters[0].characters.includes('华羽生'))
+  const records = await store.listImportRecords(root, result.projectId)
+  assert.equal(records.length, 1)
+  assert.equal(records[0].counts.chapters, 2)
+})
+
 test('runImport：中文数字文件名排序，一个文件一章，## 小节保留在正文里', async (t) => {
   const root = await makeRoot(t)
   const dir = await mkdtemp(join(tmpdir(), 'storydesk-cn-'))

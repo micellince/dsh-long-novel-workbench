@@ -1,7 +1,7 @@
 # HANDOVER · 长篇中文小说工作台
 
 > 交接时间：2026-10-22 凌晨（Asia/Shanghai）
-> 当前版本：**v0.4.1**（修复目录导入切章/排序；npm 已发布 0.4.1）
+> 当前版本：**v0.4.1 + 未发布改动**（作品包深度导入 / 大纲 / 导入审阅；本轮只本地测试，未发 npm）
 > 工作区：`/Users/micellince/Documents/deepseek-harness/dsh-long-novel-workbench`
 > GitHub：https://github.com/micellince/dsh-long-novel-workbench
 > npm：https://www.npmjs.com/package/dsh-long-novel-workbench

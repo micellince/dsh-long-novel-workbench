@@ -259,6 +259,24 @@ window.__ModuleLoader__.load({
           { k: 'outputs', t: '产出', type: 'text' },
         ],
       },
+      outlines: {
+        title: '章节大纲',
+        icon: '🗂️',
+        desc: '这本书的章节骨架：每章标题、摘要、节拍、状态。AI 写下一章方案时会优先读这里。',
+        columns: [
+          { k: 'chapter', t: '章', w: '56px' },
+          { k: 'title', t: '标题' },
+          { k: 'summary', t: '摘要' },
+          { k: 'status', t: '状态', w: '80px', format: (v) => ({ planned: '计划', drafted: '已写', done: '完成' }[v] ?? v ?? '计划') },
+        ],
+        fields: [
+          { k: 'chapter', t: '章号', type: 'number' },
+          { k: 'title', t: '标题', type: 'text', required: true },
+          { k: 'summary', t: '摘要', type: 'textarea', rows: 3 },
+          { k: 'beats', t: '节拍', type: 'lines', ph: '每行一个节拍' },
+          { k: 'status', t: '状态', type: 'select', options: [['planned', '计划'], ['drafted', '已写'], ['done', '完成']] },
+        ],
+      },
       presets: {
         title: '写作预设',
         icon: '🎛️',
@@ -291,6 +309,7 @@ window.__ModuleLoader__.load({
     const TABS = [
       { id: 'overview', label: '总览', icon: '📊' },
       { id: 'chapters', label: '章节', icon: '📄' },
+      { id: 'outlines', label: '大纲', icon: '🗂️' },
       { id: 'timeline', label: '时间线', icon: '🕰️' },
       { id: 'facts', label: '事实账本', icon: '⚖️' },
       { id: 'foreshadow', label: '伏笔', icon: '🧩' },
@@ -682,6 +701,7 @@ window.__ModuleLoader__.load({
       const cards = [
         ['章节', stats.chapters, '📄'],
         ['字数', stats.words, '✍️'],
+        ['大纲', stats.outlines ?? 0, '🗂️'],
         ['人物', stats.characters, '👤'],
         ['事实', stats.facts, '⚖️'],
         ['未回收伏笔', stats.openForeshadow, '🧩'],
@@ -1879,7 +1899,7 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
-    function ImportDialog({ onClose, onImported }) {
+    function ImportDialog({ onClose, onImported, onGo }) {
       const [path, setPath] = useState('')
       const [split, setSplit] = useState('auto')
       const [scan, setScan] = useState(null)
@@ -1887,11 +1907,14 @@ window.__ModuleLoader__.load({
       const [genre, setGenre] = useState('')
       const [busy, setBusy] = useState('')
       const [error, setError] = useState('')
+      const [report, setReport] = useState(null)
+      const [reviewing, setReviewing] = useState(false)
+      const [review, setReview] = useState(null)
 
       const doScan = async () => {
         const dir = path.trim()
         if (!dir) {
-          window.alert('请填写本机小说目录的绝对路径')
+          window.alert('请填写本机作品目录或 .md 文件路径')
           return
         }
         setBusy('scan')
@@ -1900,7 +1923,7 @@ window.__ModuleLoader__.load({
           const value = await api('import.scan', { path: dir, split })
           setScan(value)
           if (!name.trim()) {
-            const base = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '导入作品'
+            const base = (value.root || dir).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '导入作品'
             setName(base)
           }
         } catch (err) {
@@ -1914,21 +1937,21 @@ window.__ModuleLoader__.load({
 
       const doImport = async () => {
         if (!scan) {
-          window.alert('请先点「扫描预览」确认章节')
+          window.alert('请先点「扫描预览」')
           return
         }
         if (!name.trim()) {
           window.alert('请填写作品名')
           return
         }
-        const count = scan.chapters?.length ?? 0
-        if (!window.confirm(`把 ${count} 章（约 ${scan.totalWords ?? 0} 字）导入为新作品《${name.trim()}》？`)) return
+        const c = scan.counts ?? {}
+        if (!window.confirm(`导入《${name.trim()}》？\n章节 ${c.chapters ?? 0} ｜ 人物 ${c.characters ?? 0} ｜ 大纲 ${c.outlines ?? 0} ｜ 事件 ${c.events ?? 0} ｜ 事实 ${c.facts ?? 0} ｜ 伏笔 ${c.foreshadow ?? 0} ｜ 预设 ${c.presets ?? 0}`)) return
         setBusy('run')
         try {
           const value = await api('import.run', { path: path.trim(), projectName: name.trim(), genre: genre.trim(), mode: 'new', split })
           if (!value?.projectId) throw new Error('导入没有返回作品 id')
+          setReport(value)
           onImported(value.projectId)
-          onClose()
         } catch (err) {
           window.alert(`导入失败：${err.message}`)
         } finally {
@@ -1936,45 +1959,89 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const startReview = async () => {
+        if (!report) return
+        setReviewing(true)
+        try {
+          const value = await api('import.review', { projectId: report.projectId })
+          setReview(value)
+          onImported(report.projectId)
+        } catch (err) {
+          window.alert(`审阅失败：${err.message}`)
+        } finally {
+          setReviewing(false)
+        }
+      }
+
+      const counts = report?.counts ?? {}
+      const scanCounts = scan?.counts ?? {}
+
+      const reportBody = report ? h('div', { className: 'sd-import-report' },
+        h('div', { className: 'sd-import-counts' },
+          [['章节', counts.chapters], ['人物', counts.characters], ['大纲', counts.outlines], ['事件', counts.events], ['事实', counts.facts], ['伏笔', counts.foreshadow], ['预设', counts.presets], ['冲突', counts.conflicts]]
+            .map(([label, value]) => h('div', { key: label, className: 'sd-import-count' }, h('strong', null, String(value ?? 0)), h('span', null, label)))),
+        h('p', { className: 'sd-desc' }, report.detected?.characters && report.detected?.outlines
+          ? '已从作品包里识别并导入人物卡、大纲、追踪与写作规范。'
+          : '没有找到完整的人物卡/大纲/追踪文件，AI 可以按正文补全。'),
+        review
+          ? h('div', { className: 'sd-import-review' },
+              h('h3', { className: 'sd-h3' }, '审阅完成'),
+              h('div', { className: 'sd-check sd-check-info' }, `已生成 ${review.proposalIds?.length ?? 0} 个补全提案，写入 ${review.reviews ?? 0} 条冲突审稿意见。`),
+              h('p', { className: 'sd-desc' }, '补全内容在「提案」页，冲突在「审稿」页；采纳/处理前不会改动正文和账本。'),
+              h('div', { className: 'sd-form-actions' },
+                h(Btn, { kind: 'primary', onClick: () => onGo('proposals') }, '去提案页'),
+                h(Btn, { onClick: () => onGo('reviews') }, '去审稿页'),
+                h(Btn, { onClick: onClose }, '完成')))
+          : h('div', { className: 'sd-import-review' },
+              h('p', { className: 'sd-desc' }, '「开始审阅」会做两件事：① 找齐/补齐人物卡、时间线、大纲；② 核查正文与设定、追踪、大纲之间的冲突。结果只进提案与审稿，不会直接改正文。'),
+              h('div', { className: 'sd-form-actions' },
+                h(Btn, { kind: 'primary', onClick: startReview, disabled: reviewing }, reviewing ? '审阅中…（可能需要 1–2 分钟）' : '开始审阅'),
+                h(Btn, { onClick: onClose, disabled: reviewing }, '暂不审阅，先看看'))),
+      ) : null
+
+      const formBody = !report ? h('div', null,
+        h(Field, { label: '本机路径 *', hint: '作品根目录（含 正文/、wiki/ 等）或单个 .md 文件' },
+          h('div', { className: 'sd-inline-row' },
+            h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说', onChange: setPath }),
+            h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
+        h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
+          h(Select, { value: split, options: [
+            { value: 'auto', label: '自动（推荐）' },
+            { value: 'file', label: '一个文件一章' },
+            { value: 'h1', label: '按一级标题 # 切章' },
+          ], onChange: setSplit })),
+        error ? h('div', { className: 'sd-error sd-error-inline' }, `扫描失败：${error}`) : null,
+        scan ? h('div', { className: 'sd-import-preview' },
+          h('div', null, h('strong', null, '识别结果：'),
+            `章节 ${scanCounts.chapters ?? 0} ｜ 人物 ${scanCounts.characters ?? 0} ｜ 大纲 ${scanCounts.outlines ?? 0} ｜ 事件 ${scanCounts.events ?? 0} ｜ 事实 ${scanCounts.facts ?? 0} ｜ 伏笔 ${scanCounts.foreshadow ?? 0} ｜ 预设 ${scanCounts.presets ?? 0}`),
+          h('div', { className: 'sd-hint' }, `根目录：${scan.root || scan.path}`),
+          !scan.detected?.characters ? h('div', { className: 'sd-hint' }, '⚠ 没找到人物卡目录（wiki/entities、人物/、characters/），导入后可用 AI 补全') : null,
+          !scan.detected?.outlines ? h('div', { className: 'sd-hint' }, '⚠ 没找到大纲文件（大纲.md、wiki/raw/大纲.md），导入后可用 AI 补全') : null,
+          (scan.chapters ?? []).slice(0, 12).map((chapter, index) => h('div', { key: index, className: 'sd-import-chapter' },
+            `第 ${chapter.index ?? index + 1} 章 · ${chapter.title || '（无标题）'}${chapter.words ? ` · ${chapter.words} 字` : ''}`)),
+          (scanCounts.chapters ?? 0) > 12 ? h('div', { className: 'sd-hint' }, `… 另有 ${scanCounts.chapters - 12} 章`) : null,
+          (scan.characters ?? []).length > 0 ? h('div', { className: 'sd-hint' }, `人物：${scan.characters.slice(0, 8).map((c) => c.name).join('、')}${scan.characters.length > 8 ? '…' : ''}`) : null,
+          (scan.outlines ?? []).length > 0 ? h('div', { className: 'sd-hint' }, `大纲：第 ${scan.outlines[0].chapter}–${scan.outlines[scan.outlines.length - 1].chapter} 章，共 ${scan.outlines.length} 条`) : null,
+        ) : null,
+        h('div', { className: 'sd-form sd-form-2' },
+          h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
+          h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
+      ) : null
+
       return h(
         'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && busy !== 'run' && onClose() },
-        h(
-          'div',
-          { className: 'sd-modal sd-modal-wide' },
+        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && busy !== 'run' && !reviewing && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide' },
           h('div', { className: 'sd-modal-head' },
-            h('strong', null, '⬆ 导入 Markdown 作品'),
-            h('span', { className: 'sd-hint' }, '支持整个目录或单个 .md 文件；默认一个文件一章，H1 作标题；只读扫描，不会改动原文件'),
-            h(IconBtn, { onClick: () => busy !== 'run' && onClose(), title: '关闭' }, '✕')),
-          h(
-            'div',
-            { className: 'sd-modal-body' },
-            h(Field, { label: '本机路径 *', hint: '小说目录（如 .../正文）或单个 .md 文件' },
-              h('div', { className: 'sd-inline-row' },
-                h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说/正文', onChange: setPath }),
-                h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
-            h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
-              h(Select, { value: split, options: [
-                { value: 'auto', label: '自动（推荐）' },
-                { value: 'file', label: '一个文件一章' },
-                { value: 'h1', label: '按一级标题 # 切章' },
-              ], onChange: setSplit })),
-            error ? h('div', { className: 'sd-error sd-error-inline' }, `扫描失败：${error}`) : null,
-            scan ? h('div', { className: 'sd-import-preview' },
-              h('div', null, h('strong', null, '扫描结果：'),
-                `${scan.files?.length ?? 0} 个文件 ｜ ${scan.chapters?.length ?? 0} 章 ｜ ${scan.totalWords ?? 0} 字`),
-              h('div', { className: 'sd-hint' }, scan.path || path),
-              (scan.chapters ?? []).slice(0, 20).map((chapter, index) => h('div', { key: index, className: 'sd-import-chapter' },
-                `第 ${chapter.index ?? index + 1} 章 · ${chapter.title || '（无标题）'}${chapter.words ? ` · ${chapter.words} 字` : ''}`)),
-              (scan.chapters?.length ?? 0) > 20 ? h('div', { className: 'sd-hint' }, `… 另有 ${scan.chapters.length - 20} 章` ) : null,
-            ) : null,
-            h('div', { className: 'sd-form sd-form-2' },
-              h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
-              h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
-          ),
+            h('strong', null, report ? '✅ 导入完成' : '⬆ 导入作品包'),
+            h('span', { className: 'sd-hint' }, report ? '检查导入结果，然后开始 AI 审阅' : '自动识别 章节 / 人物卡 / 大纲 / 追踪 / 写作规范'),
+            h(IconBtn, { onClick: () => busy !== 'run' && !reviewing && onClose(), title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-body' }, report ? reportBody : formBody),
           h('div', { className: 'sd-modal-foot' },
-            h(Btn, { onClick: () => busy !== 'run' && onClose() }, '取消'),
-            h(Btn, { kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : '导入并打开')),
+            report
+              ? h(Btn, { onClick: onClose }, review ? '完成' : '稍后处理')
+              : [h(Btn, { key: 'cancel', onClick: () => busy !== 'run' && onClose() }, '取消'),
+                 h(Btn, { key: 'run', kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : '导入并查看报告')]),
         ),
       )
     }
@@ -2101,7 +2168,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
-          importing ? h(ImportDialog, { onClose: () => setImporting(false), onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
+          importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
           ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
         ),
       )
@@ -2342,6 +2409,13 @@ window.__ModuleLoader__.load({
 .sd-import-preview{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);font-size:12px;display:flex;flex-direction:column;gap:5px;max-height:260px;overflow:auto;margin:4px 0 12px}
 .sd-import-chapter{font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
+
+.sd-import-report{display:flex;flex-direction:column;gap:12px}
+.sd-import-counts{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
+.sd-import-count{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:8px 10px;text-align:center;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-import-count strong{display:block;font-size:19px;line-height:1.3;font-variant-numeric:tabular-nums}
+.sd-import-count span{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-import-review{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px;display:flex;flex-direction:column;gap:8px}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
