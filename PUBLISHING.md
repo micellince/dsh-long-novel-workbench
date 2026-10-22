@@ -1,6 +1,6 @@
 # 发布与收录（DSH 插件）
 
-> 最后更新：2026-10-22（v0.5.0：注意力一号原则/世界模型/章节地图/整本书流水线，tag 触发 CI 发布）
+> 最后更新：2026-10-22（v0.5.0 已发布到 npm；GitHub Release v0.5.0 已建，附稳定版 tarball；tag 触发 CI 发布）
 
 ## 结论先说
 
@@ -40,7 +40,7 @@ DSH 插件**没有“官方登记”这一步**。一个插件要能被别人安
     本仓库创建于 **2026-10-21 22:50（Asia/Shanghai）**，门槛在 **2026-10-22 22:50** 之后自动满足。
     gate 会自己重跑并转绿，**不需要重提、push 或关掉重开**；等它变绿即可。
 - [x] 0.4.0 / 0.4.1 已发布
-- [ ] 0.5.0 发布：tag `v0.5.0` 触发 Publish workflow（需 `NPM_TOKEN` secret）；失败则用本机 token 手动 `npm publish --access public`
+- [x] 0.5.0 已发布：tag `v0.5.0` → Publish workflow 成功；npm `latest` = 0.5.0；GitHub Release v0.5.0（含 `dsh-long-novel-workbench.tgz`）
 - [ ] 目录合并后：确认目录页/市场能搜到
 
 ## 发版流程（以后每个版本）
