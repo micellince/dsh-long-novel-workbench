@@ -415,7 +415,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 通用数据页 ─────────────────────────────────────────────
-    function EntityTab({ kind, bundle, projectId, onChanged }) {
+    function EntityTab({ kind, bundle, projectId, onChanged, onAddCart }) {
       const meta = KIND_META[kind]
       const [editing, setEditing] = useState(null)
       const [mode, setMode] = useState('list')
@@ -444,6 +444,9 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'sd-pagehead-actions' },
             isCharacters ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'graph', label: '关系图' }] }) : null,
+            onAddCart && ['characters', 'foreshadow', 'highlights', 'facts', 'events', 'conflicts', 'outlines'].includes(kind)
+              ? h(Btn, { onClick: () => onAddCart({ kind: 'task', id: `enrich-${kind}`, task: `enrich-${kind}`, title: `AI 丰富${meta.title}` }) }, `＋ 加入清单：AI 丰富${meta.title}`)
+              : null,
             h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'),
           ),
         ),
@@ -1075,6 +1078,7 @@ window.__ModuleLoader__.load({
       const [feedbackFor, setFeedbackFor] = useState('')
       const [feedbackText, setFeedbackText] = useState('')
       const [showDone, setShowDone] = useState(false)
+      const [reopenSelected, setReopenSelected] = useState([])
       const [selected, setSelected] = useState([])
       const [kindFilter, setKindFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
@@ -1124,6 +1128,21 @@ window.__ModuleLoader__.load({
           onChanged()
         } catch (error) {
           window.alert(error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      const toggleReopen = (id) => setReopenSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      const batchReopen = async (ids) => {
+        if (ids.length === 0) { window.alert('请先勾选要重新打开的提案'); return }
+        setBusy('batch-reopen')
+        try {
+          const value = await api('proposal.batchReopen', { projectId, ids })
+          window.alert(`已重新打开 ${value?.reopened ?? 0} 条${value?.missing?.length ? `，${value.missing.length} 条未找到` : ''}`)
+          setReopenSelected([])
+          onChanged()
+        } catch (error) {
+          window.alert(`批量重新打开失败：${error.message}`)
         } finally {
           setBusy('')
         }
@@ -1287,8 +1306,13 @@ window.__ModuleLoader__.load({
               ),
         )),
         done.length > 0 ? h('div', { className: 'sd-section' },
-          h('div', { className: 'sd-pagehead' }, h('h3', { className: 'sd-h3' }, `已处理（${done.length}）`), h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开')),
-          showDone ? h('div', { className: 'sd-mini-list' }, done.slice(-20).reverse().map((p) => h('div', { key: p.id, className: 'sd-mini-row' },
+          h('div', { className: 'sd-pagehead' },
+            h('div', null, h('h3', { className: 'sd-h3' }, `已处理 / 待确认（${done.length}）`), h('p', { className: 'sd-hint' }, '「已修订」表示生成了替代提案；替代提案采纳前不算处理完，可勾选后批量重新打开。')),
+            h('div', { className: 'sd-form-actions' },
+              h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开'),
+              h(Btn, { small: true, disabled: busy === 'batch-reopen' || !done.some((p) => reopenSelected.includes(p.id)), onClick: () => batchReopen(done.filter((p) => reopenSelected.includes(p.id)).map((p) => p.id)) }, `重新打开所选（${done.filter((p) => reopenSelected.includes(p.id)).length}）`))),
+          showDone ? h('div', { className: 'sd-mini-list' }, done.slice(-30).reverse().map((p) => h('div', { key: p.id, className: 'sd-mini-row' },
+            h('input', { type: 'checkbox', checked: reopenSelected.includes(p.id), onChange: () => toggleReopen(p.id) }),
             h(Tag, { tone: 'muted' }, { accepted: '已采纳', rejected: '已驳回', revised: '已修订', superseded: '已替代' }[p.status] ?? p.status),
             h('span', { className: 'sd-mini-title' }, p.title),
             h(Btn, { small: true, onClick: () => reopen(p), disabled: busy === p.id }, busy === p.id ? '处理中…' : '重新打开')))) : null,
@@ -2554,7 +2578,7 @@ window.__ModuleLoader__.load({
                   tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'agents'].includes(tab)
-                    ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId) })
+                    ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart })
                     : null,
                   tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
                   tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,

@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
@@ -117,6 +117,8 @@ async function handleRpc(body, ctx) {
       return rejectProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
     case 'proposal.reopen':
       return reopenProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
+    case 'proposal.batchReopen':
+      return batchReopenProposals(root, String(body.projectId ?? ''), body.ids)
     case 'proposal.feedback':
       return addProposalFeedback(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), String(body.text ?? ''))
     case 'proposal.batchAccept': {
@@ -810,6 +812,13 @@ const TASK_LABEL = {
   'generate-events': '生成时间线',
   'import-review': '导入后审阅',
   'full-review': '从头审阅整个项目',
+  'enrich-characters': 'AI 补全人物卡与关系',
+  'enrich-foreshadow': 'AI 补全伏笔',
+  'enrich-highlights': 'AI 提取高光',
+  'enrich-facts': 'AI 补全事实账本',
+  'enrich-events': 'AI 补全时间线',
+  'enrich-conflicts': 'AI 补全冲突',
+  'enrich-outlines': 'AI 补全章节大纲',
 }
 
 /** 工作台 → 对话 的交接 prompt。 */
@@ -897,6 +906,13 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
   }
   if (tasks.has('full-review')) lines.push('', '任务：从头审阅整个项目。先用 novel_desk_bundle / novel_desk_context 读取项目，再按上面的角色分工逐章检查；问题写审稿（novel_desk_review），需要补设定/改正文的提交提案（novel_desk_propose）。按 blocker → major → minor 排序。')
   if (tasks.has('import-review')) lines.push('', '任务：导入后审阅。先补齐缺失的人物/时间线/大纲（提案），再对照设定核查正文冲突（审稿）。')
+  if (tasks.has('enrich-characters')) lines.push('', '任务：补全人物卡。读 characters 与正文，只为缺字段的人物提交 characters 提案（保留 name，可带现有 id），补齐 goal/motivation/flaw/arc/personality；关系写成「名字(关系)」，如「华羽生(师徒)」，目标人物不存在也列出来。不要覆盖已有非空字段。')
+  if (tasks.has('enrich-foreshadow')) lines.push('', '任务：补全伏笔。读正文与现有伏笔，提交 foreshadow 提案：title/setupChapter/payoffChapter/status/note；指出埋设章和计划回收章。')
+  if (tasks.has('enrich-highlights')) lines.push('', '任务：提取高光。读正文，提交 highlights 提案：chapter/title/quote/why；挑真正值得保留的段落。')
+  if (tasks.has('enrich-facts')) lines.push('', '任务：补全事实账本。读正文与现有 facts，提交 facts 提案：subject/attribute/value/chapter；只补缺失或冲突的。')
+  if (tasks.has('enrich-events')) lines.push('', '任务：补全时间线。读正文与现有 events，提交 events 提案：title/chapter/storyTime/location/participants/summary。')
+  if (tasks.has('enrich-conflicts')) lines.push('', '任务：补全冲突。读正文/大纲/设定，提交 conflicts 提案：title/type/stakes/escalation/status。')
+  if (tasks.has('enrich-outlines')) lines.push('', '任务：补全章节大纲。读已写章节与现有 outlines，提交 outlines 提案：chapter/title/summary/beats/status。')
   if (String(body.instruction ?? '').trim()) lines.push('', `补充要求：${String(body.instruction).trim()}`)
   if (items.length === 0) lines.push('', `任务：${TASK_LABEL[task] ?? task}`)
   if (task === 'review-fix') lines.push('请按审稿意见修改对应章节，把修改后的完整章节提交为 chapter 提案（novel_desk_propose），不要直接覆盖正文。')
