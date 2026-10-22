@@ -35,7 +35,7 @@ window.__ModuleLoader__.load({
       setOpen(false)
       if (target && value?.sessionId) {
         try {
-          clientCtx?.get?.('uiWorkspace')?.openSession({ kind: 'session', sessionId: value.sessionId })
+          clientCtx?.get?.('uiWorkspace')?.openSession(value.sessionId)
         } catch {
           // 新会话已创建并收到消息；打不开视图也不丢
         }
