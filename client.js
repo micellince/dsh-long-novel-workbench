@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback, useRef } = React
 
     // ── 全局开关 ──────────────────────────────────────────────
+    let clientCtx = null
     const ui = { open: false, listeners: new Set() }
     function setOpen(value) {
       ui.open = value
@@ -25,6 +26,19 @@ window.__ModuleLoader__.load({
         return () => ui.listeners.delete(force)
       }, [])
       return ui.open
+    }
+
+    // ── 工作台 → 对话 交接 ───────────────────────────────────
+    async function sendToChat(payload) {
+      const value = await api('chat.send', payload)
+      setOpen(false)
+      try {
+        const workspace = clientCtx?.get?.('uiWorkspace')
+        if (workspace?.openSession && value?.sessionId) workspace.openSession({ kind: 'session', sessionId: value.sessionId })
+      } catch {
+        // 打不开会话也不影响消息已排队
+      }
+      return value
     }
 
     // ── API ───────────────────────────────────────────────────
@@ -460,6 +474,112 @@ window.__ModuleLoader__.load({
     }
 
     // ── 章节页 ────────────────────────────────────────────────
+    function DashboardTab({ bundle, projectId }) {
+      const [data, setData] = useState(null)
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async () => {
+        setBusy(true)
+        try {
+          const value = await api('usage.summary', { projectId })
+          setData(value)
+          setError('')
+        } catch (err) {
+          setError(err.message)
+        } finally {
+          setBusy(false)
+        }
+      }, [projectId])
+      useEffect(() => { load() }, [load])
+      const fmt = (n) => {
+        const value = Number(n) || 0
+        if (value >= 1000000) return (value / 1000000).toFixed(2) + 'M'
+        if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
+        return String(value)
+      }
+      const pct = (part, total) => (total > 0 ? Math.round((part / total) * 100) : 0)
+      const copySnapshot = async () => {
+        const openForeshadow = (bundle.foreshadow ?? []).filter((f) => f.status !== 'paid' && f.status !== 'dropped').length
+        const last = (bundle.chapters ?? []).slice(-1)[0]
+        const text = [
+          `【作品】《${bundle.project.name}》（projectId: ${bundle.project.id}）`,
+          `【进度】${bundle.chapters.length} 章 / ${bundle.stats.words} 字`,
+          `【账本】人物 ${bundle.characters.length} ｜ 大纲 ${bundle.outlines.length} ｜ 事件 ${bundle.events.length} ｜ 事实 ${bundle.facts.length} ｜ 伏笔 ${bundle.foreshadow.length}（未回收 ${openForeshadow}）`,
+          `【待处理】提案 ${bundle.stats.pendingProposals} ｜ 审稿 ${bundle.stats.openReviews}`,
+          last ? `【最近一章】第 ${last.id} 章《${last.title}》` : '【最近一章】（还没有章节）',
+          '',
+          '请用 novel_desk_* 工具读取/操作这个作品；需要写入正文或账本时，先用提案/审稿，等我确认。',
+        ].join('\n')
+        try {
+          await navigator.clipboard.writeText(text)
+          window.alert('项目快照已复制。到左侧对话里粘贴，就能带着同一份上下文继续聊。')
+        } catch {
+          window.prompt('复制下面的项目快照，粘贴到左侧对话：', text)
+        }
+      }
+      const wb = data?.workbench
+      const chat = data?.chat
+      return h('div', { className: 'sd-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null, h('h2', { className: 'sd-h2' }, '📊 仪表盘'), h('p', { className: 'sd-desc' }, '这个项目的上下文、两条 AI 通道和 token 消耗。工作台调用是「一次性」，对话是「多轮会话」，两边不共享历史。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: copySnapshot }, '复制项目快照到对话'),
+            h(Btn, { onClick: load, disabled: busy }, busy ? '刷新中…' : '刷新'))),
+        error ? h('div', { className: 'sd-error sd-error-inline' }, `读取失败：${error}`) : null,
+        data ? h('div', null,
+          h('div', { className: 'sd-align-cards' },
+            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '工作台 AI 消耗'), h('div', { className: 'sd-align-value' }, fmt(wb.total.totalTokens)), h('div', { className: 'sd-hint' }, `${wb.total.calls} 次调用 ｜ 今天 ${fmt(wb.today.totalTokens)}`)),
+            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '对话消耗'), h('div', { className: 'sd-align-value' }, fmt(chat.totalTokens)), h('div', { className: 'sd-hint' }, `${chat.sessions.length} 个最近会话`)),
+            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '当前上下文估算'), h('div', { className: 'sd-align-value' }, fmt(data.context.tokens)), h('div', { className: 'sd-hint' }, `${data.context.chars} 字符 ｜ 约 ${data.context.parts.length} 个区块`)),
+            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '待处理'), h('div', { className: 'sd-align-value' }, `${bundle.stats.pendingProposals} / ${bundle.stats.openReviews}`), h('div', { className: 'sd-hint' }, '提案 / 审稿'))),
+          h('div', { className: 'sd-dash-grid' },
+            h('div', { className: 'sd-section' },
+              h('h3', { className: 'sd-h3' }, '上下文构成'),
+              h('div', { className: 'sd-table' },
+                h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.4fr 1fr 1fr' } }, h('div', null, '区块'), h('div', null, '字符'), h('div', null, '估算 token')),
+                data.context.parts.map((part, i) => h('div', { key: i, className: 'sd-row', style: { gridTemplateColumns: '1.4fr 1fr 1fr' } },
+                  h('div', { className: 'sd-cell' }, part.title),
+                  h('div', { className: 'sd-cell' }, String(part.chars)),
+                  h('div', { className: 'sd-cell' }, fmt(part.tokens)))))),
+            h('div', { className: 'sd-section' },
+              h('h3', { className: 'sd-h3' }, '工作台消耗 · 按任务'),
+              wb.byTask.length === 0 ? h('p', { className: 'sd-hint' }, '还没有工作台 AI 调用记录。生成方案、审阅、按意见修改后这里会出现。') : h('div', { className: 'sd-table' },
+                h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.4fr 60px 90px 80px' } }, h('div', null, '任务'), h('div', null, '次数'), h('div', null, 'token'), h('div', null, '耗时')),
+                wb.byTask.map((row) => h('div', { key: row.task, className: 'sd-row', style: { gridTemplateColumns: '1.4fr 60px 90px 80px' } },
+                  h('div', { className: 'sd-cell' }, row.task),
+                  h('div', { className: 'sd-cell' }, String(row.calls)),
+                  h('div', { className: 'sd-cell' }, fmt(row.totalTokens)),
+                  h('div', { className: 'sd-cell' }, `${(row.durationMs / 1000).toFixed(1)}s`)))))),
+          h('div', { className: 'sd-section' },
+            h('h3', { className: 'sd-h3' }, '最近工作台调用'),
+            wb.recent.length === 0 ? h('p', { className: 'sd-hint' }, '暂无记录。') : h('div', { className: 'sd-table' },
+              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '110px 1.2fr 90px 90px 70px 60px' } }, h('div', null, '时间'), h('div', null, '任务'), h('div', null, '输入'), h('div', null, '输出'), h('div', null, '耗时'), h('div', null, '状态')),
+              wb.recent.map((row) => h('div', { key: row.id, className: 'sd-row', style: { gridTemplateColumns: '110px 1.2fr 90px 90px 70px 60px' } },
+                h('div', { className: 'sd-cell' }, new Date(row.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })),
+                h('div', { className: 'sd-cell' }, `${row.task}${row.chapter ? ` · 第${row.chapter}章` : ''}`),
+                h('div', { className: 'sd-cell' }, fmt(row.inputTokens)),
+                h('div', { className: 'sd-cell' }, fmt(row.outputTokens)),
+                h('div', { className: 'sd-cell' }, `${(row.durationMs / 1000).toFixed(1)}s`),
+                h('div', { className: 'sd-cell' }, row.ok ? '✅' : '❌'))))),
+          h('div', { className: 'sd-section' },
+            h('h3', { className: 'sd-h3' }, `对话消耗 · ${chat.cwd || '未关联工作区'}`),
+            chat.sessions.length === 0 ? h('p', { className: 'sd-hint' }, chat.note || '没有找到这个工作区目录的 DSH 会话日志。') : h('div', { className: 'sd-table' },
+              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.2fr 90px 90px 90px' } }, h('div', null, '会话'), h('div', null, '轮次'), h('div', null, 'token'), h('div', null, '最近')),
+              chat.sessions.map((session) => h('div', { key: session.id, className: 'sd-row', style: { gridTemplateColumns: '1.2fr 90px 90px 90px' } },
+                h('div', { className: 'sd-cell', title: session.id }, session.id.slice(0, 18) + '…'),
+                h('div', { className: 'sd-cell' }, String(session.messages)),
+                h('div', { className: 'sd-cell' }, fmt(session.totalTokens)),
+                h('div', { className: 'sd-cell' }, session.lastAt ? new Date(session.lastAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'))))),
+          h('div', { className: 'sd-dash-note' },
+            h('strong', null, '两条通道怎么配合：'),
+            h('div', null, '① 工作台 AI：点按钮 → 一次独立调用，上下文由项目拼装，适合「改这一段 / 审这一章 / 补一条账本」，结果进提案。'),
+            h('div', null, '② DSH 对话：左侧多轮会话，适合「把整本书的问题一次分析完」，可以调 novel_desk_* 工具读写项目。'),
+            h('div', null, '③ 往返方式：工作台「复制项目快照到对话」→ 对话里继续分析 → 让 Agent 用 novel_desk_propose 写回提案 → 回工作台采纳。'),
+          ),
+        ) : h(Empty, null, busy ? '正在读取用量…' : '暂无仪表盘数据。'),
+      )
+    }
+
     function ChaptersTab({ bundle, projectId, onChanged, initialView = 'chapters' }) {
       const [view, setView] = useState(initialView)
       const [editing, setEditing] = useState(null)
@@ -703,7 +823,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 总览页 ────────────────────────────────────────────────
-    function OverviewTab({ bundle, projectId, onChanged }) {
+    function OverviewTab({ bundle, projectId, onChanged, onAddCart }) {
       const [form, setForm] = useState(() => ({ ...bundle.project }))
       const [busy, setBusy] = useState(false)
       useEffect(() => setForm({ ...bundle.project }), [bundle.project.id])
@@ -755,7 +875,9 @@ window.__ModuleLoader__.load({
             h('h3', { className: 'sd-h3' }, `一致性检查（${bundle.checks.length}）`),
             bundle.checks.length === 0
               ? h(Empty, null, '没有发现问题。')
-              : h('div', { className: 'sd-checks' }, bundle.checks.map((check) => h('div', { key: check.id, className: `sd-check sd-check-${check.level}` }, h('div', { className: 'sd-check-title' }, check.title), h('div', { className: 'sd-check-detail' }, check.detail)))),
+              : h('div', { className: 'sd-checks' }, bundle.checks.map((check) => h('div', { key: check.id, className: `sd-check sd-check-${check.level}` },
+                  h('div', { className: 'sd-check-main' }, h('div', { className: 'sd-check-title' }, check.title), h('div', { className: 'sd-check-detail' }, check.detail)),
+                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'check', id: check.id, chapter: check.chapter, title: check.title, detail: check.detail }) }, '加入清单') : null))),
             h('h3', { className: 'sd-h3 sd-mt' }, '最近章节'),
             bundle.chapters.length === 0
               ? h(Empty, null, '还没有章节。')
@@ -886,7 +1008,7 @@ window.__ModuleLoader__.load({
       return out
     }
 
-    function ProposalTab({ bundle, projectId, onChanged, onAskAi }) {
+    function ProposalTab({ bundle, projectId, onChanged, onAskAi, onAddCart }) {
       const [busy, setBusy] = useState('')
       const [feedbackFor, setFeedbackFor] = useState('')
       const [feedbackText, setFeedbackText] = useState('')
@@ -954,13 +1076,12 @@ window.__ModuleLoader__.load({
         } catch (error) { window.alert(error.message) } finally { setBusy('') }
       }
       const revise = async (p) => {
+        const feedback = (p.feedback ?? []).map((item) => item.text).join('\n')
+        if (!feedback.trim()) { window.alert('请先写修改意见'); return }
         setBusy(p.id)
         try {
-          const value = await api('ai.run', { projectId, task: 'revise-proposal', proposalId: p.id, chapter: p.chapter })
-          const saved = value.saved ?? {}
-          window.alert(`已按修改意见生成新提案${saved.proposalId ? '（' + saved.proposalId + '）' : ''}，旧提案已标记为「已修订」。`)
-          onChanged()
-        } catch (error) { window.alert(error.message) } finally { setBusy('') }
+          await sendToChat({ projectId, task: 'revise-proposal', proposalId: p.id, chapter: p.chapter, feedback })
+        } catch (error) { window.alert(`发送到对话失败：${error.message}`) } finally { setBusy('') }
       }
       const renderBody = (p) => {
         const data = p.data ?? {}
@@ -1000,7 +1121,11 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'sd-page' },
         h('div', { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, '📥 提案'), h('p', { className: 'sd-desc' }, 'AI 或 Agent 生成的内容先停在这里。可以对比、采纳、驳回；不满意就写修改意见，再让 AI 按意见重写。采纳前不会改动任何账本或正文。')),
-          h(Btn, { kind: 'primary', onClick: () => onAskAi('next-chapter-plan') }, '🤖 让 AI 生成下一章方案'),
+          h(Btn, { kind: 'primary', onClick: async () => {
+            const nextChapter = bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1
+            try { await sendToChat({ projectId, task: 'next-chapter-plan', chapter: nextChapter }) }
+            catch (error) { window.alert(`发送到对话失败：${error.message}`) }
+          } }, '🤖 发到对话：生成下一章方案'),
         ),
         pendingAll.length > 0 ? h('div', { className: 'sd-bulkbar' },
           h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
@@ -1037,6 +1162,7 @@ window.__ModuleLoader__.load({
             ),
           ) : null,
           h('div', { className: 'sd-proposal-actions' },
+            onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: p.summary ?? '' }) }, '加入清单') : null,
             h(Btn, { kind: 'primary', onClick: () => act(p, 'accept', p.kind === 'decision' ? (choices[p.id] ?? p.data?.options?.[0]?.id) : undefined), disabled: busy === p.id }, busy === p.id ? '处理中…' : (p.kind === 'decision' ? '采纳所选' : '采纳')),
             h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
             Array.isArray(p.feedback) && p.feedback.length > 0
@@ -1109,20 +1235,17 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setResult('')
         try {
-          const value = await api('ai.run', { projectId, task, chapter: Number(chapter), instruction })
-          const saved = value.saved ?? {}
-          setResult(saved.kind === 'reviews' ? `✅ 已写入 ${saved.count} 条审稿意见${saved.overall ? `\n\n总体判断：${saved.overall}` : ''}` : `✅ 已生成${saved.proposalIds ? ` ${saved.proposalIds.length} 条` : ''}提案，请到「提案」页对比采纳。${saved.chars ? `\n新稿约 ${saved.chars} 字符。` : ''}`)
-          onChanged()
+          await sendToChat({ projectId, task, chapter: Number(chapter), instruction })
         } catch (error) {
           setResult(`❌ ${error.message}`)
-        } finally {
           setBusy(false)
         }
       }
       return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && !busy && onClose() },
         h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' }, h('strong', null, '🤖 让 AI 操作工作台'), h('span', { className: 'sd-hint' }, '结果先进入提案/审稿，采纳前不改正文'), h(IconBtn, { onClick: () => !busy && onClose(), title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-head' }, h('strong', null, '🤖 发到对话执行'), h('span', { className: 'sd-hint' }, '工作台只负责验收；AI 动作全部在左侧对话里跑'), h(IconBtn, { onClick: () => !busy && onClose(), title: '关闭' }, '✕')),
           h('div', { className: 'sd-modal-body' },
+            h('p', { className: 'sd-desc' }, '选好任务后会直接发送到左侧对话，由对话里的 Agent 调工具执行；结果以提案/审稿回到工作台。'),
             h('div', { className: 'sd-form sd-form-2' },
               h(Field, { label: '任务' }, h(Select, { value: task, options: AI_TASKS.map(([v, label]) => ({ value: v, label })), onChange: setTask })),
               h(Field, { label: '章号' }, h(TextInput, { value: chapter, type: 'number', onChange: (v) => setChapter(Number(v) || 1) })),
@@ -1132,7 +1255,7 @@ window.__ModuleLoader__.load({
             result ? h('pre', { className: 'sd-ai-result' }, result) : null,
             busy ? h('div', { className: 'sd-ai-busy' }, 'AI 正在生成，可能需要 30–120 秒…') : null,
           ),
-          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: () => !busy && onClose() }, '关闭'), h(Btn, { kind: 'primary', onClick: run, disabled: busy }, busy ? '生成中…' : '开始生成')),
+          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: () => !busy && onClose() }, '关闭'), h(Btn, { kind: 'primary', onClick: run, disabled: busy }, busy ? '发送中…' : '发送到对话')),
         ),
       )
     }
@@ -1745,7 +1868,7 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：批量审稿 ═══════════════════════════════════
-    function ReviewsTab({ bundle, projectId, onChanged }) {
+    function ReviewsTab({ bundle, projectId, onChanged, onAddCart }) {
       const meta = KIND_META.reviews
       const [editing, setEditing] = useState(null)
       const [selected, setSelected] = useState([])
@@ -1787,11 +1910,9 @@ window.__ModuleLoader__.load({
         if (!window.confirm(`让 AI 按这条意见修改第 ${review.chapter} 章，并生成提案？\n\n${review.issue ?? ''}`)) return
         setFixing(review.id)
         try {
-          const value = await api('review.fix', { projectId, reviewId: review.id })
-          window.alert(`已生成修改提案${value?.proposalId ? '（' + value.proposalId + '）' : ''}，去「提案」页对比采纳。`)
-          onChanged()
+          await sendToChat({ projectId, task: 'review-fix', reviewId: review.id, chapter: review.chapter })
         } catch (error) {
-          window.alert(`生成提案失败：${error.message}`)
+          window.alert(`发送到对话失败：${error.message}`)
         } finally {
           setFixing('')
         }
@@ -1849,6 +1970,7 @@ window.__ModuleLoader__.load({
                   return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
                 }),
                 h('div', { className: 'sd-row-actions' },
+                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'review', id: review.id, chapter: review.chapter, title: (review.issue ?? '').slice(0, 50), detail: review.issue }) }, '加入清单') : null,
                   h(Btn, { small: true, kind: 'primary', disabled: fixing === review.id || review.status === 'fixed' || review.status === 'wontfix', onClick: () => fixWithAi(review) }, fixing === review.id ? '生成中…' : 'AI 修改'),
                   h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
                   h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
@@ -1961,6 +2083,48 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
+    function CartDialog({ items, projectId, sending, onRemove, onClose, onSend }) {
+      const [allowContinue, setAllowContinue] = useState(false)
+      const [preview, setPreview] = useState('')
+      const [busy, setBusy] = useState(false)
+      const showPreview = async () => {
+        setBusy(true)
+        try {
+          const value = await api('chat.send', { projectId, items, allowContinue, dryRun: true })
+          setPreview(value.prompt)
+        } catch (error) {
+          window.alert(`生成预览失败：${error.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && !sending && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, `🧺 本次处理清单（${items.length}）`),
+            h('span', { className: 'sd-hint' }, '勾进来的问题会一次性发到左侧对话，由 Agent 逐项处理并写回提案/审稿'),
+            h(IconBtn, { onClick: () => !sending && onClose(), title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-body' },
+            items.length === 0
+              ? h(Empty, null, '清单是空的。去「审稿」「提案」「总览的一致性检查」点「加入清单」。')
+              : h('div', { className: 'sd-cart-list' },
+                  items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-item' },
+                    h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节' }[item.kind] ?? item.kind),
+                    h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
+                    h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')))),
+            h('label', { className: 'sd-cb', style: { marginTop: 10 } },
+              h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }),
+              '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
+            h('div', { className: 'sd-form-actions' },
+              h(Btn, { onClick: showPreview, disabled: busy || items.length === 0 }, busy ? '生成中…' : '预览发过去的 Prompt')),
+            preview ? h('pre', { className: 'sd-ai-result' }, preview) : null,
+          ),
+          h('div', { className: 'sd-modal-foot' },
+            h(Btn, { onClick: () => !sending && onClose() }, '取消'),
+            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue), disabled: sending || items.length === 0 }, sending ? '发送中…' : `发送 ${items.length} 项到对话`))),
+      )
+    }
+
     function ImportDialog({ onClose, onImported, onGo }) {
       const [path, setPath] = useState('')
       const [split, setSplit] = useState('auto')
@@ -2025,11 +2189,9 @@ window.__ModuleLoader__.load({
         if (!report) return
         setReviewing(true)
         try {
-          const value = await api('import.review', { projectId: report.projectId })
-          setReview(value)
-          onImported(report.projectId)
+          await sendToChat({ projectId: report.projectId, task: 'import-review' })
         } catch (err) {
-          window.alert(`审阅失败：${err.message}`)
+          window.alert(`发送到对话失败：${err.message}`)
         } finally {
           setReviewing(false)
         }
@@ -2057,7 +2219,7 @@ window.__ModuleLoader__.load({
           : h('div', { className: 'sd-import-review' },
               h('p', { className: 'sd-desc' }, '「开始审阅」会做两件事：① 找齐/补齐人物卡、时间线、大纲；② 核查正文与设定、追踪、大纲之间的冲突。结果只进提案与审稿，不会直接改正文。'),
               h('div', { className: 'sd-form-actions' },
-                h(Btn, { kind: 'primary', onClick: startReview, disabled: reviewing }, reviewing ? '审阅中…（可能需要 1–2 分钟）' : '开始审阅'),
+                h(Btn, { kind: 'primary', onClick: startReview, disabled: reviewing }, reviewing ? '发送中…' : '开始审阅（发送到对话）'),
                 h(Btn, { onClick: onClose, disabled: reviewing }, '暂不审阅，先看看'))),
       ) : null
 
@@ -2120,8 +2282,52 @@ window.__ModuleLoader__.load({
       const [creating, setCreating] = useState(false)
       const [importing, setImporting] = useState(false)
       const [ai, setAi] = useState(null)
+      const [cart, setCart] = useState([])
+      const [cartOpen, setCartOpen] = useState(false)
+      const [sendingCart, setSendingCart] = useState(false)
+      const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
+      const saveCart = (next) => {
+        setCart(next)
+        try {
+          if (cartKey) window.localStorage.setItem(cartKey, JSON.stringify(next))
+        } catch {
+          /* ignore */
+        }
+      }
+      const addCart = (item) => {
+        if (!item?.id) return
+        if (cart.some((row) => row.kind === item.kind && row.id === item.id)) return
+        saveCart([...cart, item])
+      }
+      const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
+      const sendCart = async (allowContinue) => {
+        if (cart.length === 0) return
+        setSendingCart(true)
+        try {
+          await sendToChat({ projectId, items: cart, allowContinue })
+          saveCart([])
+          setCartOpen(false)
+        } catch (error) {
+          window.alert(`发送到对话失败：${error.message}`)
+        } finally {
+          setSendingCart(false)
+        }
+      }
       const [exportFormat, setExportFormat] = useState('md')
       const [exporting, setExporting] = useState(false)
+
+      useEffect(() => {
+        if (!cartKey) {
+          setCart([])
+          return
+        }
+        try {
+          const raw = window.localStorage.getItem(cartKey)
+          setCart(raw ? JSON.parse(raw) : [])
+        } catch {
+          setCart([])
+        }
+      }, [cartKey])
 
       const refresh = useCallback(async (preferred) => {
         setBusy(true)
@@ -2190,7 +2396,8 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sd-head-actions' },
               busy ? h('span', { className: 'sd-hint' }, '同步中…') : null,
               h(Btn, { small: true, onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
-              h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setAi({ task: 'next-chapter-plan', chapter: bundle ? (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1) : 1 }) }, '🤖 让 AI 操作'),
+              h(Btn, { small: true, disabled: !bundle, onClick: () => setCartOpen(true) }, `🧺 清单${cart.length ? ` (${cart.length})` : ''}`),
+              h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setAi({ task: 'next-chapter-plan', chapter: bundle ? (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1) : 1 }) }, '🤖 发到对话'),
               bundle
                 ? h('select', { className: 'sd-input sd-export-select', value: exportFormat, title: '导出格式', onChange: (e) => setExportFormat(e.target.value) },
                     h('option', { value: 'md' }, 'Markdown'),
@@ -2216,20 +2423,22 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'sd-body' },
                 h('nav', { className: 'sd-nav' }, TABS.map((t) => h('button', { key: t.id, type: 'button', className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`, onClick: () => setTab(t.id) }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label)))),
                 h('main', { className: 'sd-main' },
-                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
+                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
+                  tab === 'dashboard' ? h(DashboardTab, { bundle, projectId }) : null,
                   tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'agents'].includes(tab)
                     ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId) })
                     : null,
-                  tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
+                  tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
                   tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
-                  tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
+                  tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'settings' ? h(SettingsTab, { bundle, projectId, onChanged: () => refresh(projectId), onProjectDeleted: () => { setProjectId(''); refresh('') } }) : null,
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
+          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
           importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
           ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
         ),
@@ -2487,13 +2696,22 @@ window.__ModuleLoader__.load({
 .sd-decision-options{display:flex;flex-direction:column;gap:6px;margin-top:2px}
 .sd-decision-option{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;cursor:pointer;font-size:12px}
 .sd-decision-option:hover{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-@media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-nav{width:120px}}
+
+.sd-dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.sd-dash-note{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:10px 12px;font-size:12px;line-height:1.8;background:var(--dsw-alias-bg-layer-1,#fafafa);display:flex;flex-direction:column;gap:2px}
+
+.sd-cart-list{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto}
+.sd-cart-item{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;padding:7px 9px;font-size:12px}
+.sd-cart-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-check-main{display:flex;flex-direction:column;gap:2px}
+@media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
     // ── 插件挂载 ──────────────────────────────────────────────
     return {
       inject: ['slots'],
       apply(ctx) {
+        clientCtx = ctx
         const style = document.createElement('style')
         style.dataset.plugin = 'dsh-story-desk'
         style.textContent = CSS

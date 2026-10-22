@@ -5,10 +5,12 @@
  * 2) Agent 工具：读上下文、生成「工作单」、提交提案/审稿、按需直写。
  */
 
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews } from './lib/store.js'
+import { randomUUID } from 'node:crypto'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
+import { estimateContext, runAi } from './lib/ai.js'
+import { loadChatUsage } from './lib/usage.js'
 import { builtinPresets } from './lib/defaults.js'
-import { runAi } from './lib/ai.js'
 
 const ROUTE = '/novel-desk/api'
 const MAX_BODY = 8 * 1024 * 1024
@@ -167,7 +169,7 @@ async function handleRpc(body, ctx) {
       if (!review) throw new Error('审稿意见不存在')
       const chapter = (bundle.chapters ?? []).find((row) => Number(row.id) === Number(review.chapter))
       if (!chapter) throw new Error(`第 ${review.chapter} 章不存在，无法按审稿修改`)
-      const result = await runAi(ctx, { task: 'review-fix', bundle, chapter: chapter.id, review })
+      const result = await runAiLogged(ctx, root, projectId, { task: 'review-fix', bundle, chapter: chapter.id, review })
       const json = result.json ?? {}
       const proposal = await createProposal(root, projectId, {
         kind: 'chapter',
@@ -182,6 +184,81 @@ async function handleRpc(body, ctx) {
       await upsertEntity(root, projectId, 'reviews', { id: review.id, fixProposalId: proposal.id })
       return { proposalId: proposal.id, reviewId: review.id }
     }
+    case 'chat.sessions': {
+      const controller = ctx.get('sessionController')
+      if (!controller?.list) throw new Error('宿主未提供会话服务')
+      const value = await controller.list({}, AbortSignal.timeout(15000))
+      return { items: (value.items ?? []).map((item) => ({ sessionId: item.sessionId, cwd: item.cwd ?? '', updatedAt: item.updatedAt, running: item.running, blank: item.blank, origin: item.origin ?? null, parentSessionId: item.parentSessionId ?? null })) }
+    }
+    case 'chat.send': {
+      const projectId = String(body.projectId ?? '')
+      const bundle = await getBundle(root, projectId)
+      const controller = ctx.get('sessionController')
+      if (!controller?.list || !controller?.prompt) throw new Error('宿主未提供会话服务，无法发送到对话')
+      const imports = await listImportRecords(root, projectId)
+      const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
+      const prompt = String(body.prompt ?? '').trim() || buildHandoffPrompt(bundle, body, rootPath)
+      if (body.dryRun) return { dryRun: true, prompt, rootPath }
+      const list = await controller.list({}, AbortSignal.timeout(15000))
+      const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
+      const sessions = (list.items ?? []).filter((item) => !item.origin && !item.parentSessionId && !item.blank)
+      const preferred = explicit || sessions.find((item) => item.running)
+        || sessions.find((item) => rootPath && item.cwd === rootPath)
+        || sessions[0]
+      if (!preferred) throw new Error('没有可用的对话会话，请先在左侧打开或新建一个对话')
+      await controller.prompt({
+        requestId: randomUUID(),
+        sessionId: preferred.sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: prompt }],
+        clientTimeZone: 'Asia/Shanghai',
+      }, AbortSignal.timeout(20000))
+      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath }
+    }
+    case 'usage.summary': {
+      const projectId = String(body.projectId ?? '')
+      const bundle = await getBundle(root, projectId)
+      const records = await listUsageRecords(root, projectId)
+      const now = Date.now()
+      const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0)
+      const sum = (rows) => rows.reduce((acc, row) => {
+        acc.calls += 1
+        acc.inputTokens += Number(row.inputTokens) || 0
+        acc.outputTokens += Number(row.outputTokens) || 0
+        acc.cacheReadTokens += Number(row.cacheReadTokens) || 0
+        acc.cacheWriteTokens += Number(row.cacheWriteTokens) || 0
+        acc.totalTokens += Number(row.totalTokens) || 0
+        acc.durationMs += Number(row.durationMs) || 0
+        return acc
+      }, { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, durationMs: 0 })
+      const byTask = {}
+      for (const row of records) {
+        const key = row.task || '未知'
+        if (!byTask[key]) byTask[key] = []
+        byTask[key].push(row)
+      }
+      const byTaskRows = Object.entries(byTask).map(([task, rows]) => ({ task, ...sum(rows) })).sort((a, b) => b.totalTokens - a.totalTokens)
+      const imports = await listImportRecords(root, projectId)
+      const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
+      const chat = await loadChatUsage(rootPath)
+      const context = estimateContext(bundle)
+      return {
+        projectId,
+        rootPath,
+        context,
+        workbench: {
+          total: sum(records),
+          today: sum(records.filter((row) => new Date(row.at).getTime() >= startOfDay.getTime())),
+          byTask: byTaskRows,
+          recent: records.slice(-20).reverse(),
+        },
+        chat,
+        lanes: [
+          { id: 'workbench', label: '工作台 AI', kind: 'one-shot', hint: '点一次按钮 = 一次独立调用，不进入对话历史；上下文由工作台按项目拼装，结果进提案/审稿。' },
+          { id: 'chat', label: 'DSH 对话', kind: 'agent-session', hint: '左侧对话框的 Agent 会话，多轮、可调 novel_desk_* 工具；用量从 session 日志读取。' },
+        ],
+      }
+    }
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
     case 'ai.run': {
@@ -193,7 +270,7 @@ async function handleRpc(body, ctx) {
       const feedback = proposal
         ? (body.feedback ?? (proposal.feedback ?? []).map((f) => f.text).join('\n'))
         : body.instruction
-      const result = await runAi(ctx, {
+      const result = await runAiLogged(ctx, root, projectId, {
         task: proposal ? 'revise-proposal' : String(body.task ?? 'next-chapter-plan'),
         bundle,
         chapter: body.chapter ?? proposal?.chapter,
@@ -220,8 +297,29 @@ async function persistAiResult(root, projectId, result, request) {
     let created
     if (old.kind === 'plan' || old.kind === 'chapter' || old.kind === 'custom') {
       created = await createProposal(root, projectId, { ...common, summary: json.summary ?? old.summary, data: { ...json, chapter: old.chapter ?? json.chapter }, rationale: '按作者修改意见重写。' })
+    } else if (old.kind === 'decision') {
+      const base = old.data ?? {}
+      created = await createProposal(root, projectId, {
+        ...common,
+        summary: json.summary ?? json.answer?.slice(0, 200) ?? old.summary,
+        data: {
+          ...base,
+          ...json,
+          conflictType: base.conflictType,
+          reviewId: base.reviewId,
+          options: Array.isArray(json.options) && json.options.length > 0 ? json.options : base.options,
+        },
+        rationale: '按作者修改意见调整冲突决策。',
+        priority: old.priority,
+      })
     } else {
-      const items = Array.isArray(json.items) ? json.items : (Array.isArray(json[old.kind]) ? json[old.kind] : [])
+      const items = Array.isArray(json.items)
+        ? json.items
+        : Array.isArray(json[old.kind])
+          ? json[old.kind]
+          : Array.isArray(json.outlines)
+            ? json.outlines
+            : []
       created = await createProposal(root, projectId, { ...common, summary: `按意见修订，共 ${items.length} 条`, items, rationale: '按作者修改意见重写。' })
     }
     await markProposalRevised(root, projectId, old.id, created.id)
@@ -375,7 +473,7 @@ async function persistImportReview(ctx, root, projectId, bundle) {
 
   const fill = async (task, kind, title, key) => {
     try {
-      const result = await runAi(ctx, { task, bundle })
+      const result = await runAiLogged(ctx, root, projectId, { task, bundle })
       const items = Array.isArray(result.json?.[key]) ? result.json[key] : []
       if (items.length === 0) return
       const proposal = await createProposal(root, projectId, {
@@ -399,7 +497,7 @@ async function persistImportReview(ctx, root, projectId, bundle) {
 
   // 已经有审稿记录就不再重复跑冲突核查，避免重复点击产生重复意见
   if ((bundle.reviews ?? []).length === 0) try {
-    const result = await runAi(ctx, { task: 'import-conflicts', bundle })
+    const result = await runAiLogged(ctx, root, projectId, { task: 'import-conflicts', bundle })
     const conflicts = Array.isArray(result.json?.conflicts) ? result.json.conflicts : []
     for (const conflict of conflicts) {
       const issue = conflict.issue ?? ''
@@ -479,6 +577,107 @@ async function persistImportReview(ctx, root, projectId, bundle) {
   counts.decisions += await createFactDecisionProposals(root, projectId, bundle)
 
   return { proposalIds, counts, reviews: counts.conflicts, errors }
+}
+
+const TASK_LABEL = {
+  'next-chapter-plan': '生成下一章方案',
+  'review-chapter': '审阅一章',
+  'review-fix': '按审稿意见修改',
+  'revise-proposal': '按作者意见修订提案',
+  'continue-chapter': '续写章节',
+  'extract-facts': '抽取事实账本',
+  'generate-events': '生成时间线',
+  'import-review': '导入后审阅',
+}
+
+/** 工作台 → 对话 的交接 prompt。 */
+function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
+  const task = String(body.task ?? 'custom')
+  const project = bundle.project
+  const lines = [
+    `【工作台交接】项目《${project.name}》 projectId=${project.id}${rootPath ? `，工作区=${rootPath}` : ''}`,
+    `进度：${bundle.chapters.length} 章 / ${bundle.stats.words} 字；人物 ${bundle.characters.length}；大纲 ${bundle.outlines.length}；事件 ${bundle.events.length}；事实 ${bundle.facts.length}；伏笔 ${bundle.foreshadow.length}；待处理提案 ${bundle.stats.pendingProposals}；审稿 ${bundle.stats.openReviews}。`,
+  ]
+  const chapter = Number(body.chapter) || null
+  if (chapter) {
+    const hit = (bundle.chapters ?? []).find((row) => Number(row.id) === chapter)
+    lines.push(`目标章节：第 ${chapter} 章${hit ? `《${hit.title}》` : ''}`)
+  }
+  if (body.reviewId) {
+    const review = (bundle.reviews ?? []).find((row) => row.id === body.reviewId)
+    if (review) {
+      lines.push('', '要处理的审稿意见：', `- 第${review.chapter}章 · ${review.dimension ?? ''} · ${review.severity ?? ''}`, `- 问题：${review.issue ?? ''}`, `- 建议：${review.suggestion ?? ''}`)
+    }
+  }
+  if (body.proposalId) {
+    const proposal = (bundle.proposals ?? []).find((row) => row.id === body.proposalId)
+    if (proposal) {
+      lines.push('', `待修订提案：${proposal.title}（kind=${proposal.kind}，第${proposal.chapter ?? '—'}章）`, `提案摘要：${proposal.summary ?? ''}`)
+      const feedback = String(body.feedback ?? '').trim()
+      if (feedback) lines.push(`作者修改意见：${feedback}`)
+    }
+  }
+  const items = Array.isArray(body.items) ? body.items.filter((item) => item && item.id) : []
+  if (items.length > 0) {
+    lines.push('', `本次清单（${items.length} 项）：`)
+    items.forEach((item, index) => {
+      const label = { review: '审稿', proposal: '提案', check: '检查', chapter: '章节', foreshadow: '伏笔' }[item.kind] ?? item.kind ?? '条目'
+      const parts = [`${index + 1}. [${label}]`]
+      if (item.chapter) parts.push(`第${item.chapter}章`)
+      if (item.title) parts.push(item.title)
+      if (item.detail) parts.push(`：${item.detail}`)
+      parts.push(`（id=${item.id}）`)
+      lines.push(parts.join(' '))
+    })
+    lines.push('', '处理要求：逐项处理；每完成一项就立刻把结果写回工作台（novel_desk_propose 提交提案 / novel_desk_review 写审稿 / novel_desk_upsert 更新状态），不要攒到最后。')
+    if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
+    else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
+  }
+  if (String(body.instruction ?? '').trim()) lines.push('', `补充要求：${String(body.instruction).trim()}`)
+  if (items.length === 0) lines.push('', `任务：${TASK_LABEL[task] ?? task}`)
+  if (task === 'review-fix') lines.push('请按审稿意见修改对应章节，把修改后的完整章节提交为 chapter 提案（novel_desk_propose），不要直接覆盖正文。')
+  else if (task === 'revise-proposal') lines.push('请按作者意见修订原提案，提交为新的提案（novel_desk_propose），不要直接改账本。')
+  else if (task === 'import-review') lines.push('请先用 novel_desk_bundle / novel_desk_context 读取项目：补齐缺失的人物卡、时间线、大纲（提交提案）；再对照人物卡、时间线、事实、大纲核查正文冲突，写入审稿（novel_desk_review）。')
+  else if (task === 'next-chapter-plan') lines.push('请读取大纲和最近章节，提交一份下一章方案提案（plan，包含事件/事实/伏笔）。')
+  else if (task === 'review-chapter') lines.push('请审阅目标章节，把问题写入审稿（novel_desk_review），不要直接改正文。')
+  lines.push('', '工作台只负责展示和验收：所有写入都用提案/审稿，采纳由我在工作台点。完成后告诉我生成了哪些提案/审稿。')
+  return lines.join('\n')
+}
+
+function usageRow(result, options, durationMs, ok, error) {
+  const usage = result?.usage ?? {}
+  const total = Number(usage.totalTokens) || (Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0) + (Number(usage.cacheReadTokens) || 0) + (Number(usage.cacheWriteTokens) || 0)
+  return {
+    source: 'workbench',
+    task: options.task,
+    chapter: options.chapter ?? options.proposal?.chapter ?? options.review?.chapter ?? null,
+    proposalId: options.proposal?.id ?? null,
+    reviewId: options.review?.id ?? null,
+    model: result?.model ?? '',
+    provider: result?.provider ?? '',
+    inputTokens: Number(usage.inputTokens) || 0,
+    outputTokens: Number(usage.outputTokens) || 0,
+    cacheReadTokens: Number(usage.cacheReadTokens) || 0,
+    cacheWriteTokens: Number(usage.cacheWriteTokens) || 0,
+    reasoningTokens: Number(usage.reasoningTokens) || 0,
+    totalTokens: total,
+    durationMs,
+    ok,
+    error: error ? String(error).slice(0, 500) : '',
+  }
+}
+
+/** 带用量记账的 AI 调用。 */
+async function runAiLogged(ctx, root, projectId, options) {
+  const startedAt = Date.now()
+  try {
+    const result = await runAi(ctx, options)
+    await appendUsageRecord(root, projectId, usageRow(result, options, Date.now() - startedAt, true))
+    return result
+  } catch (error) {
+    await appendUsageRecord(root, projectId, usageRow(null, options, Date.now() - startedAt, false, error?.message ?? error))
+    throw error
+  }
 }
 
 function mountRoute(ctx) {
