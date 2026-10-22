@@ -900,7 +900,13 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。'))),
+        h('div', { className: 'sd-pagehead' },
+          h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { kind: 'primary', onClick: async () => {
+              try { await sendToChat({ projectId, task: 'full-review' }) }
+              catch (error) { window.alert(`发送到对话失败：${error.message}`) }
+            } }, '🤖 从头审阅整个项目'))),
         h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
         h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
         h('div', { className: 'sd-two-col' },
@@ -1180,12 +1186,8 @@ window.__ModuleLoader__.load({
       }
       return h('div', { className: 'sd-page' },
         h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '📥 提案'), h('p', { className: 'sd-desc' }, 'AI 或 Agent 生成的内容先停在这里。可以对比、采纳、驳回；不满意就写修改意见，再让 AI 按意见重写。采纳前不会改动任何账本或正文。')),
-          h(Btn, { kind: 'primary', onClick: async () => {
-            const nextChapter = bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1
-            try { await sendToChat({ projectId, task: 'next-chapter-plan', chapter: nextChapter }) }
-            catch (error) { window.alert(`发送到对话失败：${error.message}`) }
-          } }, '🤖 发到对话：生成下一章方案'),
+          h('div', null, h('h2', { className: 'sd-h2' }, '📥 提案'), h('p', { className: 'sd-desc' }, 'AI 或 Agent 生成的内容先停在这里。同意就加入本次清单，和清单一起交给对话处理；不同意就驳回。工作台不直接改正文。')),
+
         ),
         pendingAll.length > 0 ? h('div', { className: 'sd-bulkbar' },
           h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
@@ -1241,12 +1243,15 @@ window.__ModuleLoader__.load({
                 h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
               )
             : h('div', { className: 'sd-proposal-actions' },
-                onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；') }) }, '加入清单') : null,
-                h(Btn, { kind: 'primary', onClick: () => act(p, 'accept'), disabled: busy === p.id }, busy === p.id ? '处理中…' : '采纳'),
-                h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
-                Array.isArray(p.feedback) && p.feedback.length > 0
-                  ? h(Btn, { kind: 'primary', onClick: () => revise(p), disabled: busy === p.id }, busy === p.id ? '重写中…' : '让 AI 按意见重写')
-                  : null,
+                onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart({
+                  kind: 'proposal',
+                  id: p.id,
+                  chapter: p.chapter,
+                  title: p.title,
+                  proposalKind: p.kind,
+                  approved: true,
+                  detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；'),
+                }) }, '同意并加入清单') : null,
                 h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
               ),
         )),
@@ -2022,7 +2027,12 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 支持按严重度筛选、全选后批量标记。')),
-          h('div', { className: 'sd-pagehead-actions' }, h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: async () => {
+              try { await sendToChat({ projectId, task: 'full-review' }) }
+              catch (error) { window.alert(`发送到对话失败：${error.message}`) }
+            } }, '🤖 从头审阅整个项目'),
+            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增')),
         ),
         all.length > 0 ? h('div', { className: 'sd-bulkbar' },
           h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
@@ -2190,6 +2200,7 @@ window.__ModuleLoader__.load({
                   items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-row' },
                     h('div', { className: 'sd-cart-item' },
                       h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节' }[item.kind] ?? item.kind),
+                      item.approved ? h(Tag, { tone: 'muted' }, '已同意') : null,
                       h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
                       h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
                     h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '给这一项补充你的处理意见（会随清单发给 AI）…', onChange: (value) => onNote(item, value) })))),

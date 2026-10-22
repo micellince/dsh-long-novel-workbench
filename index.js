@@ -791,6 +791,7 @@ const TASK_LABEL = {
   'extract-facts': '抽取事实账本',
   'generate-events': '生成时间线',
   'import-review': '导入后审阅',
+  'full-review': '从头审阅整个项目',
 }
 
 /** 工作台 → 对话 的交接 prompt。 */
@@ -830,6 +831,7 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
       if (item.title) parts.push(item.title)
       if (item.detail) parts.push(`：${item.detail}`)
       const isDecision = item.proposalKind === 'decision'
+      if (item.approved) parts.push('；作者已同意采纳')
       if (isDecision) {
         if (item.aiSuggestion) parts.push(`；AI 建议：${item.aiSuggestion}`)
         if (item.choice) parts.push(`；作者选择：${item.choice}`)
@@ -845,6 +847,9 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     if (items.some((item) => item.proposalKind === 'decision')) {
       lines.push('决策项规则：作者选择 > 作者意见 > AI 建议。把决定落成具体修改提案（chapter/…），并在 data.resolvesProposalId 填对应决策 id；不要直接改正文，也不要只回复“同意”。')
     }
+    if (items.some((item) => item.approved)) {
+      lines.push('已同意项规则：先用 novel_desk_proposal 读取提案完整内容，再按内容与清单意见执行；可以调用 novel_desk_upsert 更新对应正文/账本。执行前先核对与本清单其他项、现有人物/时间线/事实是否冲突。')
+    }
     if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
     else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
   }
@@ -853,9 +858,10 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
   if (task === 'review-fix') lines.push('请按审稿意见修改对应章节，把修改后的完整章节提交为 chapter 提案（novel_desk_propose），不要直接覆盖正文。')
   else if (task === 'revise-proposal') lines.push('请按作者意见修订原提案，提交为新的提案（novel_desk_propose），不要直接改账本。')
   else if (task === 'import-review') lines.push('请先用 novel_desk_bundle / novel_desk_context 读取项目：补齐缺失的人物卡、时间线、大纲（提交提案）；再对照人物卡、时间线、事实、大纲核查正文冲突，写入审稿（novel_desk_review）。')
+  else if (task === 'full-review') lines.push('请从头审阅整个项目：先读 novel_desk_bundle 和 novel_desk_context，再逐章检查人物、时间线、事实、伏笔、大纲、文风与连续性。把问题写成审稿（novel_desk_review）；需要补设定或改正文的，提交提案（novel_desk_propose），不要直接改正文。按严重度先给 blocker/major，再给 minor。')
   else if (task === 'next-chapter-plan') lines.push('请读取大纲和最近章节，提交一份下一章方案提案（plan，包含事件/事实/伏笔）。')
   else if (task === 'review-chapter') lines.push('请审阅目标章节，把问题写入审稿（novel_desk_review），不要直接改正文。')
-  lines.push('', '工作台只负责展示和验收：所有写入都用提案/审稿，采纳由我在工作台点。完成后告诉我生成了哪些提案/审稿。')
+  lines.push('', '工作台只负责展示和验收：按上面的清单规则执行，完成后把结果写回工作台，并告诉我生成了哪些提案/审稿/改动。')
   return lines.join('\n')
 }
 
@@ -1199,6 +1205,38 @@ const proposeTool = {
   },
 }
 
+const proposalReadTool = {
+  name: 'novel_desk_proposal',
+  description: '读取一条提案的完整内容（data/items/feedback），用于按作者已同意的提案执行修改。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称' },
+      proposalId: { type: 'string', description: '提案 id' },
+    },
+    additionalProperties: false,
+    required: ['proposalId'],
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const bundle = await getBundle(defaultRoot(), project.id)
+    const proposal = (bundle.proposals ?? []).find((row) => row.id === String(args?.proposalId ?? ''))
+    if (!proposal) throw new Error(`提案不存在：${args?.proposalId ?? ''}`)
+    return JSON.stringify({
+      id: proposal.id,
+      kind: proposal.kind,
+      chapter: proposal.chapter,
+      title: proposal.title,
+      summary: proposal.summary,
+      status: proposal.status,
+      data: proposal.data ?? null,
+      items: proposal.items ?? [],
+      feedback: proposal.feedback ?? [],
+    }, null, 2)
+  },
+}
+
 const reviewTool = {
   name: 'novel_desk_review',
   description: '提交对某一章的审稿意见（写入工作台「审稿」）。每条含维度、严重度、问题、建议；作者可在 UI 里标记已修/忽略，也可让 AI 汇总修订单。',
@@ -1271,6 +1309,7 @@ export function apply(ctx) {
   ctx.tools.register(bundleTool)
   ctx.tools.register(contextTool)
   ctx.tools.register(planTool)
+  ctx.tools.register(proposalReadTool)
   ctx.tools.register(proposeTool)
   ctx.tools.register(reviewTool)
   ctx.tools.register(upsertTool)
