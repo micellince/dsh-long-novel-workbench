@@ -226,3 +226,13 @@
 - lib/checks.js 新增：`expansion-scene-unplanned`（新增场景不在方案 additions 且无已批准大纲变更）、`expansion-subplot-unapproved`（旁线未批准）、`expansion-beats-unpreserved`（提案标注 beatsPreserved=false）、`expansion-attention-drop`（scoreAfter < scoreBefore）、`expansion-added-scene-duplicated`（新增场景跨章重复）、`duplicate-passages`（≥24 字整句跨章重复）。
 - goal prompt 元信息补 scoreBefore/scoreAfter，便于冷读下降检查。
 - 测试：新增 1 条综合检查用例；总测试 153/153。
+
+
+## 2026-10-22 · 整本书收尾（B-109）
+
+- 新增 final-cleanup 阶段 + 收尾 prompt（按章补齐人物/事实/事件/时间线/高光/伏笔/冲突/地点/大纲/注意力/世界）。
+- finalizePipelineCleanup：采纳账本类提案、驳回 pending 章节提案、归档未处理审阅，写 cleanup 报告；finish/advance 自动触发。
+- 自动采纳扩展：仅 final-cleanup 阶段账本类提案直接生效。
+- pipeline.finalize / pipeline.backfill RPC + MCP finalize；补跑收尾 prompt + 新会话。
+- 前端：done 收尾报告卡/未收尾横幅/收尾按钮/补跑收尾按钮/总览「待收尾」/running 收尾文案。
+- 测试 162/162；未真机试跑。

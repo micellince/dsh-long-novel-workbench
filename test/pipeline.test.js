@@ -109,7 +109,7 @@ test('prepare：进入 preparing，生成 prep/卷/总审阶段，新会话并�
   assert.deepEqual(stageIds.slice(0, 2), ['prep-blueprint', 'prep-outline'], '前两个阶段应是准备')
   assert.ok(stageIds.includes('write-1') && stageIds.includes('review-1') && stageIds.includes('fix-1'))
   assert.ok(stageIds.includes('write-2'))
-  assert.deepEqual(stageIds.slice(-2), ['final-review', 'final-fix'])
+  assert.deepEqual(stageIds.slice(-3), ['final-review', 'final-fix', 'final-cleanup'], 'final-fix 之后应有 final-cleanup 收尾阶段')
   const write1 = result.pipeline.stages.find((stage) => stage.id === 'write-1')
   assert.deepEqual({ from: write1.chapterFrom, to: write1.chapterTo }, { from: 1, to: 5 })
   const write2 = result.pipeline.stages.find((stage) => stage.id === 'write-2')

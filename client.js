@@ -233,6 +233,11 @@ window.__ModuleLoader__.load({
       skipped: { icon: '−', label: '跳过', tone: 'muted' },
     }
     const PIPELINE_POLL_MS = 10000
+    // 收尾阶段：老 pipeline 可能只给 id/kind，没有 name，前端补中文名。
+    const PIPELINE_STAGE_NAME = {
+      'final-cleanup': '收尾：补齐账本 + 清理残留',
+      cleanup: '收尾：补齐账本 + 清理残留',
+    }
 
     // ── 扩写（EXPANSION）常量 ─────────────────────────────────
     const EXPANSION_STATUS_META = {
@@ -2632,7 +2637,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const stages = (Array.isArray(raw.stages) ? raw.stages : []).map((stage, index) => ({
         id: String(stage?.id ?? `stage-${index + 1}`),
         kind: String(stage?.kind ?? ''),
-        name: String(stage?.name ?? stage?.id ?? `阶段 ${index + 1}`),
+        name: String(stage?.name ?? PIPELINE_STAGE_NAME[stage?.id] ?? PIPELINE_STAGE_NAME[stage?.kind] ?? stage?.id ?? `阶段 ${index + 1}`),
         status: PIPELINE_STAGE_STATUS_META[stage?.status] ? stage.status : 'pending',
         chapterFrom: Number(stage?.chapterFrom) || 0,
         chapterTo: Number(stage?.chapterTo) || 0,
@@ -2664,6 +2669,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         stages,
         currentStage: String(raw.currentStage ?? ''),
         prepared: { blueprint: prepared.blueprint === true, outline: prepared.outline === true },
+        cleanup: normalizePipelineCleanup(raw.cleanup),
         notes: (Array.isArray(raw.notes) ? raw.notes : []).map((note, index) => ({
           key: index,
           at: String(note?.at ?? ''),
@@ -2695,6 +2701,42 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 
     function pipelineStatusMeta(pipeline) {
       return PIPELINE_STATUS_META[pipeline.status] ?? PIPELINE_STATUS_META.idle
+    }
+
+    /** 收尾报告（pipeline.cleanup）：不存在时返回 null（老 run 未收尾）。 */
+    function normalizePipelineCleanup(input) {
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+      return {
+        scope: String(input.scope ?? 'all'),
+        acceptedProposals: Number(input.acceptedProposals) || 0,
+        rejectedChapter: Number(input.rejectedChapter) || 0,
+        closedReviews: Number(input.closedReviews) || 0,
+        failed: Array.isArray(input.failed) ? input.failed : [],
+        at: String(input.at ?? ''),
+      }
+    }
+
+    /** 总览/整本书页共用：待采纳提案、未处理审阅、收尾报告。 */
+    function pipelineCleanupStats(bundle) {
+      const proposals = Array.isArray(bundle?.proposals) ? bundle.proposals : null
+      const reviews = Array.isArray(bundle?.reviews) ? bundle.reviews : null
+      const pendingProposals = proposals
+        ? proposals.filter((proposal) => proposal?.status === 'pending').length
+        : Number(bundle?.stats?.pendingProposals) || 0
+      const openReviews = reviews
+        ? reviews.filter((review) => review?.status !== 'fixed' && review?.status !== 'wontfix').length
+        : Number(bundle?.stats?.openReviews) || 0
+      return {
+        pendingProposals,
+        openReviews,
+        cleanup: normalizePipelineCleanup(bundle?.pipeline?.cleanup),
+      }
+    }
+
+    function pipelineInFinalCleanup(pipeline, stageInfo) {
+      if (pipeline.currentStage === 'final-cleanup') return true
+      const current = stageInfo?.current ?? null
+      return Boolean(current && (current.id === 'final-cleanup' || current.kind === 'cleanup'))
     }
 
     function formatPipelineTokens(value) {
@@ -2913,6 +2955,43 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           window.alert(`请到工作区会话列表打开该会话（ID：${pipeline.sessionId}）。`)
         }
       }
+      const cleanupStats = pipelineCleanupStats(bundle)
+      const cleanup = cleanupStats.cleanup
+      const hasResidual = cleanupStats.pendingProposals > 0 || cleanupStats.openReviews > 0
+      const inFinalCleanup = pipelineInFinalCleanup(pipeline, stageInfo)
+      const finalizeCleanup = () => {
+        if (busy) return
+        if (!window.confirm('收尾清理会采纳非章节类待处理提案、驳回过期章节提案、归档未处理审阅；不可撤销，但正文与历史都会保留。继续？')) return
+        run('cleanup', () => api('pipeline.finalize', { projectId, scope: 'all' }))
+      }
+      const cleanupButton = (kind) => h(Btn, { key: 'cleanup', kind, disabled: !!busy, onClick: finalizeCleanup }, busy === 'cleanup' ? '收尾中…' : '收尾清理')
+      const backfillCleanup = () => {
+        if (busy) return
+        if (!window.confirm('补跑收尾会让 AI 通读全书、补齐人物/事实/事件/高光/伏笔/冲突/地点/大纲/注意力账本（只提案、不改正文），完成后自动清理残留与归档审阅。可能花费较多 token，继续？')) return
+        run('backfill', () => api('pipeline.backfill', { projectId }))
+      }
+      const backfillButton = (kind) => h(Btn, { key: 'backfill', kind, disabled: !!busy, onClick: backfillCleanup }, busy === 'backfill' ? '启动中…' : '补跑收尾（补齐账本）')
+      const cleanupStat = (label, value) => h('div', { key: label, className: 'sd-pipe-cleanup-stat' },
+        h('div', { className: 'sd-pipe-cleanup-value' }, String(value)),
+        h('div', { className: 'sd-pipe-cleanup-label' }, label))
+      const cleanupCard = cleanup
+        ? h('section', { className: 'sd-pipe-cleanup' },
+            h('div', { className: 'sd-pipe-section-head' },
+              h('h3', { className: 'sd-h3' }, '✅ 收尾完成'),
+              h('span', { className: 'sd-hint' }, cleanup.at ? formatDateTime(cleanup.at) : '')),
+            h('div', { className: 'sd-pipe-cleanup-grid' },
+              cleanupStat('采纳提案', cleanup.acceptedProposals),
+              cleanupStat('驳回过期章节提案', cleanup.rejectedChapter),
+              cleanupStat('归档审阅', cleanup.closedReviews),
+              cleanupStat('失败', cleanup.failed.length)),
+            cleanup.failed.length > 0
+              ? h('details', { className: 'sd-pipe-cleanup-failed' },
+                  h('summary', null, `失败 ${cleanup.failed.length} 条（可手动处理）`),
+                  h('div', { className: 'sd-pipe-cleanup-failed-list' }, cleanup.failed.map((item, index) => h('div', { key: index, className: 'sd-pipe-cleanup-failed-item' }, typeof item === 'string' ? item : JSON.stringify(item)))))
+              : null,
+            h('p', { className: 'sd-pipe-cleanup-hint' }, '工作区已清理，可以开始读稿或发起第二次审阅。'),
+            hasResidual ? h('div', { className: 'sd-pipe-cleanup-actions' }, cleanupButton(undefined)) : null)
+        : null
       const actions = []
       if (pipeline.status === 'preparing') {
         actions.push(h(Btn, { key: 'prepared', kind: 'primary', disabled: !!busy, onClick: markPrepared }, busy === 'prepared' ? '标记中…' : '我验收完了：蓝图与大纲'))
@@ -2929,6 +3008,8 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       } else if (pipeline.status === 'done') {
         actions.push(h(Btn, { key: 'agents', kind: 'primary', onClick: () => onGoTab?.('agents') }, '交给独立审稿人'))
         actions.push(h(Btn, { key: 'attention', onClick: () => onGoTab?.('attention') }, '打开注意力页冷读'))
+        actions.push(backfillButton())
+        if (hasResidual) actions.push(cleanupButton())
         actions.push(h(Btn, { key: 'restart', onClick: restart, disabled: !!busy }, '重新开始'))
       } else {
         actions.push(h(Btn, { key: 'wizard', kind: pipeline.status === 'idle' ? 'primary' : undefined, onClick: onOpenWizard }, '准备蓝图与大纲'))
@@ -2967,7 +3048,18 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
               h('span', null, `${stageInfo.percent}%`)),
             h('div', { className: 'sd-pipe-progress-bar' }, h('div', { className: 'sd-pipe-progress-fill', style: { width: `${stageInfo.percent}%` } })))),
         pipeline.status === 'done'
-          ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-done' }, '🎉 全书完成：随时把整本书交给独立审稿人冷读，检查每章注意力分与最低章。')
+          ? h(React.Fragment, null,
+              h('div', { className: 'sd-pipe-banner sd-pipe-banner-done' }, '🎉 全书完成：随时把整本书交给独立审稿人冷读，检查每章注意力分与最低章。'),
+              cleanupCard,
+              !cleanup && hasResidual
+                ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-warn sd-pipe-cleanup-banner' },
+                    h('span', null, `生成完成但未收尾：还有 ${cleanupStats.pendingProposals} 条待采纳提案 / ${cleanupStats.openReviews} 条未处理审阅`),
+                    backfillButton('primary'),
+                    cleanupButton())
+                : null)
+          : null,
+        (pipeline.status === 'running' || pipeline.status === 'structuring') && inFinalCleanup
+          ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-info' }, '🧹 收尾中：补齐账本 + 清理残留（人物 / 事实 / 高光 / 伏笔 / 审阅）')
           : null,
         pipeline.status === 'stuck' ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-warn' }, '⚠ 流程卡住：会话可能已停止推进。可先「去对话查看」，必要时点「手动继续」让后端恢复（默认不会自动发送）。') : null,
         budgetPercent !== null && budgetPercent > 100 ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-danger' }, '⚠ 预算已超过上限：建议暂停并在生成设置里调高预算，或停止本次流程。') : null,
@@ -3530,11 +3622,14 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const stageInfo = pipelineStageInfo(pipeline)
       const budgetInfo = pipelineBudgetInfo(pipeline)
       const statusMeta = pipelineStatusMeta(pipeline)
+      const cleanupStats = pipelineCleanupStats(bundle)
+      const needsCleanup = pipeline.status === 'done' && (cleanupStats.pendingProposals > 0 || cleanupStats.openReviews > 0)
       return h('section', { className: 'sd-section sd-pipe-overview' },
         h('div', { className: 'sd-pipe-overview-head' },
           h('h3', { className: 'sd-h3' }, '📚 整本书'),
           h(Tag, { tone: statusMeta.tone }, statusMeta.label),
-          onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('pipeline') }, '查看整本书 ▸') : null),
+          needsCleanup ? h(Tag, { tone: 'warn' }, '待收尾') : null,
+          onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('pipeline') }, needsCleanup ? '去收尾 ▸' : '查看整本书 ▸') : null),
         h('div', { className: 'sd-pipe-overview-metrics' },
           h('span', null, stageInfo.current ? `第 ${Math.min(stageInfo.done + 1, stageInfo.total)}/${stageInfo.total} 步 · ${stageInfo.current.name}` : '阶段未开始'),
           h('span', null, `阶段 ${stageInfo.done}/${stageInfo.total}`),
@@ -6785,6 +6880,21 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-pipe-budget-summary{margin-top:8px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);padding:4px 8px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#f4f4f4)}
 .sd-pipe-budget-summary.sd-pipe-budget-warn{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 14%,transparent)}
 .sd-pipe-budget-summary.sd-pipe-budget-danger{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 12%,transparent)}
+/* 收尾清理 */
+.sd-pipe-banner-info{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
+.sd-pipe-cleanup-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sd-pipe-cleanup{padding:12px 14px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 35%,transparent);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 8%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-pipe-cleanup-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:6px}
+.sd-pipe-cleanup-stat{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
+.sd-pipe-cleanup-value{font-size:20px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
+.sd-pipe-cleanup-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px}
+.sd-pipe-cleanup-hint{margin:8px 0 0;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555)}
+.sd-pipe-cleanup-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.sd-pipe-cleanup-failed{margin-top:6px;font-size:11.5px}
+.sd-pipe-cleanup-failed summary{cursor:pointer;color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-pipe-cleanup-failed-list{display:flex;flex-direction:column;gap:2px;margin-top:4px;max-height:160px;overflow:auto;color:var(--dsw-alias-label-secondary,#666)}
+.sd-pipe-cleanup-failed-item{line-height:1.6;word-break:break-word}
+@media (max-width:760px){.sd-pipe-cleanup-grid{grid-template-columns:1fr 1fr}.sd-pipe-cleanup-banner{align-items:flex-start}}
 .sd-pipe-stage-list{display:flex;flex-direction:column;gap:2px}
 .sd-pipe-stage{display:grid;grid-template-columns:22px minmax(120px,1fr) auto auto;gap:8px;align-items:center;padding:5px 8px;border-radius:7px;font-size:12px}
 .sd-pipe-stage-current{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}

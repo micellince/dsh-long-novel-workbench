@@ -109,7 +109,7 @@
 ```
 
 阶段（内部进度用，不需要作者逐步点击）：
-`prep-blueprint` → `prep-outline` → 每卷 `write-N` / `review-N` / `fix-N` → `final-review` → `final-fix`。
+`prep-blueprint` → `prep-outline` → 每卷 `write-N` / `review-N` / `fix-N` → `final-review` → `final-fix` → `final-cleanup`（收尾：补齐账本 + 清理残留）。
 阶段状态由 AI 通过 MCP 工具上报（见 §6），driver 只负责续推。
 
 ---
@@ -200,3 +200,12 @@
 3. **准备阶段**：蓝图+大纲必须作者验收后才能生成全文（已定）；准备阶段是否走同一预算？（建议走，单独列用量）
 4. **goal 续轮上限**：`max_goal_rounds` 给多大？（建议按目标章数估，例如每章 1–2 轮，最少 50）
 5. **兜底「继续」默认关**：只有卡住时手动点（已定）。
+
+
+## 12. 收尾（final-cleanup，2026-10-22 新增）
+
+- **阶段**：`final-fix` 之后自动执行 `final-cleanup`；goal prompt 要求 AI 通读全书按章补齐：人物卡/身份/关系、事实、事件与时间线、高光、伏笔埋收、冲突参与方与解决章、地点（缺世界先补 world）、章节大纲节拍、每章注意力实测；全部走 `novel_desk_propose` 带 `data.pipelineRunId`。
+- **自动收尾**：`finishPipeline`（以及最后阶段完成）调用 `finalizePipelineCleanup`：采纳非章节 pending 提案（账本类）、驳回 pending 章节提案（过期稿，不覆盖成品）、将所有未处理审阅归档为 `wontfix`、写 `pipeline.cleanup` 报告（scope/accepted/rejected/closed/failed/at）与 notes。
+- **自动采纳扩展**：`currentStage` 以 `final-cleanup` 开头时，账本类 kind（attention/characters/facts/events/highlights/foreshadow/conflicts/outlines/world/locations）提案也自动采纳（其他阶段仍只自动采纳 chapter）。
+- **补跑收尾**：`pipeline.backfill`（整本书页「补跑收尾（补齐账本）」）对已完成/历史 run 新建收尾会话，补账本后自动 finish + 清理；`pipeline.finalize` 可只做启发式清理。
+- **测试**：`test/pipeline-cleanup.test.js` 9 条；`node --test` 162/162。

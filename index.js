@@ -612,6 +612,10 @@ async function handleRpc(body, ctx) {
       return resetPipeline(root, String(body.projectId ?? ''))
     case 'pipeline.usage':
       return { usage: await summarizeUsage(root, String(body.projectId ?? ''), ctx) }
+    case 'pipeline.finalize':
+      return finalizePipelineCleanup(root, String(body.projectId ?? ''), { scope: body.scope === 'run' ? 'run' : 'all' })
+    case 'pipeline.backfill':
+      return backfillPipeline(root, String(body.projectId ?? ''), ctx)
     case 'expansion.get': {
       const projectId = String(body.projectId ?? '')
       if (!projectId) throw new Error('缺少 projectId')
@@ -1525,6 +1529,20 @@ export function buildPipelineGoalPrompt(bundle, pipelineInput = {}) {
     '本次阶段清单（按顺序执行）：',
     ...pipelineStageLines(pipeline),
     '',
+    '## 收尾阶段 final-cleanup（全书写完后自动执行，必须做）',
+    '当所有卷 + 总审 + 总修完成后，执行 final-cleanup：通读全书，按章补齐缺失账本（缺什么补什么），然后用 novel_desk_pipeline(op="finish") 触发工作台自动收尾（采纳账本提案、驳回过期章节提案、归档未处理审查、生成 cleanup 报告）。',
+    '按章补齐清单：',
+    '- 人物：每章出场人物卡/身份/关系，缺卡就补 kind=characters；',
+    '- 事实：身份/年龄/地点/物品归属/伤势等硬事实 kind=facts；',
+    '- 事件与时间线：kind=events（storyTime、地点、参与人、后果）；',
+    '- 高光：真正值得保留的段落 kind=highlights；',
+    '- 伏笔：埋设章/回收章 kind=foreshadow；',
+    '- 冲突：参与方与解决章 kind=conflicts；',
+    '- 地点：名称/坐标/连接 kind=locations（缺世界先补 kind=world）；',
+    '- 大纲：每章节拍 kind=outlines；',
+    '- 注意力实测：每个已写章节必须有实测记录（score/verdict/weakest/dropRisk/detail，四维与弃读点）kind=attention；',
+    '硬要求：全部用 novel_desk_propose 提案并带 data.pipelineRunId="' + (pipeline.runId || '') + '"，不要直接 upsert 改账本；已写章节必须至少有 attention 实测、人物/地点引用必须有卡；补齐后核对一遍再无遗漏。',
+    '',
     '## 预算',
     `本次预算：token 上限 ${Number(budget.maxTokens) || 0}（0=不限）｜费用上限 ¥${Number(budget.maxCostCNY) || 0}（0=不限）。`,
     '达到 80% 会收到预警，达到 100% 会自动暂停；接近上限时先收尾当前卷、上报进度并主动 finish 或等待恢复。预算只约束本次 run。',
@@ -1789,6 +1807,68 @@ export async function startPipelineRun(root, projectId, options = {}, ctx = null
   return { pipeline, sessionId: session.sessionId, prompt }
 }
 
+/**
+ * 收尾清理：处理所有 pending 提案（非章节尽量采纳、过期章节驳回）、归档未处理审阅，写 cleanup 报告。
+ * scope='run' 只处理 data.pipelineRunId === 本次 runId 的提案；默认 'all' 清理整个项目。
+ * @returns {Promise<object>} cleanup 报告（另附 pipeline 字段便于调用方读取最新状态）
+ */
+export async function finalizePipelineCleanup(root, projectId, options = {}) {
+  const scope = options.scope === 'run' ? 'run' : 'all'
+  const pipeline = await getPipeline(root, projectId)
+  const bundle = await getBundle(root, projectId)
+  const report = {
+    scope,
+    acceptedProposals: 0,
+    rejectedChapter: 0,
+    closedReviews: 0,
+    failed: [],
+    at: pipelineNow(),
+  }
+  const pending = (bundle.proposals ?? []).filter((proposal) => proposal.status === 'pending')
+  const targets = scope === 'run'
+    ? pending.filter((proposal) => String(proposal.data?.pipelineRunId ?? '') === String(pipeline.runId ?? ''))
+    : pending
+  for (const proposal of targets) {
+    try {
+      if (proposal.kind === 'chapter') {
+        // 过期章节稿：正文已经写完，采纳会覆盖成品 → 一律驳回
+        await rejectProposal(root, projectId, proposal.id)
+        report.rejectedChapter += 1
+      } else {
+        await acceptProposal(root, projectId, proposal.id)
+        report.acceptedProposals += 1
+      }
+    } catch (error) {
+      report.failed.push({ id: proposal.id, kind: proposal.kind, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  // 归档所有未处理审阅（fixed/wontfix 之外）：wontfix + 说明留给作者二次审阅
+  const openReviewIds = (bundle.reviews ?? [])
+    .filter((review) => review.status !== 'fixed' && review.status !== 'wontfix')
+    .map((review) => review.id)
+  if (openReviewIds.length > 0) {
+    try {
+      const result = await batchUpdateReviews(root, projectId, openReviewIds, { status: 'wontfix' })
+      report.closedReviews = result.updated ?? openReviewIds.length
+      if (Array.isArray(result.missing) && result.missing.length > 0) {
+        report.failed.push({ id: 'reviews', kind: 'reviews', error: `未找到 ${result.missing.length} 条审阅` })
+      }
+    } catch (error) {
+      report.failed.push({ id: 'reviews', kind: 'reviews', error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const notes = pipelinePushNote(
+    pipeline,
+    `收尾：采纳 ${report.acceptedProposals} 条提案、驳回 ${report.rejectedChapter} 条过期章节提案、归档 ${report.closedReviews} 条审阅`,
+  )
+  const saved = await savePipeline(root, projectId, {
+    ...(pipeline.status === 'running' ? { status: 'done' } : {}),
+    cleanup: report,
+    notes,
+  })
+  return { ...report, pipeline: saved }
+}
+
 /** 阶段上报（RPC 与 MCP 工具共用）：done 后推进 currentStage、结算预算。 */
 export async function advancePipeline(root, projectId, input = {}, ctx = null) {
   const pipeline = await getPipeline(root, projectId)
@@ -1808,14 +1888,15 @@ export async function advancePipeline(root, projectId, input = {}, ctx = null) {
   let usage = null
   let budget = pipeline.budget
   let warning = false
+  let completedAll = false
   if (status === 'running') {
     currentStage = stageId
   } else if (status === 'done') {
     const next = stages.find((row) => row.status === 'pending')
     currentStage = next?.id ?? null
     if (!next && pipeline.status === 'running') {
-      nextStatus = 'done'
-      notes.push({ at: now, text: '全部阶段完成，流水线结束' })
+      completedAll = true
+      notes.push({ at: now, text: '全部阶段完成，开始收尾清理' })
     }
     usage = await summarizeUsage(root, projectId, ctx)
     const baseline = pipeline.budget.baseline ?? { tokens: 0, costCNY: 0 }
@@ -1833,7 +1914,13 @@ export async function advancePipeline(root, projectId, input = {}, ctx = null) {
       notes.push({ at: now, text: `预算预警：已用 ${Math.round(ratio * 100)}%` })
     }
   }
-  const saved = await savePipeline(root, projectId, { stages, currentStage, status: nextStatus, budget, notes })
+  const saved = await savePipeline(root, projectId, { stages, currentStage, status: completedAll ? 'running' : nextStatus, budget, notes })
+  if (completedAll) {
+    // 最后一次阶段完成 → 自动收尾：采纳账本提案、驳回过期章节、归档审阅
+    const cleaned = await finalizePipelineCleanup(root, projectId, { scope: 'all' })
+    const { pipeline: cleanedPipeline, ...cleanupReport } = cleaned
+    return { pipeline: cleanedPipeline, usage, warning, cleanup: cleanupReport }
+  }
   return { pipeline: saved, usage, warning }
 }
 
@@ -1862,16 +1949,85 @@ export async function resumePipeline(root, projectId, ctx = null) {
   return { pipeline: saved, sessionId: pipeline.sessionId, prompt }
 }
 
-/** 全部完成（MCP finish）。 */
+/** 全部完成（MCP finish / advance 完成）：先自动收尾清理，再置 done。 */
 export async function finishPipeline(root, projectId, note = '') {
+  const before = await getPipeline(root, projectId)
+  const cleaned = await finalizePipelineCleanup(root, projectId, { scope: 'all' })
   const pipeline = await getPipeline(root, projectId)
   const stages = (pipeline.stages ?? []).map((stage) => (stage.status === 'pending' ? { ...stage, status: 'skipped' } : stage))
   return savePipeline(root, projectId, {
     status: 'done',
     stages,
     currentStage: null,
+    cleanup: pipeline.cleanup ?? cleaned.cleanup ?? null,
     notes: pipelinePushNote(pipeline, note ? `完成：${note}` : '全部阶段完成，流水线结束'),
   })
+}
+
+/** 补跑收尾 prompt：给已完成的书补齐账本，然后触发自动清理。 */
+export function buildPipelineCleanupPrompt(bundle, pipelineInput = {}) {
+  const pipeline = { ...defaultPipeline(), ...pipelineInput }
+  const project = bundle.project ?? {}
+  const chapters = [...(bundle.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
+  const first = chapters[0]?.id ?? 1
+  const last = chapters[chapters.length - 1]?.id ?? 1
+  const written = chapters.filter((chapter) => String(chapter.content ?? '').trim()).length
+  return [
+    PIPELINE_PROMPT_PRINCIPLE,
+    '',
+    `# 收尾补齐 · ${project.name || '未命名作品'}`,
+    `projectId=${project.id} ｜ 已有 ${written} 章正文（第 ${Number(first)}–${Number(last)} 章）｜ runId=${pipeline.runId || '（无）'}`,
+    '',
+    '## 任务：先补齐账本，再触发自动清理（本阶段不改正文）',
+    '通读全书，按章补齐缺失账本（缺什么补什么）；已有记录不要重复提交，只补缺的：',
+    '- 人物：每章出场人物卡/身份/关系（kind=characters）；',
+    '- 事实：身份/年龄/地点/物品归属/伤势/规则等硬事实（kind=facts）；',
+    '- 事件与时间线：storyTime、地点、参与人、后果（kind=events）；',
+    '- 高光：真正值得保留的段落（kind=highlights）；',
+    '- 伏笔：埋设章/回收章（kind=foreshadow）；',
+    '- 冲突：参与方与解决章（kind=conflicts）；',
+    '- 地点：名称/坐标/连接；缺世界先补 kind=world 再补 kind=locations；',
+    '- 大纲：每章节拍（kind=outlines）；',
+    '- 注意力实测：每个已写章节必须有实测记录（score/verdict/weakest/dropRisk/detail）（kind=attention）；',
+    '',
+    '## 硬要求',
+    `- 全部用 novel_desk_propose 提交提案，并带 data.pipelineRunId="${pipeline.runId || ''}"；不要用 novel_desk_upsert 直接改账本；`,
+    '- 只补缺失内容，不改正文、不重写章节；',
+    '- 补完后核对一遍：每个已写章节至少有一条 attention 实测；人物/地点引用有卡；',
+    '- 最后调用 novel_desk_pipeline(op="finish", note="收尾补齐完成")，工作台会自动采纳账本提案、驳回过期章节提案、归档未处理审阅并生成 cleanup 报告。',
+    '',
+    '## 预算与节奏',
+    `预算：token 上限 ${Number(pipeline.budget?.maxTokens) || 0}（0=不限）｜费用上限 ¥${Number(pipeline.budget?.maxCostCNY) || 0}（0=不限）；80% 预警、100% 自动暂停。`,
+    '按章分批处理，不要停下来问作者；全部补完才 finish。',
+  ].join('\n')
+}
+
+/** 对已完成/中断的 run 补跑收尾：补齐账本（AI）→ finish 自动清理。 */
+export async function backfillPipeline(root, projectId, ctx = null) {
+  const bundle = await getBundle(root, projectId)
+  const current = await getPipeline(root, projectId)
+  if (current.status === 'running' || current.status === 'structuring') throw new Error('流水线正在运行，先暂停或结束后再补跑收尾')
+  const chapters = bundle.chapters ?? []
+  if (chapters.length === 0) throw new Error('还没有正文，无法补跑收尾')
+  const maxChapter = Math.max(0, ...chapters.map((chapter) => Number(chapter.id) || 0))
+  const stages = Array.isArray(current.stages) ? [...current.stages] : []
+  const hasCleanupStage = stages.some((stage) => stage.id === 'final-cleanup')
+  if (!hasCleanupStage) {
+    stages.push({ id: 'final-cleanup', kind: 'cleanup', name: '收尾：补齐账本 + 清理残留', status: 'pending', chapterFrom: 1, chapterTo: maxChapter })
+  }
+  const runId = current.runId || `run-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
+  const pipeline = await savePipeline(root, projectId, {
+    status: 'running',
+    runId,
+    currentStage: 'final-cleanup',
+    stages: stages.map((stage) => (stage.id === 'final-cleanup' ? { ...stage, status: 'running' } : stage)),
+    cleanup: null,
+    notes: pipelinePushNote(current, '补跑收尾：补齐账本 + 清理残留'),
+  })
+  const prompt = buildPipelineCleanupPrompt(bundle, pipeline)
+  const session = await startPipelineSession(ctx, root, bundle, prompt)
+  const saved = await savePipeline(root, projectId, { sessionId: session.sessionId })
+  return { pipeline: saved, sessionId: session.sessionId, prompt }
 }
 
 /** 卡住（MCP stuck 或 driver 判定）。 */
@@ -1898,6 +2054,10 @@ export function pipelineSummaryText(pipelineInput = {}) {
     `- runId：${pipeline.runId || '—'} ｜ sessionId：${pipeline.sessionId || '—'}`,
     `- 预算：已用 ${usageTokens} tokens / ¥${Number(pipeline.budget?.usedCostCNY) || 0}${ratio > 0 ? `（${Math.round(ratio * 100)}%）` : ''}`,
   ]
+  const cleanup = pipeline.cleanup && typeof pipeline.cleanup === 'object' ? pipeline.cleanup : null
+  if (cleanup) {
+    lines.push(`- 收尾报告：采纳 ${Number(cleanup.acceptedProposals) || 0} 条提案 · 驳回过期章节 ${Number(cleanup.rejectedChapter) || 0} 条 · 归档审阅 ${Number(cleanup.closedReviews) || 0} 条${Array.isArray(cleanup.failed) && cleanup.failed.length > 0 ? ` · 失败 ${cleanup.failed.length} 条` : ''}`)
+  }
   const pending = stages.filter((stage) => stage.status !== 'done').slice(0, 20)
   if (pending.length > 0) lines.push('- 待执行阶段：', ...pending.map((stage) => `  - ${stage.id}｜${stage.name}｜第 ${stage.chapterFrom}–${stage.chapterTo} 章`))
   const notes = (pipeline.notes ?? []).slice(-5)
@@ -3368,16 +3528,17 @@ const upsertTool = {
 function createPipelineTool(ctx) {
   return {
   name: 'novel_desk_pipeline',
-  description: '生成整本书流水线的进度上报工具（goal 中的 AI 使用，不是作者用）：op=status 读当前阶段/目标/预算；op=stage 上报某阶段 running/done；op=finish 全部完成；op=stuck 卡住并说明原因。每完成一步就上报，工作台页面据此显示进度。',
+  description: '生成整本书流水线的进度上报工具（goal 中的 AI 使用，不是作者用）：op=status 读当前阶段/目标/预算/收尾报告；op=stage 上报某阶段 running/done；op=finish 全部完成（会自动收尾清理）；op=finalize 手动收尾（采纳账本提案、驳回过期章节、归档审阅）；op=stuck 卡住并说明原因。每完成一步就上报，工作台页面据此显示进度。',
   parameters: {
     type: 'object',
     properties: {
       project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
-      op: { type: 'string', enum: ['status', 'stage', 'finish', 'stuck'], description: '操作' },
-      stageId: { type: 'string', description: '阶段 id（op=stage 时必填，如 write-1/review-1/fix-1）' },
+      op: { type: 'string', enum: ['status', 'stage', 'finish', 'finalize', 'stuck'], description: '操作' },
+      stageId: { type: 'string', description: '阶段 id（op=stage 时必填，如 write-1/review-1/fix-1/final-cleanup）' },
       status: { type: 'string', enum: ['running', 'done'], description: '阶段状态（op=stage）' },
       note: { type: 'string', description: '进度说明 / 完成说明' },
       reason: { type: 'string', description: '卡住原因（op=stuck）' },
+      scope: { type: 'string', enum: ['all', 'run'], description: 'op=finalize：清理范围（all=整个项目，run=只清理本次 run 提案）' },
     },
     additionalProperties: false,
     required: ['op'],
@@ -3394,8 +3555,14 @@ function createPipelineTool(ctx) {
       return `${pipelineSummaryText(result.pipeline)}${warning}`
     }
     if (op === 'finish') return pipelineSummaryText(await finishPipeline(root, project.id, String(args?.note ?? '')))
+    if (op === 'finalize') {
+      const cleaned = await finalizePipelineCleanup(root, project.id, { scope: args?.scope === 'run' ? 'run' : 'all' })
+      const { pipeline: cleanedPipeline, ...cleanupReport } = cleaned
+      const failed = Array.isArray(cleanupReport.failed) && cleanupReport.failed.length > 0 ? `\n- 失败：${cleanupReport.failed.length} 条` : ''
+      return `${pipelineSummaryText(cleanedPipeline)}\n\n## 收尾报告\n- 采纳提案：${cleanupReport.acceptedProposals} 条\n- 驳回过期章节提案：${cleanupReport.rejectedChapter} 条\n- 归档审阅：${cleanupReport.closedReviews} 条${failed}`
+    }
     if (op === 'stuck') return pipelineSummaryText(await stuckPipeline(root, project.id, String(args?.reason ?? '')))
-    throw new Error(`未知操作：${op}（可选 status/stage/finish/stuck）`)
+    throw new Error(`未知操作：${op}（可选 status/stage/finish/finalize/stuck）`)
   },
   }
 }
