@@ -235,6 +235,16 @@ async function handleRpc(body, ctx) {
       await upsertEntity(root, projectId, 'reviews', { id: review.id, fixProposalId: proposal.id })
       return { proposalId: proposal.id, reviewId: review.id }
     }
+    case 'workspace.rename': {
+      const registry = ctx.get('workspaceRegistry')
+      const workspaceId = String(body.workspaceId ?? '')
+      const title = String(body.title ?? '').trim()
+      if (!registry?.get || !workspaceId || !title) throw new Error('缺少 workspaceId/title')
+      const workspace = registry.get(workspaceId)
+      if (!workspace) throw new Error('工作区不存在')
+      await workspace.setTitle(title)
+      return { workspaceId, title }
+    }
     case 'workspace.cleanup': {
       const registry = ctx.get('workspaceRegistry')
       if (!registry?.list || !registry?.delete) return { deleted: [] }
@@ -344,16 +354,24 @@ async function handleRpc(body, ctx) {
       bundle.project = project
       const workspacePath = project.workspacePath || project.rootPath || imports.at(-1)?.root || ''
       const usagePaths = [workspacePath, project.legacyRootPath].filter(Boolean)
+      try {
+        const registry = ctx.get('workspaceRegistry')
+        const legacyDataPath = join(root, 'projects', project.id)
+        for (const workspace of registry?.list?.() ?? []) {
+          if (workspace.path === legacyDataPath || workspace.path === join(root, 'projects', project.id)) usagePaths.push(workspace.path)
+        }
+      } catch { /* ignore */ }
+      const uniqueUsagePaths = [...new Set(usagePaths)]
       let rootSessions = []
       let subagentSessions = []
       let subagentCount = 0
       let sessionRootMap = new Map()
       try {
         const sessionController = ctx.get('sessionController')
-        if (sessionController?.list && usagePaths.length > 0) {
+        if (sessionController?.list && uniqueUsagePaths.length > 0) {
           const listed = await sessionController.list({}, AbortSignal.timeout(15000))
           const allItems = listed.items ?? []
-          const roots = allItems.filter((item) => usagePaths.includes(item.cwd) && !item.origin && !item.parentSessionId && !item.blank)
+          const roots = allItems.filter((item) => uniqueUsagePaths.includes(item.cwd) && !item.origin && !item.parentSessionId && !item.blank)
           const byParent = new Map()
           for (const item of allItems) {
             if (!item.parentSessionId) continue
@@ -468,6 +486,7 @@ async function handleRpc(body, ctx) {
       const chat = {
         cwd: workspacePath,
         legacyCwd: project.legacyRootPath ?? '',
+        legacyPaths: uniqueUsagePaths.filter((path) => path !== workspacePath),
         sessions: chatSessions,
         subagents: { count: subagentCount, sessions: subagentRows, totalTokens: subagentTokens, costUSD: Math.round(subagentCostUSD * 10000) / 10000, costCNY: Math.round(subagentCostCNY * 10000) / 10000 },
         totalTokens: totalChatTokens,
