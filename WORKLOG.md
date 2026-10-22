@@ -251,3 +251,10 @@
 - 修复：plan.confirmations（AI 待拍板事项，无则回退 notes 关键词）；plan-ready「⚠ 需要你确认（N）」+ 大纲变更逐条 checkbox + 全同意/取消；confirmPlan 提交 approvedOutlineIds → approvedOutlineChanges；全批准 start→running，未批准→structuring 走闸门；子导航「待确认」徽标。
 - 后端：confirmPlan 支持 approvedOutlineIds、start 保留已批准变更、goal prompt 标出未批准变更、MCP plan 保存 confirmations、plan prompt 要求 confirmations。
 - 测试 163/163；harness TASK-21 EXPANSION CONFIRM 通过。
+
+
+### 修 bug：waiting-outline 大纲变更勾选不了
+
+- 原因：waiting-outline 用只读列表；approveOutline 不接受勾选、只认 pending outlines 提案；AI 只把变更写在 expansion.outlineChanges，没有提案 → 后端报"没有待确认的大纲变更提案"，用户看到的就是勾不上/点了没反应。
+- 修复：waiting-outline 复用 plan-ready 的 checkbox 清单（全部同意/取消）；approveOutline 接受 approvedOutlineIds，直接从 plan changes 写入 approvedOutlineChanges，置 running 并发送续跑 prompt；按钮未勾选时禁用；兼容旧的无参调用。
+- 测试：新增"无提案按 approvedOutlineIds 直接批准"用例；node --test 164/164；harness TASK-21 通过。

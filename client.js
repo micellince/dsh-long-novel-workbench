@@ -3335,7 +3335,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         onStatusChange?.(expansion.status)
       }, [expansion.status, onStatusChange])
       useEffect(() => {
-        if (expansion.status !== 'plan-ready') return
+        if (expansion.status !== 'plan-ready' && expansion.status !== 'waiting-outline') return
         const approvedKeys = expansionApprovedChangeKeys(expansion)
         const defaults = []
         outlineChangeList.forEach((change, index) => {
@@ -3409,8 +3409,13 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       }
       const start = () => run('start', () => api('expansion.start', { projectId }))
       const approveOutline = () => {
-        if (!window.confirm('确认大纲变更并继续扩写？确认后 AI 会按新的大纲结构执行，主线节拍会保留。')) return
-        run('approve', () => api('expansion.approveOutline', { projectId }))
+        const ids = outlineApproved.slice()
+        if (ids.length === 0) {
+          window.alert('请先勾选要批准的大纲变更（可点「全部同意」）')
+          return
+        }
+        if (!window.confirm(`确认选中的 ${ids.length} 条大纲变更并继续扩写？未勾选的条目不会被批准，AI 不会使用；批准后按新结构执行，主线节拍保留。`)) return
+        run('approve', () => api('expansion.approveOutline', { projectId, approvedOutlineIds: ids }))
       }
       const pause = () => run('pause', () => api('expansion.pause', { projectId }))
       const resume = () => run('resume', () => api('expansion.resume', { projectId }))
@@ -3661,9 +3666,9 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           statusHint,
           h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 执行中发现需要动大纲，等你确认：确认后 AI 才会按新的结构继续扩写；不确认则只按大纲内可容纳的字数执行。'),
           confirmationsBlock,
-          section('待确认的大纲变更', changes.length > 0 ? waitingOutlineList(changes) : h('p', { className: 'sd-exp-empty' }, '没有大纲变更条目。')),
+          section('待确认的大纲变更（勾选你要批准的那几条）', changes.length > 0 ? outlineConfirmBlock : h('p', { className: 'sd-exp-empty' }, '没有大纲变更条目。')),
           h('div', { className: 'sd-exp-actions' },
-            h(Btn, { kind: 'primary', onClick: approveOutline, disabled: !!busy }, busy === 'approve' ? '确认中…' : '确认大纲变更并继续'),
+            h(Btn, { kind: 'primary', onClick: approveOutline, disabled: !!busy || outlineApproved.length === 0 }, busy === 'approve' ? '确认中…' : `确认选中的 ${outlineApproved.length} 条并继续`),
             sessionButton),
           budgetBars,
           notesBlock())

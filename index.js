@@ -640,7 +640,7 @@ async function handleRpc(body, ctx) {
     case 'expansion.start':
       return startExpansion(root, String(body.projectId ?? ''), ctx)
     case 'expansion.approveOutline':
-      return approveExpansionOutline(root, String(body.projectId ?? ''), ctx)
+      return approveExpansionOutline(root, String(body.projectId ?? ''), { approvedOutlineIds: body.approvedOutlineIds }, ctx)
     case 'expansion.advance':
       return advanceExpansion(root, String(body.projectId ?? ''), { stageId: body.stageId, status: body.status, note: body.note }, ctx)
     case 'expansion.pause':
@@ -2426,28 +2426,50 @@ export async function startExpansion(root, projectId, ctx = null) {
 }
 
 /** 用户确认大纲变更：采纳带该 runId 的 pending outlines 提案 → approvedOutlineChanges → running + 续跑 prompt。 */
-export async function approveExpansionOutline(root, projectId, ctx = null) {
+export async function approveExpansionOutline(root, projectId, input = {}, ctx = null) {
+  // 兼容旧调用 approveExpansionOutline(root, projectId, ctx)
+  if (input && typeof input.get === 'function' && !ctx) {
+    ctx = input
+    input = {}
+  }
   const bundle = await getBundle(root, projectId)
   const current = await getExpansion(root, projectId)
   if (current.status !== 'waiting-outline' && current.status !== 'structuring') {
     throw new Error('当前没有待确认的大纲变更')
   }
+  const requestedIds = (Array.isArray(input.approvedOutlineIds) ? input.approvedOutlineIds : []).map(String).filter(Boolean)
   const pending = (bundle.proposals ?? []).filter((proposal) => (
     proposal.status === 'pending'
     && proposal.kind === 'outlines'
     && String(proposal.data?.expansionRunId ?? '') === String(current.runId ?? '')
   ))
-  if (pending.length === 0) throw new Error('没有待确认的大纲变更提案')
   const accepted = []
   for (const proposal of pending) {
+    if (requestedIds.length > 0 && !requestedIds.includes(String(proposal.id))) continue
     await acceptProposal(root, projectId, proposal.id)
     accepted.push({ proposalId: proposal.id, title: proposal.title, summary: proposal.summary, chapter: proposal.chapter ?? null })
   }
-  const approved = [...(current.approvedOutlineChanges ?? []), ...accepted]
+  // 方案阶段就存在 expansion.outlineChanges 时，不依赖 outlines 提案，直接按作者勾选写入 approvedOutlineChanges
+  const planChanges = Array.isArray(current.outlineChanges) && current.outlineChanges.length > 0
+    ? current.outlineChanges
+    : (Array.isArray(current.plan?.outlineChanges) ? current.plan.outlineChanges : [])
+  const selectedChanges = requestedIds.length > 0
+    ? planChanges.filter((change) => requestedIds.includes(String(change?.id ?? change?.title ?? '')))
+    : []
+  if (accepted.length === 0 && selectedChanges.length === 0) {
+    throw new Error(requestedIds.length > 0 ? '选中的大纲变更不存在或已批准' : '请先勾选要批准的大纲变更（或等待 AI 提交变更提案）')
+  }
+  const existing = Array.isArray(current.approvedOutlineChanges) ? current.approvedOutlineChanges : []
+  const merged = [...existing]
+  for (const change of selectedChanges) {
+    const key = String(change?.id ?? change?.title ?? '')
+    if (key && !merged.some((row) => String(row?.id ?? row?.title ?? '') === key)) merged.push(change)
+  }
+  const approved = [...merged, ...accepted]
   const saved = await saveExpansion(root, projectId, {
     status: 'running',
     approvedOutlineChanges: approved,
-    notes: expansionPushNote(current, `作者确认 ${accepted.length} 条大纲变更，继续扩写`),
+    notes: expansionPushNote(current, `作者确认 ${accepted.length + selectedChanges.length} 条大纲变更，继续扩写`),
   })
   const prompt = buildExpansionResumePrompt(saved)
   if (saved.sessionId) await sendPipelinePrompt(ctx, saved.sessionId, prompt)

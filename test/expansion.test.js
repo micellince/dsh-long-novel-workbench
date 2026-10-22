@@ -335,6 +335,31 @@ test('自动采纳：expansionRunId 匹配且 running → chapter 提案立即 a
   assert.equal(pausedCase.status, 'pending')
 })
 
+test('approveOutline：方案 outlineChanges 无提案时，按 approvedOutlineIds 直接批准并续跑', async (t) => {
+  const { root, project } = await makeProject(t)
+  await store.saveExpansion(root, project.id, {
+    status: 'waiting-outline',
+    runId: 'exp-gate',
+    sessionId: 'sess-gate',
+    targetWords: 2000,
+    outlineChanges: [
+      { id: 'oc-1', chapter: 1, title: 'A', change: '加半节', reason: '容量' },
+      { id: 'oc-2', chapter: 2, title: 'B', change: '重排', reason: '容量' },
+    ],
+    approvedOutlineChanges: [],
+  })
+  const { ctx, prompts } = makeCtx()
+  const result = await approveExpansionOutline(root, project.id, { approvedOutlineIds: ['oc-1'] }, ctx)
+  assert.equal(result.expansion.status, 'running')
+  assert.deepEqual(result.expansion.approvedOutlineChanges.map((change) => change.id), ['oc-1'])
+  assert.ok(prompts.length > 0, '批准后应向同一会话发续跑 prompt')
+  assert.ok(String(result.prompt ?? '').length > 0)
+  await assert.rejects(
+    () => approveExpansionOutline(root, project.id, { approvedOutlineIds: [] }, ctx),
+    /请先勾选|没有待确认/,
+  )
+})
+
 // ── 5. 大纲闸门 approveOutline ────────────────────────────
 
 test('approveOutline：采纳该 runId 的 pending outlines → approvedOutlineChanges、running、续跑 prompt', async (t) => {

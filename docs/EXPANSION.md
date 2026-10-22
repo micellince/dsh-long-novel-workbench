@@ -179,5 +179,6 @@
 - **界面**：整本书页子导航「生成整本书 / 扩写」；ExpansionPanel 九态（目标必填、方案表可编辑、大纲闸门、预算、报告）；章节页「扩写本章」入口；10s 轮询。
 - **测试**：`test/expansion.test.js` 19 条；`node --test` 151/151。
 - **确定性检查（已实现）**：`expansion-target-missing`（error）、`expansion-under-target`（warn）、`expansion-outline-pending`（warn）、`expansion-scene-unplanned`（新增场景超出方案且无已批准大纲变更）、`expansion-subplot-unapproved`（旁线未批准）、`expansion-beats-unpreserved`（提案标注主线节拍未保留）、`expansion-attention-drop`（scoreAfter < scoreBefore）、`expansion-added-scene-duplicated`（新增场景跨章重复）、`duplicate-passages`（≥24 字整句跨章重复）。
+- **等待大纲确认可勾选（2026-10-22 补）**：waiting-outline 与 plan-ready 共用可勾选清单；`expansion.approveOutline` 接受 `approvedOutlineIds`，无 outlines 提案时直接从 `outlineChanges` 写入 `approvedOutlineChanges` → running + 续跑 prompt；按钮在未勾选时禁用。
 - **方案确认（2026-10-22 补）**：plan 新增 `confirmations[]`（AI 待作者拍板事项）；`confirmPlan` 接受 `approvedOutlineIds` 写入 `approvedOutlineChanges`；plan-ready 顶部渲染「需要你确认」+ 大纲变更勾选（全部同意/取消）；全部批准 → start 直接 running，未批准 → structuring 走闸门；子导航「✍️ 扩写」在 plan-ready/waiting-outline 显示「待确认」徽标；计划 prompt 要求 AI 把待拍板事项写进 confirmations。
 - **未完成**：真实会话端到端试跑、界面目视；语义级“大纲外内容”识别（当前基于提案元信息 addedScenes/subplotIds/beatsPreserved，非 NLP）。
