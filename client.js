@@ -860,6 +860,7 @@ window.__ModuleLoader__.load({
               h(Field, { label: '时态' }, h(TextInput, { value: form.tense, onChange: (v) => set('tense', v) })),
               h(Field, { label: '目标章数' }, h(TextInput, { value: form.targetChapters, type: 'number', onChange: (v) => set('targetChapters', Number(v) || 0) })),
               h(Field, { label: '目标字数' }, h(TextInput, { value: form.targetWords, type: 'number', onChange: (v) => set('targetWords', Number(v) || 0) })),
+              h(Field, { label: '工作区目录', hint: '「发到对话」只发到这个目录对应的对话；留空会拒绝发送' }, h(TextInput, { value: form.rootPath ?? '', placeholder: '/Users/you/你的小说', onChange: (v) => set('rootPath', v) })),
             ),
             h(Field, { label: '一句话简介' }, h(TextArea, { value: form.logline, rows: 2, onChange: (v) => set('logline', v) })),
             h(Field, { label: '故事梗概' }, h(TextArea, { value: form.description, rows: 5, onChange: (v) => set('description', v) })),
