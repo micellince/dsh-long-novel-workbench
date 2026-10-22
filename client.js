@@ -1064,6 +1064,7 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState([])
       const [kindFilter, setKindFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
+      const [choices, setChoices] = useState({})
       const priorityRank = (p) => Number(p.priority) || 3
       const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending').sort((a, b) => priorityRank(a) - priorityRank(b))
       const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
@@ -1134,6 +1135,19 @@ window.__ModuleLoader__.load({
         const data = p.data ?? {}
         if (p.kind === 'decision') {
           const aiSuggestion = data.aiSuggestion ?? data.suggestion ?? data.answer ?? ''
+          const valueOptions = (data.options ?? []).filter((option) => option.factId || option.value)
+          if (valueOptions.length > 0) {
+            const chosen = choices[p.id] ?? data.recommendedOptionId ?? valueOptions[0].id
+            return h('div', { className: 'sd-proposal-body' },
+              h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
+              valueOptions[0].value !== undefined ? h('div', { className: 'sd-hint' }, `「${data.subject ?? ''}」的「${data.attribute ?? ''}」有 ${valueOptions.length} 个取值，选一个作为正史：`) : null,
+              h('div', { className: 'sd-decision-options' },
+                valueOptions.map((option) => h('label', { key: option.id, className: 'sd-decision-option' },
+                  h('input', { type: 'radio', name: `decision-${p.id}`, checked: chosen === option.id, onChange: () => setChoices((prev) => ({ ...prev, [p.id]: option.id })) }),
+                  h('span', null, option.label),
+                  option.id === data.recommendedOptionId ? h(Tag, { tone: 'brand' }, 'AI 推荐') : null))),
+              h('div', { className: 'sd-hint' }, '选好值后加入清单；发到对话会按你的选择落成具体修改提案。'))
+          }
           return h('div', { className: 'sd-proposal-body' },
             h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
             aiSuggestion
@@ -1209,15 +1223,21 @@ window.__ModuleLoader__.load({
           ) : null,
           p.kind === 'decision'
             ? h('div', { className: 'sd-proposal-actions' },
-                onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart({
-                  kind: 'proposal',
-                  id: p.id,
-                  chapter: p.chapter,
-                  title: p.title,
-                  proposalKind: 'decision',
-                  aiSuggestion: p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? '',
-                  detail: p.summary ?? '',
-                }) }, '加入清单') : null,
+                onAddCart ? h(Btn, { kind: 'primary', onClick: () => {
+                  const valueOptions = (p.data?.options ?? []).filter((option) => option.factId || option.value)
+                  const chosenId = choices[p.id] ?? p.data?.recommendedOptionId ?? valueOptions[0]?.id
+                  const chosen = valueOptions.find((option) => option.id === chosenId)
+                  onAddCart({
+                    kind: 'proposal',
+                    id: p.id,
+                    chapter: p.chapter,
+                    title: p.title,
+                    proposalKind: 'decision',
+                    aiSuggestion: p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? '',
+                    choice: chosen?.label ?? '',
+                    detail: p.summary ?? '',
+                  })
+                } }, '加入清单') : null,
                 h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
               )
             : h('div', { className: 'sd-proposal-actions' },

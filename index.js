@@ -642,10 +642,13 @@ async function createFactDecisionProposals(root, projectId, bundle) {
         facts: facts.map((fact) => ({ id: fact.id, value: fact.value, chapter: fact.chapter })),
         aiSuggestion,
         recommendedFactId: recommended.id,
-        options: [
-          { id: 'ai', label: `同意 AI 建议：${aiSuggestion}` },
-          { id: 'author', label: '按作者意见处理（在清单里写你的裁定）' },
-        ],
+        recommendedOptionId: `fact-${recommended.id}`,
+        options: values.map((fact) => ({
+          id: `fact-${fact.id}`,
+          label: `以「${fact.value}」为准（第${fact.chapter ?? '?'}章）`,
+          factId: fact.id,
+          value: fact.value,
+        })),
       },
       priority: 1,
       rationale: '事实账本内部冲突，由作者决定走 AI 建议还是自己的裁定。',
@@ -829,8 +832,9 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
       const isDecision = item.proposalKind === 'decision'
       if (isDecision) {
         if (item.aiSuggestion) parts.push(`；AI 建议：${item.aiSuggestion}`)
+        if (item.choice) parts.push(`；作者选择：${item.choice}`)
         if (item.note) parts.push(`；作者意见：${item.note}`)
-        else parts.push('；作者意见：（未填写，按 AI 建议）')
+        else if (!item.choice) parts.push('；作者意见：（未填写，按 AI 建议）')
       } else if (item.note) {
         parts.push(`；作者补充：${item.note}`)
       }
@@ -839,7 +843,7 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     })
     lines.push('', '处理要求：逐项处理；每完成一项就立刻把结果写回工作台（novel_desk_propose 提交提案 / novel_desk_review 写审稿 / novel_desk_upsert 更新状态），不要攒到最后。')
     if (items.some((item) => item.proposalKind === 'decision')) {
-      lines.push('决策项规则：作者意见优先；作者没写意见就按 AI 建议。把决定落成具体修改提案（chapter/…），并在 data.resolvesProposalId 填对应决策 id；不要直接改正文，也不要只回复“同意”。')
+      lines.push('决策项规则：作者选择 > 作者意见 > AI 建议。把决定落成具体修改提案（chapter/…），并在 data.resolvesProposalId 填对应决策 id；不要直接改正文，也不要只回复“同意”。')
     }
     if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
     else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
