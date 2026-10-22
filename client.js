@@ -3415,7 +3415,9 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           return
         }
         if (!window.confirm(`确认选中的 ${ids.length} 条大纲变更并继续扩写？未勾选的条目不会被批准，AI 不会使用；批准后按新结构执行，主线节拍保留。`)) return
-        run('approve', () => api('expansion.approveOutline', { projectId, approvedOutlineIds: ids }))
+        run('approve', () => api('expansion.approveOutline', { projectId, approvedOutlineIds: ids }).catch((error) => {
+          throw new Error(`${error.message}｜如果你刚勾选了大纲变更仍报这个错，说明 DSH 还在跑旧版宿主：请完全退出 DeepSeek Harness（Cmd+Q）再打开，只刷新页面不够。`)
+        }))
       }
       const pause = () => run('pause', () => api('expansion.pause', { projectId }))
       const resume = () => run('resume', () => api('expansion.resume', { projectId }))

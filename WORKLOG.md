@@ -258,3 +258,10 @@
 - 原因：waiting-outline 用只读列表；approveOutline 不接受勾选、只认 pending outlines 提案；AI 只把变更写在 expansion.outlineChanges，没有提案 → 后端报"没有待确认的大纲变更提案"，用户看到的就是勾不上/点了没反应。
 - 修复：waiting-outline 复用 plan-ready 的 checkbox 清单（全部同意/取消）；approveOutline 接受 approvedOutlineIds，直接从 plan changes 写入 approvedOutlineChanges，置 running 并发送续跑 prompt；按钮未勾选时禁用；兼容旧的无参调用。
 - 测试：新增"无提案按 approvedOutlineIds 直接批准"用例；node --test 164/164；harness TASK-21 通过。
+
+
+### 排查：确认大纲报"没有待确认的大纲变更"
+
+- 用碧血数据副本 + 当前后端直接调用 approveExpansionOutline（approvedOutlineIds=oc-01/oc-02）：status → running、approvedOutlineChanges=2、续跑 prompt 成功发出，证明新后端逻辑正常。
+- 线上文件仍停在 waiting-outline / approved=0，说明那次请求被旧宿主拒绝（只刷新页面没有重启 DSH）。
+- 前端补充错误提示：旧宿主报错时明确提示 Cmd+Q 完全退出并重开。

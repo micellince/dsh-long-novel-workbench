@@ -19,6 +19,7 @@
 
 ### 修复
 
+- **旧版宿主下确认大纲变更报"没有待确认的大纲变更"**：勾选确认依赖新版 `expansion.approveOutline` 接口（接受 `approvedOutlineIds`）；只刷新页面、没重启 DSH 时会走旧宿主逻辑并报错。现在前端在这种错误后追加明确提示「请完全退出 DSH（Cmd+Q）再打开，只刷新不够」。
 - **扩写 waiting-outline 的大纲变更勾选不了/确认没反应**：等待大纲确认时列表是只读的，且「确认大纲变更并继续」不接受勾选、依赖 `outlines` 提案；但 AI 往往只把变更写在 `expansion.outlineChanges` 里，没有提案，于是后端直接报「没有待确认的大纲变更提案」。现在 waiting-outline 与 plan-ready 共用同一套可勾选清单（全部同意/取消），按钮把 `approvedOutlineIds` 传给后端，后端直接把这些变更写入 `approvedOutlineChanges`、置 running 并向同一会话发续跑 prompt，不再要求有提案。
 - **扩写方案里"要改大纲/要你确认"在工作台看不到**：AI 把确认事项写在 `plan.notes` 里、大纲变更存在 `plan.outlineChanges`，但方案页只把它们当普通备注展示，没有可操作入口。现在 plan-ready 顶部有「⚠ 需要你确认（N）」区块（渲染 `plan.confirmations`，无则回退含「待作者批准/需确认」的 notes），大纲变更逐条 checkbox + 全部同意/取消，确认方案时提交 `approvedOutlineIds` 写入 `approvedOutlineChanges`；全部批准后 start 直接 running，未批准则 structuring 走大纲闸门；「✍️ 扩写」子导航在 plan-ready / waiting-outline 时显示「待确认」徽标。计划 prompt 也要求 AI 把需要拍板的事项写进 `plan.confirmations`。
 - **审阅页全选加入清单只进一条**：之前批量加入时逐条调用 `onAddCart`，同一轮渲染里每次都用旧的 `cart` 快照覆盖，最终只剩最后一条。现在审阅页一次传数组，清单用函数式更新批量合并（kind+id 去重），并统一由 effect 持久化 localStorage（避免切项目时把旧清单写进新项目）。
