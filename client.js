@@ -871,7 +871,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function OverviewTab({ bundle, projectId, onChanged, onAddCart }) {
+    function OverviewTab({ bundle, projectId, onChanged, onAddCart, cartCount = 0, onOpenCart }) {
       const [form, setForm] = useState(() => ({ ...bundle.project }))
       const [busy, setBusy] = useState(false)
       const [dash, setDash] = useState(null)
@@ -911,10 +911,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。')),
           h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { kind: 'primary', onClick: async () => {
-              try { await sendToChat({ projectId, task: 'full-review' }) }
-              catch (error) { window.alert(`发送到对话失败：${error.message}`) }
-            } }, '🤖 从头审阅整个项目'))),
+            h(Btn, { kind: 'primary', onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'))),
+        h('div', { className: 'sd-cart-banner' },
+          h('div', null,
+            h('strong', null, `🧺 本次处理清单${cartCount ? `：${cartCount} 项` : '（空）'}`),
+            h('span', { className: 'sd-hint' }, '把提案、审稿、检查加入清单；点右侧「打开清单」，在清单里统一发送到对话。')),
+          onOpenCart ? h(Btn, { kind: 'primary', onClick: onOpenCart }, '打开清单 · 统一发送') : null),
         h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
         h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
         h('div', { className: 'sd-two-col' },
@@ -1219,7 +1221,7 @@ window.__ModuleLoader__.load({
             h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('reject') }, '批量驳回'),
           ),
         ) : null,
-        pendingAll.length === 0 ? h(Empty, null, '没有待采纳的提案。可以在右上角「让 AI 操作」生成。') : pending.length === 0 ? h(Empty, null, '当前筛选下没有待采纳的提案。换个类型看看。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
+        pendingAll.length === 0 ? h(Empty, null, '没有待处理提案。可以加入清单「从头审阅」，或让对话里的 AI 生成后回到这里。') : pending.length === 0 ? h(Empty, null, '当前筛选下没有待采纳的提案。换个类型看看。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
           h('div', { className: 'sd-proposal-head' },
             h('label', { className: 'sd-cb sd-cb-only', title: '选择该提案' }, h('input', { type: 'checkbox', checked: selected.includes(p.id), onChange: () => toggle(p.id) })),
             h(Tag, { tone: 'brand' }, PROPOSAL_KIND[p.kind] ?? p.kind),
@@ -2048,10 +2050,7 @@ window.__ModuleLoader__.load({
           { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 支持按严重度筛选、全选后批量标记。')),
           h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: async () => {
-              try { await sendToChat({ projectId, task: 'full-review' }) }
-              catch (error) { window.alert(`发送到对话失败：${error.message}`) }
-            } }, '🤖 从头审阅整个项目'),
+            h(Btn, { onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'),
             h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增')),
         ),
         all.length > 0 ? h('div', { className: 'sd-bulkbar' },
@@ -2080,7 +2079,6 @@ window.__ModuleLoader__.load({
                 }),
                 h('div', { className: 'sd-row-actions' },
                   onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'review', id: review.id, chapter: review.chapter, title: (review.issue ?? '').slice(0, 50), detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；') }) }, '加入清单') : null,
-                  h(Btn, { small: true, kind: 'primary', disabled: fixing === review.id || review.status === 'fixed' || review.status === 'wontfix', onClick: () => fixWithAi(review) }, fixing === review.id ? '生成中…' : 'AI 修改'),
                   h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
                   h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
               )),
@@ -2216,11 +2214,11 @@ window.__ModuleLoader__.load({
             h(IconBtn, { onClick: () => !sending && onClose(), title: '关闭' }, '✕')),
           h('div', { className: 'sd-modal-body' },
             items.length === 0
-              ? h(Empty, null, '清单是空的。去「审稿」「提案」「总览的一致性检查」点「加入清单」。')
+              ? h(Empty, null, '清单是空的。去「审稿」「提案」「总览一致性检查」点「加入清单」，把要 AI 处理的事都加进来；然后在这里统一发送。')
               : h('div', { className: 'sd-cart-list' },
                   items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-row' },
                     h('div', { className: 'sd-cart-item' },
-                      h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节' }[item.kind] ?? item.kind),
+                      h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节', task: '任务' }[item.kind] ?? item.kind),
                       item.approved ? h(Tag, { tone: 'muted' }, '已同意') : null,
                       h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
                       h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
@@ -2239,7 +2237,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function ImportDialog({ onClose, onImported, onGo }) {
+    function ImportDialog({ onClose, onImported, onGo, onAddCart, onOpenCart }) {
       const [path, setPath] = useState('')
       const [split, setSplit] = useState('auto')
       const [scan, setScan] = useState(null)
@@ -2519,8 +2517,8 @@ window.__ModuleLoader__.load({
               h('select', { className: 'sd-input sd-send-target', value: sendTarget, title: '发送到哪个对话', onChange: (e) => changeSendTarget(e.target.value) },
                 h('option', { value: 'current' }, '发到当前对话'),
                 h('option', { value: 'new' }, '新开对话')),
-              h(Btn, { small: true, disabled: !bundle, onClick: () => setCartOpen(true) }, `🧺 清单${cart.length ? ` (${cart.length})` : ''}`),
-              h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setAi({ task: 'next-chapter-plan', chapter: bundle ? (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1) : 1 }) }, '🤖 发到对话'),
+              h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setCartOpen(true) }, `🧺 本次清单${cart.length ? ` (${cart.length})` : ''} · 统一发送`),
+              h('span', { className: 'sd-hint sd-cart-tip' }, '把提案/审稿/检查加进来，点清单发到对话'),
               bundle
                 ? h('select', { className: 'sd-input sd-export-select', value: exportFormat, title: '导出格式', onChange: (e) => setExportFormat(e.target.value) },
                     h('option', { value: 'md' }, 'Markdown'),
@@ -2546,7 +2544,7 @@ window.__ModuleLoader__.load({
             : h('div', { className: 'sd-body' },
                 h('nav', { className: 'sd-nav' }, TABS.map((t) => h('button', { key: t.id, type: 'button', className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`, onClick: () => setTab(t.id) }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label)))),
                 h('main', { className: 'sd-main' },
-                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
+                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, cartCount: cart.length, onOpenCart: () => setCartOpen(true) }) : null,
                   tab === 'dashboard' ? h(DashboardTab, { bundle, projectId }) : null,
                   tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
@@ -2562,8 +2560,7 @@ window.__ModuleLoader__.load({
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
           cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: sendTarget, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
-          importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
-          ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
+          importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) }, onAddCart: addCart, onOpenCart: () => setCartOpen(true) }) : null,
         ),
       )
     }
@@ -2841,6 +2838,11 @@ window.__ModuleLoader__.load({
 
 .sd-send-target{max-width:130px;font-size:12px}
 .sd-send-options{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px}
+
+.sd-cart-tip{max-width:150px;font-size:10.5px;line-height:1.4}
+
+.sd-cart-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);margin-top:10px}
+.sd-cart-banner>div{display:flex;flex-direction:column;gap:2px;font-size:12px}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 

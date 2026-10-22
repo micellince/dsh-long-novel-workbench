@@ -833,7 +833,7 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
   if (items.length > 0) {
     lines.push('', `本次清单（${items.length} 项）：`)
     items.forEach((item, index) => {
-      const label = { review: '审稿', proposal: '提案', check: '检查', chapter: '章节', foreshadow: '伏笔' }[item.kind] ?? item.kind ?? '条目'
+      const label = { review: '审稿', proposal: '提案', check: '检查', chapter: '章节', foreshadow: '伏笔', task: '任务' }[item.kind] ?? item.kind ?? '条目'
       const parts = [`${index + 1}. [${label}]`]
       if (item.chapter) parts.push(`第${item.chapter}章`)
       if (item.title) parts.push(item.title)
@@ -858,6 +858,9 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
     else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
   }
+  const tasks = new Set(items.map((item) => item.task).filter(Boolean))
+  if (tasks.has('full-review')) lines.push('', '任务：从头审阅整个项目。先用 novel_desk_bundle / novel_desk_context 读取项目，再逐章检查人物、时间线、事实、伏笔、大纲、文风与连续性；问题写审稿（novel_desk_review），需要补设定/改正文的提交提案（novel_desk_propose）。按 blocker → major → minor 排序。')
+  if (tasks.has('import-review')) lines.push('', '任务：导入后审阅。先补齐缺失的人物/时间线/大纲（提案），再对照设定核查正文冲突（审稿）。')
   if (String(body.instruction ?? '').trim()) lines.push('', `补充要求：${String(body.instruction).trim()}`)
   if (items.length === 0) lines.push('', `任务：${TASK_LABEL[task] ?? task}`)
   if (task === 'review-fix') lines.push('请按审稿意见修改对应章节，把修改后的完整章节提交为 chapter 提案（novel_desk_propose），不要直接覆盖正文。')
