@@ -252,6 +252,7 @@ async function handleRpc(body, ctx) {
       let rootSessions = []
       let subagentSessions = []
       let subagentCount = 0
+      let sessionRootMap = new Map()
       try {
         const sessionController = ctx.get('sessionController')
         if (sessionController?.list && rootPath) {
@@ -265,6 +266,7 @@ async function handleRpc(body, ctx) {
             byParent.get(item.parentSessionId).push(item.sessionId)
           }
           const descendantIds = new Set()
+          const sessionRoot = new Map(roots.map((item) => [item.sessionId, item.sessionId]))
           let frontier = new Set(roots.map((item) => item.sessionId))
           while (frontier.size > 0) {
             const next = new Set()
@@ -272,12 +274,14 @@ async function handleRpc(body, ctx) {
               for (const childId of byParent.get(id) ?? []) {
                 if (descendantIds.has(childId)) continue
                 descendantIds.add(childId)
+                sessionRoot.set(childId, sessionRoot.get(id))
                 next.add(childId)
               }
             }
             frontier = next
           }
           subagentCount = descendantIds.size
+          sessionRootMap = sessionRoot
           const selected = [...roots, ...allItems.filter((item) => descendantIds.has(item.sessionId))]
           const groups = new Map()
           for (const item of selected) {
@@ -342,8 +346,26 @@ async function handleRpc(body, ctx) {
         costUSD: cost?.usd ?? null,
         costCNY: cost?.cny ?? null,
       })
-      const chatSessions = rootSessions.map((session) => shapeSession(session, costOf(session)))
+      const rootRows = rootSessions.map((session) => ({ session, cost: costOf(session), row: null }))
       const subagentRows = subagentSessions.map((session) => shapeSession(session, costOf(session), true))
+      const familyCost = new Map(rootRows.map((entry) => [entry.session.id, { usd: entry.cost?.usd ?? 0, cny: entry.cost?.cny ?? 0, tokens: entry.session.totalTokens ?? 0 }]))
+      for (const row of subagentRows) {
+        const rootId = sessionRootMap.get(row.id)
+        if (!rootId || !familyCost.has(rootId)) continue
+        const bucket = familyCost.get(rootId)
+        bucket.usd += row.costUSD ?? 0
+        bucket.cny += row.costCNY ?? 0
+        bucket.tokens += row.totalTokens ?? 0
+      }
+      const chatSessions = rootRows.map(({ session, cost }) => {
+        const family = familyCost.get(session.id) ?? { usd: cost?.usd ?? 0, cny: cost?.cny ?? 0, tokens: session.totalTokens ?? 0 }
+        return {
+          ...shapeSession(session, cost),
+          familyCostUSD: Math.round(family.usd * 10000) / 10000,
+          familyCostCNY: Math.round(family.cny * 10000) / 10000,
+          familyTokens: family.tokens,
+        }
+      })
       const subagentTokens = subagentRows.reduce((sum, row) => sum + row.totalTokens, 0)
       const subagentCostUSD = subagentRows.reduce((sum, row) => sum + (row.costUSD ?? 0), 0)
       const subagentCostCNY = subagentRows.reduce((sum, row) => sum + (row.costCNY ?? 0), 0)
