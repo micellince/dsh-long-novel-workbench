@@ -205,8 +205,16 @@ async function handleRpc(body, ctx) {
       if (body.newSession) {
         if (!rootPath) throw new Error('作品没有关联工作区目录，无法新开对话。请先在总览里填「工作区目录」。')
         if (typeof controller.create !== 'function') throw new Error('宿主不支持新建会话')
-        const created = await controller.create({ cwd: rootPath })
-        preferred = { sessionId: created.sessionId, cwd: rootPath, running: false }
+        const workspaceRegistry = ctx.get('workspaceRegistry')
+        let workspace = typeof workspaceRegistry?.resolveByPath === 'function'
+          ? await workspaceRegistry.resolveByPath(rootPath)
+          : undefined
+        if (!workspace && typeof workspaceRegistry?.create === 'function') {
+          workspace = await workspaceRegistry.create(rootPath)
+        }
+        if (!workspace) throw new Error(`工作区未注册，无法新开对话：${rootPath}`)
+        const created = await controller.create({ workspaceId: workspace.id })
+        preferred = { sessionId: created.sessionId, cwd: workspace.path ?? rootPath, running: false }
       } else {
         const list = await controller.list({}, AbortSignal.timeout(15000))
         const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
