@@ -49,3 +49,45 @@ test('EPUB 整本导入：按 spine 读出 XHTML 章节', async (t) => {
   const chapters = await store.listChapters(root, result.projectId)
   assert.match(chapters[1].content, /三年之后/)
 })
+
+function makeMobi(text, title = '测试书') {
+  const titleBuf = Buffer.from(title, 'utf8')
+  const raw = Buffer.from(text, 'utf8')
+  const compressed = Buffer.alloc(raw.length * 2)
+  for (let i = 0; i < raw.length; i += 1) {
+    compressed[i * 2] = 0x01
+    compressed[i * 2 + 1] = raw[i]
+  }
+  const record0 = Buffer.alloc(232 + titleBuf.length)
+  record0.writeUInt16BE(2, 0) // PalmDOC 压缩
+  record0.writeUInt32BE(raw.length, 4)
+  record0.writeUInt16BE(1, 8)
+  record0.writeUInt16BE(4096, 10)
+  record0.writeUInt16BE(0, 12)
+  record0.write('MOBI', 16, 'ascii')
+  record0.writeUInt32BE(232, 20)
+  record0.writeUInt32BE(65001, 28)
+  record0.writeUInt32BE(232, 84)
+  record0.writeUInt32BE(titleBuf.length, 88)
+  titleBuf.copy(record0, 232)
+
+  const header = Buffer.alloc(94)
+  header.write('BOOKMOBI', 60, 'ascii')
+  header.writeUInt16BE(2, 76)
+  header.writeUInt32BE(94, 78)
+  header.writeUInt32BE(94 + record0.length, 86)
+  return Buffer.concat([header, record0, compressed])
+}
+
+test('MOBI 整本导入：PalmDOC 解压 + 按章节切分', async (t) => {
+  const root = await makeRoot(t)
+  const dir = await tempDir(t)
+  const file = join(dir, '全本.mobi')
+  await writeFile(file, makeMobi('<html><body><h1>第一章 初见</h1><p>山门初开。</p><h1>第二章 重逢</h1><p>三年之后。</p></body></html>'))
+  const scan = await scanImport(root, file)
+  assert.equal(scan.chapters.length, 2)
+  assert.deepEqual(scan.chapters.map((c) => c.title), ['第一章 初见', '第二章 重逢'])
+  const result = await runImport(root, { path: file, projectName: 'MOBI 测试' })
+  const chapters = await store.listChapters(root, result.projectId)
+  assert.match(chapters[0].content, /山门初开/)
+})
