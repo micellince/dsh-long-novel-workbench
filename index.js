@@ -628,20 +628,27 @@ async function createFactDecisionProposals(root, projectId, bundle) {
     if (values.length < 2) continue
     const title = `事实冲突：${facts[0].subject} · ${facts[0].attribute}`
     if ((bundle.proposals ?? []).some((proposal) => proposal.status === 'pending' && proposal.title === title)) continue
+    const recommended = [...facts].sort((a, b) => (Number(a.chapter) || 999) - (Number(b.chapter) || 999))[0] ?? facts[0]
+    const aiSuggestion = `以「${recommended.value}」为准（第${recommended.chapter ?? '?'}章最早出现）`
     await createProposal(root, projectId, {
       kind: 'decision',
       chapter: facts[0].chapter ?? null,
       title,
-      summary: `「${facts[0].subject}」的「${facts[0].attribute}」有 ${values.length} 个取值，请选择以哪个为准。`,
+      summary: `「${facts[0].subject}」的「${facts[0].attribute}」有 ${values.length} 个取值；AI 建议${aiSuggestion}。`,
       data: {
         conflictType: 'fact',
         subject: facts[0].subject,
         attribute: facts[0].attribute,
         facts: facts.map((fact) => ({ id: fact.id, value: fact.value, chapter: fact.chapter })),
-        options: values.map((fact) => ({ id: `fact-${fact.id}`, label: `以「${fact.value}」为准（第${fact.chapter ?? '?'}章）`, factId: fact.id })),
+        aiSuggestion,
+        recommendedFactId: recommended.id,
+        options: [
+          { id: 'ai', label: `同意 AI 建议：${aiSuggestion}` },
+          { id: 'author', label: '按作者意见处理（在清单里写你的裁定）' },
+        ],
       },
       priority: 1,
-      rationale: '事实账本内部冲突，需要作者裁定哪个取值是正史。',
+      rationale: '事实账本内部冲突，由作者决定走 AI 建议还是自己的裁定。',
     })
     created += 1
   }
@@ -711,10 +718,10 @@ async function persistImportReview(ctx, root, projectId, bundle) {
           reviewId: savedReview.id,
           reviewIssue: issue,
           suggestion: conflict.suggestion ?? '',
+          aiSuggestion: conflict.suggestion ?? '',
           options: [
-            { id: 'text', label: '以正文为准（改设定/大纲）', mark: 'fixed' },
-            { id: 'setting', label: '以设定为准（改正文）', mark: 'fixed' },
-            { id: 'later', label: '先保留，之后人工决定', mark: 'open' },
+            { id: 'ai', label: '同意 AI 建议' },
+            { id: 'author', label: '按作者意见处理（在清单里写你的意见）' },
           ],
         },
         priority: severityPriority(conflict.severity),
@@ -819,11 +826,21 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
       if (item.chapter) parts.push(`第${item.chapter}章`)
       if (item.title) parts.push(item.title)
       if (item.detail) parts.push(`：${item.detail}`)
-      if (item.note) parts.push(`；作者补充：${item.note}`)
+      const isDecision = item.proposalKind === 'decision'
+      if (isDecision) {
+        if (item.aiSuggestion) parts.push(`；AI 建议：${item.aiSuggestion}`)
+        if (item.note) parts.push(`；作者意见：${item.note}`)
+        else parts.push('；作者意见：（未填写，按 AI 建议）')
+      } else if (item.note) {
+        parts.push(`；作者补充：${item.note}`)
+      }
       parts.push(`（id=${item.id}）`)
       lines.push(parts.join(' '))
     })
     lines.push('', '处理要求：逐项处理；每完成一项就立刻把结果写回工作台（novel_desk_propose 提交提案 / novel_desk_review 写审稿 / novel_desk_upsert 更新状态），不要攒到最后。')
+    if (items.some((item) => item.proposalKind === 'decision')) {
+      lines.push('决策项规则：作者意见优先；作者没写意见就按 AI 建议。把决定落成具体修改提案（chapter/…），并在 data.resolvesProposalId 填对应决策 id；不要直接改正文，也不要只回复“同意”。')
+    }
     if (body.allowContinue) lines.push('如果下一步是明确的小步，可以直接继续，不必每步都问；涉及大范围改动或改设定时先问我。')
     else lines.push('完成清单后停下来，逐项汇报结果，并问我要不要继续下一批/下一步。')
   }
@@ -1138,7 +1155,7 @@ const planTool = {
 
 const proposeTool = {
   name: 'novel_desk_propose',
-  description: '把 AI 生成的内容作为「提案」提交到工作台，等待作者在 UI 里对比采纳。用于下一章方案（kind=plan）、章节正文（kind=chapter）、时间线事件（kind=events）、事实（kind=facts）、人物（kind=characters）、伏笔（kind=foreshadow）。采纳动作由作者在 UI 点击完成，提交本身不改账本。',
+  description: '把 AI 生成的内容作为「提案」提交到工作台，等待作者在 UI 里对比采纳。用于下一章方案（kind=plan）、章节正文（kind=chapter）、时间线事件（kind=events）、事实（kind=facts）、人物（kind=characters）、伏笔（kind=foreshadow）。如果这是对某条「冲突决策」提案的处理结果，在 data.resolvesProposalId 填原决策 id，工作台会把原决策标记为已修订。采纳动作由作者在 UI 点击完成，提交本身不改账本。',
   parameters: {
     type: 'object',
     properties: {
@@ -1166,7 +1183,15 @@ const proposeTool = {
       items: args?.items,
       rationale: args?.rationale,
     })
-    return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。\n作者需在工作台「提案」页对比后点采纳；采纳前不会改动任何账本或正文。`
+    const resolves = args?.data?.resolvesProposalId
+    if (resolves) {
+      try {
+        await markProposalRevised(defaultRoot(), project.id, String(resolves), proposal.id)
+      } catch {
+        // 原决策可能已被处理；不影响新提案
+      }
+    }
+    return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。${resolves ? `\n已把原决策 ${resolves} 标记为「已修订」。` : ''}\n作者需在工作台「提案」页对比后点采纳；采纳前不会改动任何账本或正文。`
   },
 }
 

@@ -1064,7 +1064,6 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState([])
       const [kindFilter, setKindFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
-      const [choices, setChoices] = useState({})
       const priorityRank = (p) => Number(p.priority) || 3
       const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending').sort((a, b) => priorityRank(a) - priorityRank(b))
       const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
@@ -1134,14 +1133,13 @@ window.__ModuleLoader__.load({
       const renderBody = (p) => {
         const data = p.data ?? {}
         if (p.kind === 'decision') {
-          const chosen = choices[p.id] ?? data.options?.[0]?.id
+          const aiSuggestion = data.aiSuggestion ?? data.suggestion ?? data.answer ?? ''
           return h('div', { className: 'sd-proposal-body' },
             h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
-            data.suggestion ? h('div', { className: 'sd-hint' }, `AI 建议：${data.suggestion}`) : null,
-            h('div', { className: 'sd-decision-options' },
-              (data.options ?? []).map((option) => h('label', { key: option.id, className: 'sd-decision-option' },
-                h('input', { type: 'radio', name: `decision-${p.id}`, checked: chosen === option.id, onChange: () => setChoices((prev) => ({ ...prev, [p.id]: option.id })) }),
-                h('span', null, option.label)))))
+            aiSuggestion
+              ? h('div', { className: 'sd-decision-ai' }, h('strong', null, 'AI 建议：'), aiSuggestion)
+              : h('div', { className: 'sd-hint' }, '这条决策没有 AI 建议，加入清单时写你的处理意见。'),
+            h('div', { className: 'sd-hint' }, '处理方式：加入清单 → 发到对话。清单意见留空 = 同意 AI 建议；写了你的意见 = 按作者意见。'))
         }
         if (p.kind === 'chapter') {
           const existing = (bundle.chapters ?? []).find((c) => String(Number(c.id)) === String(Number(p.chapter)))
@@ -1209,15 +1207,28 @@ window.__ModuleLoader__.load({
               h(Btn, { onClick: () => { setFeedbackFor(''); setFeedbackText('') } }, '取消'),
             ),
           ) : null,
-          h('div', { className: 'sd-proposal-actions' },
-            onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；') }) }, '加入清单') : null,
-            h(Btn, { kind: 'primary', onClick: () => act(p, 'accept', p.kind === 'decision' ? (choices[p.id] ?? p.data?.options?.[0]?.id) : undefined), disabled: busy === p.id }, busy === p.id ? '处理中…' : (p.kind === 'decision' ? '采纳所选' : '采纳')),
-            h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
-            Array.isArray(p.feedback) && p.feedback.length > 0
-              ? h(Btn, { kind: 'primary', onClick: () => revise(p), disabled: busy === p.id }, busy === p.id ? '重写中…' : '让 AI 按意见重写')
-              : null,
-            h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
-          ),
+          p.kind === 'decision'
+            ? h('div', { className: 'sd-proposal-actions' },
+                onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart({
+                  kind: 'proposal',
+                  id: p.id,
+                  chapter: p.chapter,
+                  title: p.title,
+                  proposalKind: 'decision',
+                  aiSuggestion: p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? '',
+                  detail: p.summary ?? '',
+                }) }, '加入清单') : null,
+                h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
+              )
+            : h('div', { className: 'sd-proposal-actions' },
+                onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；') }) }, '加入清单') : null,
+                h(Btn, { kind: 'primary', onClick: () => act(p, 'accept'), disabled: busy === p.id }, busy === p.id ? '处理中…' : '采纳'),
+                h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
+                Array.isArray(p.feedback) && p.feedback.length > 0
+                  ? h(Btn, { kind: 'primary', onClick: () => revise(p), disabled: busy === p.id }, busy === p.id ? '重写中…' : '让 AI 按意见重写')
+                  : null,
+                h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
+              ),
         )),
         done.length > 0 ? h('div', { className: 'sd-section' },
           h('div', { className: 'sd-pagehead' }, h('h3', { className: 'sd-h3' }, `已处理（${done.length}）`), h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开')),
@@ -2764,6 +2775,8 @@ window.__ModuleLoader__.load({
 .sd-activity-bars{display:flex;align-items:flex-end;gap:6px;height:64px;margin-top:6px}
 .sd-activity-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;font-size:10px;color:var(--dsw-alias-label-secondary,#666)}
 .sd-activity-bar{width:100%;max-width:22px;background:var(--dsw-alias-brand-primary,#247bbf);border-radius:3px 3px 0 0;min-height:4px}
+
+.sd-decision-ai{font-size:12.5px;line-height:1.7;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);padding:4px 0 4px 10px;background:var(--dsw-alias-bg-layer-1,#fafafa);border-radius:0 6px 6px 0}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
