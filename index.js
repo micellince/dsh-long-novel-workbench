@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
-import { loadChatUsage } from './lib/usage.js'
+import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
 import { builtinPresets } from './lib/defaults.js'
 
 const ROUTE = '/novel-desk/api'
@@ -249,7 +249,57 @@ async function handleRpc(body, ctx) {
       const byTaskRows = Object.entries(byTask).map(([task, rows]) => ({ task, ...sum(rows) })).sort((a, b) => b.totalTokens - a.totalTokens)
       const imports = await listImportRecords(root, projectId)
       const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
-      const chat = await loadChatUsage(rootPath)
+      let visibleSessionIds = null
+      try {
+        const sessionController = ctx.get('sessionController')
+        if (sessionController?.list && rootPath) {
+          const listed = await sessionController.list({}, AbortSignal.timeout(15000))
+          visibleSessionIds = (listed.items ?? [])
+            .filter((item) => item.cwd === rootPath && !item.origin && !item.parentSessionId && !item.blank)
+            .map((item) => item.sessionId)
+        }
+      } catch {
+        visibleSessionIds = null
+      }
+      const chat = await loadChatUsage(rootPath, visibleSessionIds ? { sessionIds: visibleSessionIds } : undefined)
+      const prices = await loadModelPrices()
+      let chatCostUSD = 0
+      let chatCostCNY = 0
+      let unpricedSessions = 0
+      let workbenchCostUSD = 0
+      for (const row of records) {
+        const cost = estimateSessionCost({
+          provider: row.provider,
+          model: row.model,
+          events: [{ time: Date.parse(row.at) || Date.now(), inputTokens: row.inputTokens ?? 0, cacheReadTokens: row.cacheReadTokens ?? 0, cacheWriteTokens: row.cacheWriteTokens ?? 0, outputTokens: row.outputTokens ?? 0 }],
+        }, prices)
+        if (cost) workbenchCostUSD += cost.usd
+      }
+      const chatSessions = chat.sessions.map((session) => {
+        const cost = estimateSessionCost(session, prices)
+        if (cost) {
+          chatCostUSD += cost.usd
+          chatCostCNY += cost.cny
+        } else {
+          unpricedSessions += 1
+        }
+        return {
+          id: session.id,
+          cwd: session.cwd,
+          createdAt: session.createdAt,
+          lastAt: session.lastAt,
+          messages: session.messages,
+          inputTokens: session.inputTokens,
+          outputTokens: session.outputTokens,
+          cacheReadTokens: session.cacheReadTokens,
+          totalTokens: session.totalTokens,
+          model: session.model,
+          provider: session.provider,
+          costUSD: cost?.usd ?? null,
+          costCNY: cost?.cny ?? null,
+        }
+      })
+      chat.sessions = chatSessions
       const context = estimateContext(bundle)
       const backupCount = await countBackupFiles(root, projectId)
       const acceptedProposals = (bundle.proposals ?? []).filter((row) => row.status === 'accepted').length
@@ -292,6 +342,13 @@ async function handleRpc(body, ctx) {
           activeDays,
           chatHours: Math.round((chatSpanMs / 3600000) * 10) / 10,
           aiMinutes: Math.round(((sum(records).durationMs) / 60000) * 10) / 10,
+          chatCostUSD: Math.round(chatCostUSD * 10000) / 10000,
+          chatCostCNY: Math.round(chatCostCNY * 10000) / 10000,
+          workbenchCostUSD: Math.round(workbenchCostUSD * 10000) / 10000,
+          workbenchCostCNY: Math.round((workbenchCostUSD / 0.15) * 10000) / 10000,
+          totalCostUSD: Math.round((chatCostUSD + workbenchCostUSD) * 10000) / 10000,
+          totalCostCNY: Math.round(((chatCostUSD + workbenchCostUSD) / 0.15) * 10000) / 10000,
+          unpricedSessions,
         },
         activity,
         workbench: {
@@ -301,6 +358,7 @@ async function handleRpc(body, ctx) {
           recent: records.slice(-20).reverse(),
         },
         chat,
+        cost: { usd: Math.round((chatCostUSD + workbenchCostUSD) * 10000) / 10000, cny: Math.round(((chatCostUSD + workbenchCostUSD) / 0.15) * 10000) / 10000, unpricedSessions },
         lanes: [
           { id: 'workbench', label: '工作台 AI', kind: 'one-shot', hint: '点一次按钮 = 一次独立调用，不进入对话历史；上下文由工作台按项目拼装，结果进提案/审稿。' },
           { id: 'chat', label: 'DSH 对话', kind: 'agent-session', hint: '左侧对话框的 Agent 会话，多轮、可调 novel_desk_* 工具；用量从 session 日志读取。' },
