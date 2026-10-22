@@ -205,3 +205,17 @@
 - 排查：鱼龙舞 proposals.json 显示 59 条全部 accepted（含 world/locations，16:18/16:21），world.json 与 locations.json 同时写入，20 个地点/连接齐全；后端 `proposal.batchAccept` 与 acceptProposal 的 world/locations 分支正常。结论：操作成功，问题是**成功无反馈 + 不跳转 + 不通知对话**。
 - 修复（前端）：批量采纳/驳回先显示「处理中…」内联提示；成功后显示「已采纳 N 条（世界 1 · 地点 1 · 高光 3 · …）」；采纳 world/locations 后询问是否去世界页；单条采纳/驳回同样提示；失败保留失败明细弹窗。
 - 说明：工作台采纳不会自动发消息到对话（避免刷屏），若需要"采纳后通知对话"可另做开关。
+
+
+## 2026-10-22 · 扩写（B-108）
+
+- 设计定稿 docs/EXPANSION.md：目标字数必填无默认；book/chapter 两模式；大纲硬边界；大纲变更等待用户确认；全自动；自动采纳+原稿备份。
+- 后端：expansion.json 单例、9 个 RPC（get/plan/confirmPlan/start/approveOutline/advance/pause/resume/reset/usage）；宏观方案 prompt（诊断/容量/逐章目标/大纲变更，禁写正文）；执行 goal prompt（create_goal+subagent、大纲锁定、不引入未批准内容、每批审修、自动采纳、大纲闸门、禁注水、冷读不降）；novel_desk_expansion MCP；options（新增上限/样张/允许改大纲）透传并进 prompt；finish 写 report；预算 80/100。
+- 前端：整本书页子导航「生成/扩写」+ ExpansionPanel（9 态、目标必填、方案表可编辑、大纲闸门、预算、报告）+ 章节页「扩写本章」入口；轮询 10s。
+- 验证：node --test 151/151；渲染 harness TASK-18 通过。
+- 未验证：真实会话 goal+subagent 扩写、大纲闸门端到端、真机界面。
+
+
+### 扩写确定性检查
+
+- lib/checks.js 新增：`expansion-target-missing`（error）、`expansion-under-target`（warn，列出低于目标的章节）、`expansion-outline-pending`（warn，大纲变更未确认）；测试覆盖；总测试 152/152。

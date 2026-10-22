@@ -9,11 +9,11 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages, getExpansion, saveExpansion, resetExpansion } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
-import { builtinPresets, attentionGenreProfiles, defaultPipeline } from './lib/defaults.js'
+import { builtinPresets, attentionGenreProfiles, defaultPipeline, defaultExpansion } from './lib/defaults.js'
 
 const ROUTE = '/novel-desk/api'
 const VIEW_ROUTE = '/novel-desk/view'
@@ -611,6 +611,41 @@ async function handleRpc(body, ctx) {
     case 'pipeline.reset':
       return resetPipeline(root, String(body.projectId ?? ''))
     case 'pipeline.usage':
+      return { usage: await summarizeUsage(root, String(body.projectId ?? ''), ctx) }
+    case 'expansion.get': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      const expansion = await getExpansion(root, projectId)
+      const usage = await summarizeUsage(root, projectId, ctx)
+      return { expansion, usage }
+    }
+    case 'expansion.plan':
+      return planExpansion(root, String(body.projectId ?? ''), {
+        mode: body.mode,
+        targetWords: body.targetWords,
+        chapterTargets: body.chapterTargets,
+        scope: body.scope,
+        allowOutlineChanges: body.allowOutlineChanges,
+        additions: body.additions,
+        additionLimit: body.additionLimit,
+        sampleChapters: body.sampleChapters,
+        budget: body.budget,
+      }, ctx)
+    case 'expansion.confirmPlan':
+      return confirmExpansionPlan(root, String(body.projectId ?? ''), { plan: body.plan, chapterTargets: body.chapterTargets })
+    case 'expansion.start':
+      return startExpansion(root, String(body.projectId ?? ''), ctx)
+    case 'expansion.approveOutline':
+      return approveExpansionOutline(root, String(body.projectId ?? ''), ctx)
+    case 'expansion.advance':
+      return advanceExpansion(root, String(body.projectId ?? ''), { stageId: body.stageId, status: body.status, note: body.note }, ctx)
+    case 'expansion.pause':
+      return pauseExpansion(root, String(body.projectId ?? ''), String(body.note ?? '用户暂停'))
+    case 'expansion.resume':
+      return resumeExpansion(root, String(body.projectId ?? ''), ctx)
+    case 'expansion.reset':
+      return resetExpansion(root, String(body.projectId ?? ''))
+    case 'expansion.usage':
       return { usage: await summarizeUsage(root, String(body.projectId ?? ''), ctx) }
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
@@ -1870,6 +1905,437 @@ export function pipelineSummaryText(pipelineInput = {}) {
   return lines.join('\n')
 }
 
+// ── 扩写（expansion.json 单例 + 宏观方案 + 大纲闸门 + goal）──
+
+const EXPANSION_TYPES = ['enrich', 'scene', 'structure']
+const EXPANSION_STATUSES = ['idle', 'planning', 'plan-ready', 'waiting-outline', 'structuring', 'running', 'paused', 'done', 'stuck']
+
+function expansionNow() {
+  return new Date().toISOString()
+}
+
+function expansionPushNote(expansion, text) {
+  return [...(expansion?.notes ?? []), { at: expansionNow(), text: String(text) }]
+}
+
+/** 逐章目标白名单：只保留契约字段，避免 UI/模型塞入任意字段。 */
+function sanitizeChapterTargets(list) {
+  if (!Array.isArray(list)) return []
+  return list
+    .filter((row) => Number(row?.chapter) > 0)
+    .map((row) => ({
+      chapter: Number(row.chapter),
+      targetWords: Math.max(0, Number(row.targetWords) || 0),
+      type: EXPANSION_TYPES.includes(row.type) ? row.type : 'scene',
+      additions: Array.isArray(row.additions) ? row.additions.map(String) : [],
+      outlineChangeIds: Array.isArray(row.outlineChangeIds) ? row.outlineChangeIds.map(String) : [],
+    }))
+    .sort((a, b) => a.chapter - b.chapter)
+}
+
+/**
+ * 实际逐章目标：优先使用已保存的 chapterTargets；缺失时按 scope/已写章节 + 全局目标字数兜底。
+ * 全局目标允许被单章 targetWords 覆盖（不提供比例/容差）。
+ */
+function effectiveChapterTargets(bundle, expansion) {
+  const saved = sanitizeChapterTargets(expansion.chapterTargets)
+  if (saved.length > 0) return saved
+  const chapters = [...(bundle.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
+  const globalTarget = Math.max(0, Number(expansion.targetWords) || 0)
+  let scopeChapters = []
+  if (expansion.mode === 'chapter') {
+    scopeChapters = (expansion.scope?.chapters ?? []).map(Number).filter((n) => n > 0)
+    if (scopeChapters.length === 0) scopeChapters = chapters.slice(-1).map((chapter) => Number(chapter.id))
+  } else {
+    scopeChapters = chapters.map((chapter) => Number(chapter.id))
+  }
+  return scopeChapters.map((chapter) => ({ chapter, targetWords: globalTarget, type: 'scene', additions: [], outlineChangeIds: [] }))
+}
+
+/** 扩写估算：按每章（目标字数 - 当前字数）估新增 token（×1.6）+ 审/修开销；估算不准，仅作数量级提示。 */
+export function estimateExpansion(bundle, expansionInput = {}) {
+  const expansion = { ...defaultExpansion(), ...expansionInput }
+  const targets = effectiveChapterTargets(bundle, expansion)
+  const chapterMap = new Map((bundle.chapters ?? []).map((chapter) => [Number(chapter.id), chapter]))
+  let deltaWords = 0
+  for (const row of targets) {
+    const current = Number(chapterMap.get(row.chapter)?.words) || 0
+    deltaWords += Math.max(0, (Number(row.targetWords) || 0) - current)
+  }
+  const writeTokens = Math.round(deltaWords * 1.6)
+  const reviewTokens = Math.round(deltaWords * 0.5)
+  const fixTokens = Math.round(deltaWords * 0.8)
+  const totalTokens = writeTokens + reviewTokens + fixTokens
+  return {
+    mode: expansion.mode === 'chapter' ? 'chapter' : 'book',
+    chapters: targets.length,
+    deltaWords,
+    writeTokens,
+    reviewTokens,
+    fixTokens,
+    totalTokens,
+    costCNY: Math.round((totalTokens / 1_000_000) * 2 * 100) / 100,
+    note: '估算不准，仅作数量级提示；实际含上下文/系统开销会更高。',
+  }
+}
+
+function expansionScopeText(expansion) {
+  const chapters = (expansion.scope?.chapters ?? []).map(Number).filter((n) => n > 0)
+  if (expansion.mode === 'chapter') return `单章扩写（第 ${chapters[0] ?? '?'} 章，只改这一章）`
+  return `全部扩写${chapters.length > 0 ? `（范围第 ${chapters.join('、')} 章）` : '（全书已写章节）'}`
+}
+
+/** 第一步宏观方案 prompt：只出方案，禁止写正文。 */
+const EXPANSION_ADDITION_LABELS = { subplots: '旁线', characters: '新人物', locations: '新地点', foreshadow: '新伏笔', conflicts: '新冲突' }
+
+function expansionOptionsText(expansion = {}) {
+  const options = expansion.options ?? {}
+  const enabled = Object.entries(options.additions ?? {}).filter(([, value]) => value === true).map(([key]) => EXPANSION_ADDITION_LABELS[key] ?? key)
+  const limit = Number(options.additionLimit) > 0 ? `（每类最多 ${Number(options.additionLimit)} 项）` : ''
+  const sample = Number(options.sampleChapters) > 0 ? `先扩 ${Number(options.sampleChapters)} 章样张` : '不抽样'
+  return `允许新增：${enabled.length > 0 ? enabled.join('、') + limit : '不允许新增（只在大纲内写厚）'}；${sample}；允许大纲变更：${options.allowOutlineChanges ? '是（执行时仍需逐项确认）' : '否'}`
+}
+
+export function buildExpansionPlanPrompt(bundle, expansionInput = {}) {
+  const expansion = { ...defaultExpansion(), ...expansionInput }
+  const project = bundle.project ?? {}
+  const chapters = [...(bundle.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
+  const outlineMap = new Map((bundle.outlines ?? []).map((outline) => [Number(outline.chapter), outline]))
+  const targets = effectiveChapterTargets(bundle, expansion)
+  const targetWords = Number(expansion.targetWords) || 0
+  const lines = [
+    PIPELINE_PROMPT_PRINCIPLE,
+    '',
+    `# 扩写方案 · ${project.name || '未命名作品'}`,
+    `projectId=${project.id} ｜ 模式：${expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'} ｜ 目标字数（用户必填，不得改动）：${expansion.mode === 'chapter' ? `第 ${(expansion.scope?.chapters ?? [])[0] ?? '?'} 章 ${targetWords} 字` : `每章 ${targetWords} 字`} ｜ 范围：${expansionScopeText(expansion)}`,
+    `预算：token 上限 ${Number(expansion.budget?.maxTokens) || 0}（0=不限）｜费用上限 ¥${Number(expansion.budget?.maxCostCNY) || 0}（0=不限）`,
+    expansionOptionsText(expansion),
+    '',
+    '## 第一步：先读现状（本阶段禁止写正文）',
+    '当前各章字数与现有大纲节拍：',
+    ...(targets.length > 0 ? targets.map((row) => {
+      const chapter = chapters.find((item) => Number(item.id) === row.chapter)
+      const outline = outlineMap.get(row.chapter)
+      const beats = Array.isArray(outline?.beats) && outline.beats.length > 0 ? outline.beats.join(' / ') : '（无大纲节拍）'
+      return `- 第${row.chapter}章《${chapter?.title ?? ''}》 现 ${Number(chapter?.words) || 0} 字 → 目标 ${row.targetWords || targetWords} 字；大纲节拍：${beats}`
+    }) : ['- （没有可扩写章节）']),
+    '',
+    '## 必须输出（用 novel_desk_expansion(op="plan", data=...) 写回，不要直接改正文）',
+    '1. 诊断 diagnosis：每章当前字数、大纲节拍数、与目标字数的差距；',
+    '2. 大纲容量评估 capacity：按现有节拍判断每章最多能自然写到多少字，逐章标「可达 / 超出容量」；',
+    '3. 逐章方案 chapterTargets：每章 targetWords、type（enrich|scene|structure）、additions（加什么）、outlineChangeIds、是否触碰主线；全局目标允许单章覆盖；',
+    '4. 大纲变更清单 outlineChanges（仅确实需要时）：加/改哪些节拍、影响哪些章；默认不新增，必须等用户确认；',
+    '5. 预算估计 estimate：预计 token/费用与样张建议。',
+    '',
+    '## 硬规则',
+    '- 本阶段禁止写正文、禁止提交 chapter 提案；',
+    '- 目标字数由用户填写，不得改小或改大；大纲容量不足时如实报告“最多到 X 字”并给出大纲变更方案，不许硬凑；',
+    '- 方案提交后等作者确认（confirmPlan）；方案确认 ≠ 大纲变更确认，大纲变更会单独走 waiting-outline 闸门；',
+    '- 不引入未批准的新人物/新地点/新伏笔/新冲突。',
+  ]
+  return lines.join('\n')
+}
+
+/** 第二步执行 goal prompt：按已确认方案自动扩写（大纲硬边界 + 自动采纳 + 大纲闸门）。 */
+export function buildExpansionGoalPrompt(bundle, expansionInput = {}) {
+  const expansion = { ...defaultExpansion(), ...expansionInput }
+  const project = bundle.project ?? {}
+  const chapters = bundle.chapters ?? []
+  const chapterMap = new Map(chapters.map((chapter) => [Number(chapter.id), chapter]))
+  const targets = effectiveChapterTargets(bundle, expansion)
+  const targetWords = Number(expansion.targetWords) || 0
+  const approved = Array.isArray(expansion.approvedOutlineChanges) ? expansion.approvedOutlineChanges : []
+  const pendingOutline = Array.isArray(expansion.outlineChanges) && expansion.outlineChanges.length > 0 && approved.length === 0
+  const firstChapter = targets.length > 0 ? targets[0].chapter : 1
+  const lastChapter = targets.length > 0 ? targets[targets.length - 1].chapter : 1
+  const lines = [
+    PIPELINE_PROMPT_PRINCIPLE,
+    '',
+    `# 扩写执行 · ${project.name || '未命名作品'}`,
+    `projectId=${project.id} ｜ runId=${expansion.runId || '（无）'} ｜ 模式：${expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'} ｜ 目标字数：${expansion.mode === 'chapter' ? `第 ${firstChapter} 章 ${targetWords} 字` : `每章 ${targetWords} 字`}（用户填写，无默认、无容差）`,
+    `范围：${expansionScopeText(expansion)}；本次共 ${targets.length} 章。`,
+    '',
+    '## 第一步：先 create_goal',
+    `先调用 create_goal：objective=「按已确认方案把第 ${firstChapter}–${lastChapter} 章扩写到目标字数，现有大纲节拍不动」；max_goal_rounds 至少 ${Math.max(30, targets.length * 4)}。你是本书总编/导演：用 subagent/Team 按批（卷或 N 章）分派，不要问作者、不要中途停（大纲闸门除外）。`,
+    '',
+    '## 已确认的方案摘要（锁定）',
+    ...(targets.length > 0 ? targets.map((row) => {
+      const current = Number(chapterMap.get(row.chapter)?.words) || 0
+      const target = Number(row.targetWords) > 0 ? Number(row.targetWords) : targetWords
+      const additions = Array.isArray(row.additions) && row.additions.length > 0 ? `；新增：${row.additions.join('、')}` : ''
+      return `- 第${row.chapter}章 现 ${current} 字 → 目标 ${target} 字（增量 ${Math.max(0, target - current)}，类型 ${row.type}${additions}）`
+    }) : ['- （没有可扩写章节）']),
+    `已批准的大纲变更：${approved.length > 0 ? approved.map((row) => row.title ?? row.proposalId ?? '变更').join('、') : '（无）'}`,
+    expansionOptionsText(expansion),
+    '方案之外不得新增情节、人物、地点、设定；主线不动。',
+    '',
+    '## 硬规则（每条必须遵守）',
+    '- 现有大纲节拍锁定：一条不改写；主线节拍不动；章末钩子保留；原文关键场景不丢；风格/POV 不漂移；',
+    '- 不得引入大纲 / 已批准大纲变更之外的情节、人物、地点、设定；默认只在大纲内写厚；',
+    '- 必须达到目标字数（无容差）；达不到就报告“最多到 X 字”的上限，禁止注水、复述、纯描写凑字数；',
+    '- 新增内容必须有后果（新事件 / 冲突 / 关系 / 信息），完成后回写事件、事实、冲突、伏笔、时间线；',
+    '- 扩写后冷读分不得低于扩写前；每章扩写前后都记录注意力实测；',
+    ...(expansion.mode === 'chapter' ? ['- 单章模式：只改第 ' + firstChapter + ' 章，其他章一行不动。'] : []),
+    '',
+    '## 执行方式（全自动，每批审一次修一次）',
+    '1. 每批（卷或 N 章）按逐章目标与现有大纲节拍扩写；',
+    '2. 该批写完立即审一次（连续性/人物/时间线/文笔 + 每章冷读），再修一次；',
+    `3. 扩写章节提案必须带 data.expansionRunId="${expansion.runId || ''}" 与 data.expansion={targetWords, delta, addedScenes, subplotIds, beatsPreserved}；工作台会自动采纳并保留原稿历史备份（旧稿可回滚），不要用 novel_desk_upsert 直接改正文；`,
+    '4. 继续下一批，不要等作者；每批完成用 novel_desk_expansion(op="stage", status=..., note=...) 上报进度。' + (Number(expansion.options?.sampleChapters) > 0 ? `\n5. 样张：先扩前 ${Number(expansion.options.sampleChapters)} 章，在 notes 里汇报样张结果（字数/新增内容/冷读），然后继续全量；作者可随时暂停查看。` : ''),
+    '',
+    '## 大纲闸门（硬，不许自行改大纲）',
+    '若执行中发现必须超出已批准大纲（新节拍/旁线/人物/地点）：立即停止扩写，提交 kind="outlines" 提案（带 data.expansionRunId），并调用 novel_desk_expansion(op="wait-outline", reason=...) 停下等待用户确认；未确认前不得继续写正文，也绝不允许自行改大纲。' + (pendingOutline ? '\n（本次方案里已有待确认的大纲变更：先等用户确认，再继续写正文。）' : ''),
+    '',
+    '## 预算与完成',
+    `预算：token 上限 ${Number(expansion.budget?.maxTokens) || 0}（0=不限）｜费用上限 ¥${Number(expansion.budget?.maxCostCNY) || 0}（0=不限）；80% 预警、100% 自动暂停。`,
+    '全部完成后调用 novel_desk_expansion(op="finish", note=...)，并汇报：总字数、逐章达成（当前/目标）、冷读分变化、新增内容清单、大纲变更记录。',
+  ]
+  return lines.join('\n')
+}
+
+/** 大纲确认 / 手动恢复时发给同一会话的续跑 prompt。 */
+export function buildExpansionResumePrompt(expansionInput = {}) {
+  const expansion = { ...defaultExpansion(), ...expansionInput }
+  return [
+    '续跑（用户手动触发）：继续「扩写」goal。',
+    `runId=${expansion.runId || '（无）'} ｜ 状态：${expansion.status} ｜ 模式：${expansion.mode || '—'} ｜ 目标字数：${expansion.targetWords || '?'} ｜ 已批准大纲变更：${(expansion.approvedOutlineChanges ?? []).length} 条。`,
+    '按已确认方案继续：每批写 → 审一次 → 修一次（扩写提案带 data.expansionRunId 与 data.expansion，工作台自动采纳并保留原稿备份）；需要动大纲时提交 outlines 提案并 wait-outline 等用户确认；不要问作者、不要中途停；完成后 op="finish" 汇报。',
+  ].join('\n')
+}
+
+/** 扩写状态摘要（MCP status / 页面提示）。 */
+export function expansionSummaryText(expansionInput = {}) {
+  const expansion = { ...defaultExpansion(), ...expansionInput }
+  const targets = Array.isArray(expansion.chapterTargets) ? expansion.chapterTargets : []
+  const budget = expansion.budget ?? {}
+  const ratio = pipelineBudgetRatio(budget)
+  const lines = [
+    '# 扩写',
+    `- 状态：${expansion.status} ｜ 模式：${expansion.mode || '—'} ｜ 目标字数：${expansion.mode === 'chapter' ? `${targets[0]?.targetWords ?? expansion.targetWords ?? '—'} 字/章` : `${expansion.targetWords || '—'} 字/章`}`,
+    `- 范围：${expansionScopeText(expansion)} ｜ 逐章目标：${targets.length} 章`,
+    `- runId：${expansion.runId || '—'} ｜ sessionId：${expansion.sessionId || '—'}`,
+    `- 大纲变更：待确认 ${(expansion.outlineChanges ?? []).length} 条 / 已批准 ${(expansion.approvedOutlineChanges ?? []).length} 条`,
+    `- 预算：已用 ${Number(budget.usedTokens) || 0} tokens / ¥${Number(budget.usedCostCNY) || 0}${ratio > 0 ? `（${Math.round(ratio * 100)}%）` : ''}`,
+  ]
+  if (targets.length > 0) lines.push('- 逐章目标：', ...targets.slice(0, 40).map((row) => `  - 第${row.chapter}章 → ${row.targetWords} 字（${row.type}）`))
+  const notes = (expansion.notes ?? []).slice(-5)
+  if (notes.length > 0) lines.push('- 最近进度：', ...notes.map((note) => `  - ${note.at ?? ''} ${note.text ?? ''}`))
+  return lines.join('\n')
+}
+
+/** 第一步：新建会话 + 宏观方案 prompt；targetWords 必填无默认。 */
+export async function planExpansion(root, projectId, input = {}, ctx = null) {
+  const targetWords = Number(input.targetWords)
+  if (!Number.isFinite(targetWords) || targetWords <= 0) throw new Error('请填写目标字数')
+  const bundle = await getBundle(root, projectId)
+  const current = await getExpansion(root, projectId)
+  if (current.status === 'structuring' || current.status === 'running') throw new Error('扩写正在执行，先暂停/重置再重新出方案')
+  const mode = input.mode === 'chapter' ? 'chapter' : 'book'
+  let scopeChapters = Array.isArray(input.scope?.chapters) ? input.scope.chapters.map(Number).filter((n) => Number.isFinite(n) && n > 0) : []
+  if (Array.isArray(input.chapterTargets)) scopeChapters = [...scopeChapters, ...sanitizeChapterTargets(input.chapterTargets).map((row) => row.chapter)]
+  scopeChapters = [...new Set(scopeChapters)].sort((a, b) => a - b)
+  if (mode === 'chapter') {
+    if (scopeChapters.length === 0) {
+      const maxChapter = pipelineMaxChapter(bundle.chapters)
+      if (maxChapter > 0) scopeChapters = [maxChapter]
+    }
+    if (scopeChapters.length === 0) throw new Error('单章扩写需要指定章节')
+    scopeChapters = [scopeChapters[0]]
+  }
+  const budget = {
+    maxTokens: Number(input.budget?.maxTokens) || 0,
+    maxCostCNY: Number(input.budget?.maxCostCNY) || 0,
+    usedTokens: 0,
+    usedCostCNY: 0,
+    baseline: null,
+  }
+  const runId = `exp-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
+  const allowOutlineChanges = input.allowOutlineChanges === true
+  const options = {
+    additions: input.additions && typeof input.additions === 'object' ? { ...input.additions } : {},
+    additionLimit: Math.max(0, Number(input.additionLimit) || 0),
+    sampleChapters: Math.max(0, Number(input.sampleChapters) || 0),
+    allowOutlineChanges,
+  }
+  const saved = await saveExpansion(root, projectId, {
+    status: 'planning',
+    mode,
+    scope: { type: mode, chapters: scopeChapters },
+    targetWords,
+    planConfirmed: false,
+    options,
+    chapterTargets: sanitizeChapterTargets(input.chapterTargets),
+    plan: { diagnosis: [], capacity: [], outlineChanges: [], notes: [] },
+    outlineChanges: [],
+    approvedOutlineChanges: [],
+    runId,
+    sessionId: '',
+    budget,
+    notes: expansionPushNote(current, `开始扩写方案：${mode === 'chapter' ? `第 ${scopeChapters[0]} 章` : '全部扩写'}，目标 ${targetWords} 字/章；允许大纲变更：${allowOutlineChanges ? '是（仍需逐项确认）' : '否（默认）'}`),
+  })
+  const prompt = buildExpansionPlanPrompt(bundle, saved)
+  const session = await startPipelineSession(ctx, root, bundle, prompt)
+  const expansion = await saveExpansion(root, projectId, { sessionId: session.sessionId })
+  return { expansion, sessionId: session.sessionId, prompt }
+}
+
+/** 用户确认宏观方案（可带编辑过的 chapterTargets，白名单写入）。 */
+export async function confirmExpansionPlan(root, projectId, input = {}) {
+  const current = await getExpansion(root, projectId)
+  if (current.status === 'structuring' || current.status === 'running') throw new Error('扩写正在执行，不能重新确认方案')
+  const patch = {
+    status: 'plan-ready',
+    planConfirmed: true,
+    notes: expansionPushNote(current, '作者已确认扩写方案'),
+  }
+  if (input.plan && typeof input.plan === 'object') {
+    const plan = { ...current.plan }
+    for (const key of ['diagnosis', 'capacity', 'outlineChanges', 'notes']) {
+      if (Array.isArray(input.plan[key])) plan[key] = input.plan[key]
+    }
+    patch.plan = plan
+    if (Array.isArray(input.plan.outlineChanges)) patch.outlineChanges = input.plan.outlineChanges
+  }
+  if (Array.isArray(input.chapterTargets)) patch.chapterTargets = sanitizeChapterTargets(input.chapterTargets)
+  return saveExpansion(root, projectId, patch)
+}
+
+/** 第二步：按已确认方案启动自动扩写（新会话 + goal prompt）。 */
+export async function startExpansion(root, projectId, ctx = null) {
+  const bundle = await getBundle(root, projectId)
+  const current = await getExpansion(root, projectId)
+  if (current.status !== 'plan-ready') throw new Error('请先确认扩写方案（status=plan-ready）再开始')
+  const targetWords = Number(current.targetWords)
+  if (!Number.isFinite(targetWords) || targetWords <= 0) throw new Error('请填写目标字数')
+  const targets = effectiveChapterTargets(bundle, current).map((row) => ({
+    ...row,
+    targetWords: Number(row.targetWords) > 0 ? Number(row.targetWords) : targetWords,
+  }))
+  if (targets.length === 0) throw new Error('没有可扩写的章节')
+  const pendingOutlineChanges = Array.isArray(current.outlineChanges) && current.outlineChanges.length > 0
+    ? current.outlineChanges
+    : (Array.isArray(current.plan?.outlineChanges) ? current.plan.outlineChanges : [])
+  const usageBefore = await summarizeUsage(root, projectId, ctx)
+  const budget = {
+    maxTokens: Number(current.budget.maxTokens) || 0,
+    maxCostCNY: Number(current.budget.maxCostCNY) || 0,
+    usedTokens: 0,
+    usedCostCNY: 0,
+    baseline: { tokens: usageBefore.tokens, costCNY: usageBefore.costCNY },
+  }
+  const status = pendingOutlineChanges.length > 0 ? 'structuring' : 'running'
+  const saved = await saveExpansion(root, projectId, {
+    status,
+    runId: current.runId || `exp-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`,
+    chapterTargets: targets,
+    outlineChanges: pendingOutlineChanges,
+    approvedOutlineChanges: [],
+    budget,
+    sessionId: '',
+    notes: expansionPushNote(current, `启动扩写执行（${status === 'structuring' ? '先补地基/大纲闸门' : '全自动'}）`),
+  })
+  const prompt = buildExpansionGoalPrompt(bundle, saved)
+  let session
+  try {
+    session = await startPipelineSession(ctx, root, bundle, prompt)
+  } catch (error) {
+    await saveExpansion(root, projectId, {
+      status: 'stuck',
+      notes: expansionPushNote(saved, `启动扩写会话失败：${error instanceof Error ? error.message : String(error)}`),
+    })
+    throw error
+  }
+  const expansion = await saveExpansion(root, projectId, { sessionId: session.sessionId })
+  return { expansion, sessionId: session.sessionId, prompt }
+}
+
+/** 用户确认大纲变更：采纳带该 runId 的 pending outlines 提案 → approvedOutlineChanges → running + 续跑 prompt。 */
+export async function approveExpansionOutline(root, projectId, ctx = null) {
+  const bundle = await getBundle(root, projectId)
+  const current = await getExpansion(root, projectId)
+  if (current.status !== 'waiting-outline' && current.status !== 'structuring') {
+    throw new Error('当前没有待确认的大纲变更')
+  }
+  const pending = (bundle.proposals ?? []).filter((proposal) => (
+    proposal.status === 'pending'
+    && proposal.kind === 'outlines'
+    && String(proposal.data?.expansionRunId ?? '') === String(current.runId ?? '')
+  ))
+  if (pending.length === 0) throw new Error('没有待确认的大纲变更提案')
+  const accepted = []
+  for (const proposal of pending) {
+    await acceptProposal(root, projectId, proposal.id)
+    accepted.push({ proposalId: proposal.id, title: proposal.title, summary: proposal.summary, chapter: proposal.chapter ?? null })
+  }
+  const approved = [...(current.approvedOutlineChanges ?? []), ...accepted]
+  const saved = await saveExpansion(root, projectId, {
+    status: 'running',
+    approvedOutlineChanges: approved,
+    notes: expansionPushNote(current, `作者确认 ${accepted.length} 条大纲变更，继续扩写`),
+  })
+  const prompt = buildExpansionResumePrompt(saved)
+  if (saved.sessionId) await sendPipelinePrompt(ctx, saved.sessionId, prompt)
+  return { expansion: saved, accepted, sessionId: saved.sessionId, prompt }
+}
+
+/** 执行进度上报（RPC 与 MCP 共用）：状态/notes/预算结算。 */
+export async function advanceExpansion(root, projectId, input = {}, ctx = null) {
+  const current = await getExpansion(root, projectId)
+  if (current.status === 'idle') throw new Error('还没有开始扩写')
+  const statusInput = String(input.status ?? '')
+  const notes = [...current.notes]
+  if (String(input.note ?? '').trim()) notes.push({ at: expansionNow(), text: `${input.stageId ? `${input.stageId}：` : ''}${String(input.note).trim()}` })
+  const patch = { notes }
+  if (EXPANSION_STATUSES.includes(statusInput) && statusInput !== 'idle') {
+    patch.status = statusInput
+    notes.push({ at: expansionNow(), text: `状态 → ${statusInput}` })
+  }
+  let usage = null
+  let warning = false
+  if (current.budget.baseline) {
+    usage = await summarizeUsage(root, projectId, ctx)
+    const baseline = current.budget.baseline
+    const budget = {
+      ...current.budget,
+      usedTokens: Math.max(0, usage.tokens - (Number(baseline.tokens) || 0)),
+      usedCostCNY: Math.max(0, usage.costCNY - (Number(baseline.costCNY) || 0)),
+    }
+    const ratio = pipelineBudgetRatio(budget)
+    if (ratio >= 1 && ['structuring', 'running'].includes(patch.status ?? current.status)) {
+      patch.status = 'paused'
+      notes.push({ at: expansionNow(), text: `预算超限（${Math.round(ratio * 100)}%），已自动暂停` })
+    } else if (ratio >= PIPELINE_BUDGET_WARN_RATIO) {
+      warning = true
+      notes.push({ at: expansionNow(), text: `预算预警：已用 ${Math.round(ratio * 100)}%` })
+    }
+    patch.budget = budget
+  }
+  const saved = await saveExpansion(root, projectId, patch)
+  return { expansion: saved, usage, warning }
+}
+
+export async function pauseExpansion(root, projectId, note = '用户暂停') {
+  const current = await getExpansion(root, projectId)
+  if (current.status === 'idle') throw new Error('还没有开始扩写')
+  return saveExpansion(root, projectId, {
+    status: 'paused',
+    notes: expansionPushNote(current, String(note ?? '暂停')),
+  })
+}
+
+export async function resumeExpansion(root, projectId, ctx = null) {
+  const current = await getExpansion(root, projectId)
+  if (current.status !== 'paused' && current.status !== 'stuck') throw new Error('只有 paused/stuck 的扩写可以恢复')
+  if (!current.sessionId) throw new Error('扩写没有会话，无法恢复')
+  const prompt = buildExpansionResumePrompt(current)
+  await sendPipelinePrompt(ctx, current.sessionId, prompt)
+  const saved = await saveExpansion(root, projectId, {
+    status: 'running',
+    notes: expansionPushNote(current, '用户手动恢复，已发送续跑 prompt'),
+  })
+  return { expansion: saved, sessionId: current.sessionId, prompt }
+}
+
 function usageRow(result, options, durationMs, ok, error) {
   const usage = result?.usage ?? {}
   const total = Number(usage.totalTokens) || (Number(usage.inputTokens) || 0) + (Number(usage.outputTokens) || 0) + (Number(usage.cacheReadTokens) || 0) + (Number(usage.cacheWriteTokens) || 0)
@@ -2934,6 +3400,124 @@ function createPipelineTool(ctx) {
   }
 }
 
+function createExpansionTool(ctx) {
+  return {
+    name: 'novel_desk_expansion',
+    description: '扩写进度与方案上报工具（goal 中的 AI 使用，不是作者用）：op=status 读状态；op=plan 写入宏观方案（status=plan-ready）；op=outline-change 提交大纲变更提案并进入 waiting-outline；op=wait-outline 停下等待作者确认；op=stage 上报执行进度；op=finish 全部完成；op=stuck 卡住并说明原因。',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+        op: { type: 'string', enum: ['status', 'plan', 'outline-change', 'wait-outline', 'stage', 'finish', 'stuck'], description: '操作' },
+        data: { type: 'object', description: 'op=plan 用：diagnosis/capacity/chapterTargets/outlineChanges/notes' },
+        items: { type: 'array', description: 'op=outline-change 用：大纲变更条目数组', items: { type: 'object' } },
+        stageId: { type: 'string', description: '执行阶段/批次标识（op=stage，可选）' },
+        status: { type: 'string', description: 'op=stage：running|done|paused|stuck 等' },
+        note: { type: 'string', description: '进度说明 / 完成说明' },
+        reason: { type: 'string', description: '等待/卡住原因（op=wait-outline / stuck）' },
+      },
+      additionalProperties: false,
+      required: ['op'],
+    },
+    output: textOutput,
+    async execute(args) {
+      const project = await requireProject(args?.project)
+      const op = String(args?.op ?? 'status')
+      const root = defaultRoot()
+      const current = await getExpansion(root, project.id)
+      if (op === 'status') return expansionSummaryText(current)
+      if (op === 'plan') {
+        const data = args?.data && typeof args.data === 'object' ? args.data : {}
+        const patch = {
+          status: 'plan-ready',
+          plan: {
+            diagnosis: Array.isArray(data.diagnosis) ? data.diagnosis : current.plan.diagnosis,
+            capacity: Array.isArray(data.capacity) ? data.capacity : current.plan.capacity,
+            outlineChanges: Array.isArray(data.outlineChanges) ? data.outlineChanges : current.plan.outlineChanges,
+            notes: Array.isArray(data.notes) ? data.notes : current.plan.notes,
+          },
+          notes: expansionPushNote(current, 'AI 提交宏观扩写方案，等待作者确认'),
+        }
+        if (Array.isArray(data.chapterTargets)) patch.chapterTargets = sanitizeChapterTargets(data.chapterTargets)
+        if (Array.isArray(data.outlineChanges)) patch.outlineChanges = data.outlineChanges
+        return expansionSummaryText(await saveExpansion(root, project.id, patch))
+      }
+      if (op === 'outline-change') {
+        const items = Array.isArray(args?.items) ? args.items : []
+        if (items.length === 0) throw new Error('缺少大纲变更条目 items')
+        const proposal = await createProposal(root, project.id, {
+          kind: 'outlines',
+          chapter: Number(items[0]?.chapter) || null,
+          title: '扩写大纲变更（待确认）',
+          summary: `扩写需要 ${items.length} 条大纲变更，等待作者确认`,
+          items,
+          data: { expansionRunId: current.runId },
+        })
+        const outlineChanges = [
+          ...current.outlineChanges,
+          ...items.map((item, index) => ({
+            id: item.id ?? `outline-change-${index + 1}`,
+            chapter: Number(item.chapter) || 0,
+            title: item.title ?? '',
+            summary: item.summary ?? '',
+            proposalId: proposal.id,
+          })),
+        ]
+        const saved = await saveExpansion(root, project.id, {
+          status: 'waiting-outline',
+          outlineChanges,
+          notes: expansionPushNote(current, `提交 ${items.length} 条大纲变更提案，等待作者确认`),
+        })
+        return `${expansionSummaryText(saved)}\n\n⏸ 已进入 waiting-outline：等待作者在提案页确认（expansion.approveOutline 后自动续跑）。`
+      }
+      if (op === 'wait-outline') {
+        const reason = String(args?.reason ?? args?.note ?? '').trim()
+        const saved = await saveExpansion(root, project.id, {
+          status: 'waiting-outline',
+          notes: expansionPushNote(current, reason ? `停下等待大纲确认：${reason}` : '停下等待大纲确认'),
+        })
+        return expansionSummaryText(saved)
+      }
+      if (op === 'stage') {
+        const result = await advanceExpansion(root, project.id, { stageId: args?.stageId, status: args?.status, note: args?.note }, ctx)
+        const warning = result.warning ? '\n\n⚠️ 预算已用超过 80%，请准备收尾或暂停。' : ''
+        return `${expansionSummaryText(result.expansion)}${warning}`
+      }
+      if (op === 'finish') {
+        const bundle = await getBundle(root, project.id)
+        const chapters = bundle.chapters ?? []
+        const totalWords = chapters.reduce((sum, chapter) => sum + (Number(chapter.words) || String(chapter.content ?? '').replace(/\s/g, '').length), 0)
+        const scored = (bundle.attention ?? []).filter((row) => row.score !== null && row.score !== undefined && row.score !== '' && Number.isFinite(Number(row.score)))
+        const attention = scored.length > 0 ? Math.round(scored.reduce((sum, row) => sum + Number(row.score), 0) / scored.length) : null
+        const additions = (current.chapterTargets ?? []).flatMap((row) => (Array.isArray(row.additions) ? row.additions.map((item) => `第${row.chapter}章：${item}`) : []))
+        const report = {
+          totalWords,
+          chapters: chapters.length,
+          attention,
+          additions,
+          outlineChanges: (current.approvedOutlineChanges ?? []).map((row) => row.title ?? row.proposalId ?? '大纲变更'),
+          completedAt: new Date().toISOString(),
+        }
+        const saved = await saveExpansion(root, project.id, {
+          status: 'done',
+          report,
+          notes: expansionPushNote(current, args?.note ? `完成：${args.note}` : '全部扩写完成'),
+        })
+        return expansionSummaryText(saved)
+      }
+      if (op === 'stuck') {
+        const reason = String(args?.reason ?? args?.note ?? '').trim()
+        const saved = await saveExpansion(root, project.id, {
+          status: 'stuck',
+          notes: expansionPushNote(current, reason ? `卡住：${reason}` : '卡住，等待手动恢复'),
+        })
+        return expansionSummaryText(saved)
+      }
+      throw new Error(`未知操作：${op}（可选 status/plan/outline-change/wait-outline/stage/finish/stuck）`)
+    },
+  }
+}
+
 export function apply(ctx) {
   mountRoute(ctx)
   ctx.tools.register(projectsTool)
@@ -2945,4 +3529,5 @@ export function apply(ctx) {
   ctx.tools.register(reviewTool)
   ctx.tools.register(upsertTool)
   ctx.tools.register(createPipelineTool(ctx))
+  ctx.tools.register(createExpansionTool(ctx))
 }

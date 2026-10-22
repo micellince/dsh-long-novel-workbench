@@ -6,6 +6,21 @@
 版本号遵循 [语义化版本（SemVer）](https://semver.org/lang/zh-CN/)。
 数据格式保持向后兼容：旧版本产生的 `~/StoryDesk` 数据可以直接被新版本读取。
 
+## [Unreleased]
+
+### 新增
+
+- **扩写（全文扩写 / 单章扩写）**：「📚 整本书 → ✍️ 扩写」子模块。目标字数**必填、无默认值**；AI 先出宏观方案（诊断 / 逐章大纲容量评估 / 逐章目标 / 大纲变更清单，不写正文），对话多轮确认后点「全部扩写」或「扩写本章」全自动执行。大纲是硬边界：默认只在大纲内写厚；需新增节拍/旁线/人物时必须走 `waiting-outline` 闸门、用户确认后才写。扩写章节提案带 `data.expansionRunId` 自动采纳，**原稿进章节历史备份、可回滚**；预算 80% 预警、100% 自动暂停；计划/执行 prompt 均带「ATTENTION IS ALL YOU NEED」原则与目标字数硬约束。
+- **扩写配置**：允许新增（旁线/人物/地点/伏笔/冲突 + 上限）、样张章数、允许大纲变更开关，写入 `expansion.options` 并进两套 prompt。
+- **扩写报告**：`novel_desk_expansion(op="finish")` 写 `report`（总字数/章数/平均注意力/新增内容/大纲变更），done 页面展示。
+
+### 修复
+
+- 扩写 plan 丢弃 `additions/additionLimit/sampleChapters` 的问题（RPC 透传并持久化到 `expansion.options`）。
+- 扩写完成时没有报告数据的问题。
+
+---
+
 ## [0.5.0] - 2026-10-22
 
 ### 新增

@@ -234,6 +234,28 @@ window.__ModuleLoader__.load({
     }
     const PIPELINE_POLL_MS = 10000
 
+    // ── 扩写（EXPANSION）常量 ─────────────────────────────────
+    const EXPANSION_STATUS_META = {
+      idle: { label: '未开始', tone: 'muted' },
+      planning: { label: 'AI 出方案中', tone: 'brand' },
+      'plan-ready': { label: '方案待确认', tone: 'brand' },
+      'waiting-outline': { label: '等待确认大纲', tone: 'warn' },
+      structuring: { label: '补地基中', tone: 'brand' },
+      running: { label: '扩写中', tone: 'success' },
+      paused: { label: '已暂停', tone: 'warn' },
+      done: { label: '已完成', tone: 'success' },
+      stuck: { label: '流程卡住', tone: 'warn' },
+    }
+    const EXPANSION_MODE_OPTIONS = [['book', '全部扩写'], ['chapter', '扩写本章']]
+    const EXPANSION_ADDITION_OPTIONS = [
+      ['subplot', '旁线'],
+      ['person', '新人物'],
+      ['place', '新地点'],
+      ['foreshadow', '新伏笔'],
+      ['conflict', '新冲突'],
+    ]
+    const EXPANSION_POLL_MS = 10000
+
     // ── 数据类型定义 ──────────────────────────────────────────
     const KIND_META = {
       facts: {
@@ -1572,7 +1594,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       )
     }
 
-    function ChaptersTab({ bundle, projectId, onChanged, initialView = 'chapters' }) {
+    function ChaptersTab({ bundle, projectId, onChanged, onExpandChapter, initialView = 'chapters' }) {
       const [view, setView] = useState(initialView)
       const [editing, setEditing] = useState(null)
       const [outlineEditing, setOutlineEditing] = useState(null)
@@ -1623,6 +1645,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                       h('div', { className: 'sd-chapter-meta' }, `${chapter.words} 字 ｜ ${STATUS_LABEL[chapter.status] || chapter.status}${chapter.storyTime ? ' ｜ ' + chapter.storyTime : ''}${chapter.summary ? ' ｜ ' + chapter.summary : ''}`)),
                     h('div', { className: 'sd-chapter-actions' },
                       h(Btn, { small: true, onClick: () => setEditing(chapter) }, '打开'),
+                      onExpandChapter ? h(Btn, { small: true, onClick: () => onExpandChapter(Number(chapter.id)) }, '扩写本章') : null,
                       h(Btn, { small: true, kind: 'danger', onClick: () => removeChapter(chapter) }, '删除'))))))
           : (outlines.length === 0
               ? h(Empty, null, '还没有章节大纲。可以手动新增，也可以在导入作品包时从 大纲.md 自动导入。')
@@ -1637,12 +1660,12 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                     h('div', { className: 'sd-row-actions' },
                       h(Btn, { small: true, onClick: () => setOutlineEditing(outline) }, '编辑'),
                       h(Btn, { small: true, kind: 'danger', onClick: () => removeOutline(outline) }, '删除')))))),
-        editing !== null ? h(ChapterEditor, { chapter: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+        editing !== null ? h(ChapterEditor, { chapter: editing, projectId, onExpandChapter, onClose: () => setEditing(null), onSaved: onChanged }) : null,
         outlineEditing !== null ? h(EntityEditor, { kind: 'outlines', item: outlineEditing, projectId, onClose: () => setOutlineEditing(null), onSaved: onChanged }) : null,
       )
     }
 
-    function ChapterEditor({ chapter, projectId, onClose, onSaved }) {
+    function ChapterEditor({ chapter, projectId, onClose, onSaved, onExpandChapter }) {
       const [form, setForm] = useState(() => ({ ...chapter }))
       const [busy, setBusy] = useState(false)
       const [autoState, setAutoState] = useState('')
@@ -1712,6 +1735,23 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         }
       }
 
+      const expandChapter = async () => {
+        if (!form.id || !onExpandChapter) return
+        clearTimeout(timerRef.current)
+        if (dirty) {
+          try {
+            const payload = { ...form, status: form.status || 'draft' }
+            await api('chapter.save', { projectId, chapter: payload })
+            lastSavedRef.current = JSON.stringify(payload)
+            onSavedRef.current?.()
+          } catch (error) {
+            window.alert('保存失败，未能进入扩写：' + error.message)
+            return
+          }
+        }
+        onExpandChapter(Number(form.id))
+      }
+
       const handleRestored = (restored) => {
         if (restored && typeof restored === 'object' && Object.keys(restored).length > 0) {
           const next = { ...formRef.current, ...restored }
@@ -1739,6 +1779,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
               autoState ? h('span', { className: 'sd-hint sd-autosave' }, autoState) : null,
               h('span', { className: 'sd-hint' }, `${words} 字`),
               form.id ? h(Btn, { small: true, onClick: () => setHistoryOpen(true) }, '历史版本') : null,
+              form.id && onExpandChapter ? h(Btn, { small: true, onClick: expandChapter, disabled: busy }, '扩写本章') : null,
               h(IconBtn, { onClick: requestClose, title: '关闭' }, '✕'),
             ),
             h(
@@ -2806,7 +2847,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       )
     }
 
-    function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard }) {
+    function PipelineRunPanel({ bundle, projectId, onChanged, onGoTab, onOpenWizard }) {
       const [live, setLive] = useState(null)
       const [busy, setBusy] = useState('')
       const pipeline = normalizePipeline(live?.pipeline ?? bundle.pipeline)
@@ -2902,7 +2943,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const refreshUsage = live?.usage ?? null
       const budgetPercent = budgetInfo.percent
       const budgetClass = budgetPercent === null ? '' : budgetPercent > 100 ? ' sd-pipe-budget-danger' : budgetPercent > 80 ? ' sd-pipe-budget-warn' : ''
-      return h('div', { className: 'sd-page sd-pipe-page' },
+      return h(React.Fragment, null,
         h('div', { className: 'sd-pagehead' },
           h('div', null,
             h('h2', { className: 'sd-h2' }, '📚 整本书'),
@@ -2970,6 +3011,517 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                 h('span', { className: 'sd-pipe-note-text' }, note.text))))),
         prepared ? h('p', { className: 'sd-pipe-prepared-hint' }, '✓ 蓝图与大纲已验收，可以生成。') : h('p', { className: 'sd-pipe-prepared-hint' }, '准备完成后请先在工作台验收蓝图与大纲（提案页），再回来点「我验收完了」。'),
       )
+    }
+
+    // ── 扩写：数据归一化 + 方案辅助 ───────────────────────────
+    function normalizeExpansion(input) {
+      const raw = input && typeof input === 'object' ? input : {}
+      const scope = raw.scope && typeof raw.scope === 'object' ? raw.scope : {}
+      const plan = raw.plan && typeof raw.plan === 'object' ? raw.plan : {}
+      const budget = raw.budget && typeof raw.budget === 'object' ? raw.budget : {}
+      const status = EXPANSION_STATUS_META[raw.status] ? raw.status : 'idle'
+      const toArray = (value) => (Array.isArray(value) ? value : [])
+      return {
+        status,
+        mode: raw.mode === 'chapter' ? 'chapter' : 'book',
+        scope: {
+          type: scope.type === 'chapter' ? 'chapter' : 'book',
+          chapters: toArray(scope.chapters).map((value) => Number(value)).filter((value) => value > 0),
+        },
+        targetWords: Number(raw.targetWords) || 0,
+        chapterTargets: toArray(raw.chapterTargets).map((item) => ({
+          chapter: Number(item?.chapter) || 0,
+          targetWords: Number(item?.targetWords) || 0,
+          type: String(item?.type ?? ''),
+          additions: toArray(item?.additions).map(String),
+          outlineChangeIds: toArray(item?.outlineChangeIds).map(String),
+        })).filter((item) => item.chapter > 0),
+        plan: {
+          diagnosis: toArray(plan.diagnosis),
+          capacity: toArray(plan.capacity),
+          outlineChanges: toArray(plan.outlineChanges),
+          notes: toArray(plan.notes),
+        },
+        outlineChanges: toArray(raw.outlineChanges),
+        approvedOutlineChanges: toArray(raw.approvedOutlineChanges),
+        runId: String(raw.runId ?? ''),
+        sessionId: String(raw.sessionId ?? ''),
+        budget: {
+          maxTokens: Number(budget.maxTokens) || 0,
+          maxCostCNY: Number(budget.maxCostCNY) || 0,
+          usedTokens: Number(budget.usedTokens) || 0,
+          usedCostCNY: Number(budget.usedCostCNY) || 0,
+        },
+        notes: toArray(raw.notes).map((note, index) => ({ key: index, at: String(note?.at ?? ''), text: String(note?.text ?? '') })),
+        report: raw.report ?? raw.result ?? null,
+        planConfirmed: raw.planConfirmed === true || raw.confirmed === true,
+        updatedAt: String(raw.updatedAt ?? ''),
+      }
+    }
+
+    function expansionBudgetInfo(expansion) {
+      const budget = expansion.budget ?? {}
+      const tokenPercent = budget.maxTokens > 0 ? (budget.usedTokens / budget.maxTokens) * 100 : null
+      const costPercent = budget.maxCostCNY > 0 ? (budget.usedCostCNY / budget.maxCostCNY) * 100 : null
+      const percents = [tokenPercent, costPercent].filter((value) => value !== null)
+      return { tokenPercent, costPercent, percent: percents.length > 0 ? Math.max(...percents) : null }
+    }
+
+    function expansionEntryText(entry) {
+      if (entry === null || entry === undefined) return ''
+      if (typeof entry === 'string' || typeof entry === 'number') return String(entry)
+      if (typeof entry === 'object') {
+        const chapter = Number(entry.chapter) > 0 ? `第 ${entry.chapter} 章：` : ''
+        const candidate = entry.text ?? entry.message ?? entry.note ?? entry.title ?? entry.name ?? entry.diagnosis
+        if (candidate !== undefined && candidate !== null) return chapter + String(candidate)
+        try { return JSON.stringify(entry) } catch { return String(entry) }
+      }
+      return String(entry)
+    }
+
+    function expansionCapacityRows(expansion, bundle) {
+      const chapters = bundle?.chapters ?? []
+      const chapterWords = new Map(chapters.map((chapter) => [Number(chapter.id), Number(chapter.words) || String(chapter.content ?? '').length]))
+      const outlines = bundle?.outlines ?? []
+      const beatCounts = new Map(outlines.map((outline) => [Number(outline.chapter), Array.isArray(outline.beats) ? outline.beats.length : 0]))
+      const targetByChapter = new Map(expansion.chapterTargets.map((item) => [Number(item.chapter), item.targetWords]))
+      const rawRows = expansion.plan.capacity.length > 0 ? expansion.plan.capacity : expansion.chapterTargets
+      return rawRows.map((entry, index) => {
+        if (!entry || typeof entry !== 'object') return null
+        const chapter = Number(entry.chapter ?? entry.id ?? expansion.chapterTargets[index]?.chapter) || 0
+        if (!chapter) return null
+        return {
+          chapter,
+          currentWords: Number(entry.currentWords ?? entry.current ?? entry.words ?? chapterWords.get(chapter)) || 0,
+          beats: Number(entry.beats ?? entry.beatCount ?? beatCounts.get(chapter)) || 0,
+          maxWords: entry.maxWords ?? entry.max ?? entry.capacity ?? null,
+          targetWords: Number(entry.targetWords ?? entry.target ?? targetByChapter.get(chapter)) || 0,
+          level: String(entry.level ?? entry.status ?? ''),
+        }
+      }).filter(Boolean)
+    }
+
+    function expansionReportData(expansion, bundle) {
+      const chapters = bundle?.chapters ?? []
+      const chapterWords = new Map(chapters.map((chapter) => [Number(chapter.id), Number(chapter.words) || String(chapter.content ?? '').length]))
+      const report = expansion.report && typeof expansion.report === 'object' ? expansion.report : {}
+      const achievements = expansion.chapterTargets.map((item) => {
+        const currentWords = Number(chapterWords.get(Number(item.chapter))) || 0
+        return { ...item, currentWords, achieved: item.targetWords > 0 && currentWords >= item.targetWords }
+      })
+      const totalWords = Number(report.totalWords) || chapters.reduce((sum, chapter) => sum + (Number(chapter.words) || 0), 0)
+      const targetTotal = expansion.chapterTargets.reduce((sum, item) => sum + item.targetWords, 0) || expansion.targetWords * (expansion.mode === 'chapter' ? 1 : Math.max(1, chapters.length))
+      const attention = report.attention ?? report.coldRead ?? null
+      return {
+        totalWords,
+        targetTotal,
+        achievements,
+        achievedCount: achievements.filter((item) => item.achieved).length,
+        additions: Array.isArray(report.additions) ? report.additions : [],
+        attention,
+        outlineChanges: expansion.approvedOutlineChanges.length > 0 ? expansion.approvedOutlineChanges : expansion.outlineChanges,
+        notes: expansion.notes,
+      }
+    }
+
+    function openChatSessionById(sessionId) {
+      if (!sessionId) {
+        window.alert('还没有生成会话：先开始一次生成或扩写。')
+        return
+      }
+      try {
+        const workspace = clientCtx?.get?.('uiWorkspace')
+        const opened = workspace?.openSession?.(sessionId)
+        if (!opened) throw new Error('无法打开会话')
+      } catch {
+        window.alert(`请到工作区会话列表打开该会话（ID：${sessionId}）。`)
+      }
+    }
+
+    // ── 扩写子模块：配置 / 方案 / 大纲闸门 / 执行 / 报告 ─────────
+    function ExpansionPanel({ bundle, projectId, intent, onChanged }) {
+      const chapters = bundle.chapters ?? []
+      const maxChapter = chapters.reduce((max, chapter) => Math.max(max, Number(chapter.id) || 0), 0) || Number(bundle.project?.targetChapters) || 1
+      const [live, setLive] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [planConfirmed, setPlanConfirmed] = useState(false)
+      const [targets, setTargets] = useState(null)
+      const intentTokenRef = useRef(null)
+      const expansion = normalizeExpansion(live?.expansion ?? bundle.expansion)
+      const statusMeta = EXPANSION_STATUS_META[expansion.status] ?? EXPANSION_STATUS_META.idle
+      const budgetInfo = expansionBudgetInfo(expansion)
+      const active = expansion.status === 'planning' || expansion.status === 'structuring' || expansion.status === 'running'
+      const hasChapters = chapters.length > 0
+      const [form, setForm] = useState(() => ({
+        mode: intent?.mode === 'chapter' ? 'chapter' : 'book',
+        chapter: Number(intent?.chapter) || maxChapter,
+        targetWords: '',
+        allowOutlineChanges: false,
+        additions: { subplot: false, person: false, place: false, foreshadow: false, conflict: false },
+        additionLimit: 0,
+        sampleChapters: 0,
+        maxTokens: 0,
+        maxCostCNY: 0,
+      }))
+      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
+      const setAddition = (key, value) => setForm((prev) => ({ ...prev, additions: { ...prev.additions, [key]: value } }))
+      const load = useCallback(async () => {
+        try {
+          const value = await api('expansion.get', { projectId })
+          setLive({ expansion: value?.expansion ?? value ?? null, usage: value?.usage ?? null })
+        } catch {
+          /* 后端可能尚未实现 expansion.get：静默降级为 bundle.expansion */
+        }
+      }, [projectId])
+      useEffect(() => { load() }, [load])
+      useEffect(() => {
+        if (!active) return undefined
+        const timer = setInterval(() => { load() }, EXPANSION_POLL_MS)
+        return () => clearInterval(timer)
+      }, [active, load])
+      useEffect(() => {
+        if (!intent) return
+        const token = String(intent.token ?? '')
+        if (intentTokenRef.current === token) return
+        intentTokenRef.current = token
+        setForm((prev) => ({
+          ...prev,
+          mode: intent.mode === 'chapter' ? 'chapter' : 'book',
+          chapter: Number(intent.chapter) || prev.chapter,
+          targetWords: '',
+        }))
+      }, [intent])
+      const targetsSignature = JSON.stringify(expansion.chapterTargets)
+      useEffect(() => {
+        if (expansion.status !== 'plan-ready') return
+        const fallback = expansion.mode === 'chapter'
+          ? [{ chapter: Number(form.chapter) || maxChapter, targetWords: Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }]
+          : chapters.map((chapter) => ({ chapter: Number(chapter.id), targetWords: Number(expansion.targetWords) || Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }))
+        setTargets(expansion.chapterTargets.length > 0 ? expansion.chapterTargets.map((item) => ({ ...item })) : fallback)
+        setPlanConfirmed(expansion.planConfirmed === true)
+      }, [expansion.status, targetsSignature])
+      const run = async (label, action) => {
+        if (busy) return
+        setBusy(label)
+        try {
+          await action()
+          await load()
+          onChanged?.()
+        } catch (error) {
+          window.alert(error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      const plan = () => {
+        if (!(Number(form.targetWords) > 0)) {
+          window.alert('请先填写目标字数（必填，无默认值）')
+          return
+        }
+        run('plan', () => api('expansion.plan', {
+          projectId,
+          mode: form.mode,
+          targetWords: Number(form.targetWords),
+          scope: form.mode === 'chapter' ? { type: 'chapter', chapters: [Number(form.chapter) || maxChapter] } : { type: 'book', chapters: [] },
+          allowOutlineChanges: form.allowOutlineChanges === true,
+          additions: form.additions,
+          additionLimit: Math.max(0, Number(form.additionLimit) || 0),
+          sampleChapters: Math.max(0, Number(form.sampleChapters) || 0),
+          budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
+        }))
+      }
+      const confirmPlan = async () => {
+        if (busy) return
+        const list = (targets ?? expansion.chapterTargets).filter((item) => Number(item.chapter) > 0)
+        if (list.length === 0) {
+          window.alert('方案里没有可确认的逐章目标')
+          return
+        }
+        setBusy('confirm')
+        try {
+          await api('expansion.confirmPlan', {
+            projectId,
+            chapterTargets: list.map((item) => ({
+              chapter: Number(item.chapter),
+              targetWords: Number(item.targetWords) || 0,
+              type: item.type || 'enrich',
+              additions: Array.isArray(item.additions) ? item.additions : [],
+            })),
+          })
+          setPlanConfirmed(true)
+          await load()
+          onChanged?.()
+        } catch (error) {
+          window.alert(error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      const start = () => run('start', () => api('expansion.start', { projectId }))
+      const approveOutline = () => {
+        if (!window.confirm('确认大纲变更并继续扩写？确认后 AI 会按新的大纲结构执行，主线节拍会保留。')) return
+        run('approve', () => api('expansion.approveOutline', { projectId }))
+      }
+      const pause = () => run('pause', () => api('expansion.pause', { projectId }))
+      const resume = () => run('resume', () => api('expansion.resume', { projectId }))
+      const stop = () => {
+        if (!window.confirm('停止本次扩写？会清除本次运行状态，已扩写的正文与备份保留。')) return
+        run('stop', () => api('expansion.reset', { projectId }))
+      }
+      const stuckResume = () => {
+        if (!window.confirm('扩写流程卡住时手动恢复：由后端重新推动会话继续本次扩写。继续？')) return
+        resume()
+      }
+      const again = () => {
+        if (!window.confirm('再次扩写会新建一次 runId 并回到未开始配置；已扩写的正文与历史备份保留。继续？')) return
+        run('again', () => api('expansion.reset', { projectId }))
+      }
+      const openSession = () => openChatSessionById(expansion.sessionId)
+      const section = (title, content, extra) => h('section', { className: 'sd-exp-section' },
+        h('div', { className: 'sd-exp-section-head' }, h('h3', { className: 'sd-h3' }, title), extra ?? null),
+        content)
+      const list = (entries, emptyText) => {
+        const items = (entries ?? []).map(expansionEntryText).filter(Boolean)
+        return items.length > 0
+          ? h('div', { className: 'sd-exp-list' }, items.map((text, index) => h('div', { key: index, className: 'sd-exp-li' }, text)))
+          : h('p', { className: 'sd-exp-empty' }, emptyText)
+      }
+      const budgetBlock = () => h('section', { className: 'sd-exp-budget' },
+        h('div', { className: 'sd-exp-section-head' }, h('h3', { className: 'sd-h3' }, '预算'), h('span', { className: 'sd-hint' }, '⚠ 估算不准，仅作参考；0 = 不限')),
+        h('div', { className: 'sd-exp-budget-row' },
+          h('span', { className: 'sd-exp-budget-label' }, 'token'),
+          h('span', { className: 'sd-exp-budget-value' }, `${formatPipelineTokens(expansion.budget.usedTokens)} / ${expansion.budget.maxTokens > 0 ? formatPipelineTokens(expansion.budget.maxTokens) : '不限'}`),
+          h('div', { className: 'sd-exp-budget-bar' }, h('div', {
+            className: `sd-exp-budget-fill${budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 100 ? ' sd-exp-budget-danger' : budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 80 ? ' sd-exp-budget-warn' : ''}`,
+            style: { width: `${Math.min(100, budgetInfo.tokenPercent ?? 0)}%` },
+          }))),
+        h('div', { className: 'sd-exp-budget-row' },
+          h('span', { className: 'sd-exp-budget-label' }, '费用'),
+          h('span', { className: 'sd-exp-budget-value' }, `${formatPipelineMoney(expansion.budget.usedCostCNY)} / ${expansion.budget.maxCostCNY > 0 ? formatPipelineMoney(expansion.budget.maxCostCNY) : '不限'}`),
+          h('div', { className: 'sd-exp-budget-bar' }, h('div', {
+            className: `sd-exp-budget-fill${budgetInfo.costPercent !== null && budgetInfo.costPercent > 100 ? ' sd-exp-budget-danger' : budgetInfo.costPercent !== null && budgetInfo.costPercent > 80 ? ' sd-exp-budget-warn' : ''}`,
+            style: { width: `${Math.min(100, budgetInfo.costPercent ?? 0)}%` },
+          }))),
+        budgetInfo.percent === null
+          ? h('p', { className: 'sd-exp-budget-hint' }, '未设置预算上限（可在配置里填写 token / 费用上限）')
+          : h('p', { className: `sd-exp-budget-hint${budgetInfo.percent > 100 ? ' sd-exp-budget-danger' : budgetInfo.percent > 80 ? ' sd-exp-budget-warn' : ''}` }, `总预算使用 ${Math.round(budgetInfo.percent)}%`))
+      const notesBlock = (title) => {
+        const usage = live?.usage ?? null
+        return section(title ?? `进度提示（${expansion.notes.length}）`,
+          expansion.notes.length === 0
+            ? h('p', { className: 'sd-exp-empty' }, '还没有进度提示。')
+            : h('div', { className: 'sd-exp-note-list' }, expansion.notes.slice(-20).reverse().map((note) => h('div', { key: note.key, className: 'sd-exp-note' },
+                h('span', { className: 'sd-exp-note-time' }, note.at ? formatDateTime(note.at) : '—'),
+                h('span', { className: 'sd-exp-note-text' }, note.text)))),
+          usage ? h('span', { className: 'sd-hint' }, `${formatPipelineTokens(usage.tokens)} token · ${formatPipelineMoney(usage.costCNY)}`) : null)
+      }
+      const statusHint = h('div', { className: 'sd-exp-head' },
+        h('div', null,
+          h('h3', { className: 'sd-h3' }, '✍️ 扩写'),
+          h('p', { className: 'sd-desc' }, '把已有正文按你设定的目标字数写厚：目标字数必填、无默认值；大纲是硬边界，动大纲必须先确认。执行全自动，扩写结果自动采纳并保留原稿备份。')),
+        h('span', { className: `sd-exp-status sd-exp-status-${expansion.status}` }, statusMeta.label))
+      const sessionButton = expansion.sessionId ? h(Btn, { small: true, onClick: openSession }, '去对话查看') : null
+      const budgetBars = budgetBlock()
+      const stats = expansionReportData(expansion, bundle)
+
+      if (expansion.status === 'idle') {
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          !hasChapters ? h('p', { className: 'sd-exp-banner sd-exp-banner-warn' }, '还没有正文可扩写：请先在章节页写第 1 章。') : null,
+          h('section', { className: 'sd-exp-config' },
+            section('模式', h('div', { className: 'sd-exp-mode' },
+              h(ViewToggle, { value: form.mode, onChange: (value) => set('mode', value), options: EXPANSION_MODE_OPTIONS.map(([value, label]) => ({ value, label })) }),
+              form.mode === 'chapter'
+                ? h('label', { className: 'sd-exp-chapter-pick' },
+                    h('span', { className: 'sd-hint' }, '选择章节'),
+                    h('select', { className: 'sd-input sd-select-inline', value: String(form.chapter), onChange: (e) => set('chapter', Number(e.target.value) || maxChapter) },
+                      chapters.length === 0
+                        ? h('option', { value: '' }, '还没有章节')
+                        : chapters.map((chapter) => h('option', { key: chapter.id, value: String(chapter.id) }, `第 ${Number(chapter.id)} 章 · ${chapter.title || '未命名'}`))))
+                : null)),
+            section('目标字数（必填，无默认值）', h('div', { className: 'sd-exp-target-row' },
+              h(TextInput, { value: form.targetWords, type: 'number', min: 1, placeholder: '请输入目标字数，例如 2000', onChange: (value) => set('targetWords', value) }),
+              h('span', { className: 'sd-hint' }, form.mode === 'chapter' ? '本章目标字数' : '每章目标字数（方案出来后逐章可改）')),
+              !(Number(form.targetWords) > 0) ? h('p', { className: 'sd-exp-required' }, '⚠ 目标字数必填：填写后才能生成扩写方案。') : null),
+            section('允许新增（默认关）', h('div', { className: 'sd-exp-additions' },
+              EXPANSION_ADDITION_OPTIONS.map(([key, label]) => h('label', { key, className: 'sd-cb' },
+                h('input', { type: 'checkbox', checked: form.additions[key] === true, onChange: (e) => setAddition(key, e.target.checked) }), label)),
+              h('label', { className: 'sd-exp-additions-limit' },
+                h('span', { className: 'sd-hint' }, '上限'),
+                h(TextInput, { value: form.additionLimit, type: 'number', min: 0, onChange: (value) => set('additionLimit', value) }))),
+              h('label', { className: 'sd-cb sd-exp-outline-toggle' },
+                h('input', { type: 'checkbox', checked: form.allowOutlineChanges === true, onChange: (e) => set('allowOutlineChanges', e.target.checked) }),
+                '允许修改大纲（执行时仍需逐项确认）')),
+            section('样张与预算', h('div', { className: 'sd-exp-config-grid' },
+              h(Field, { label: '样张章数', hint: '先扩 1–3 章确认风格；0 = 不抽样' }, h(TextInput, { value: form.sampleChapters, type: 'number', min: 0, onChange: (value) => set('sampleChapters', value) })),
+              h(Field, { label: 'token 上限', hint: '0 = 不限' }, h(TextInput, { value: form.maxTokens, type: 'number', min: 0, onChange: (value) => set('maxTokens', value) })),
+              h(Field, { label: '费用上限（¥）', hint: '0 = 不限' }, h(TextInput, { value: form.maxCostCNY, type: 'number', min: 0, onChange: (value) => set('maxCostCNY', value) }))),
+              h('p', { className: 'sd-exp-budget-hint' }, '⚠ 估算不准，仅作参考；实际用量会受上下文、审阅与修订影响。'))),
+          h('div', { className: 'sd-exp-actions' },
+            h(Btn, { kind: 'primary', onClick: plan, disabled: !!busy || !(Number(form.targetWords) > 0) || !hasChapters }, busy === 'plan' ? '正在生成方案…' : '生成扩写方案')),
+        )
+      }
+      if (expansion.status === 'planning') {
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          h('div', { className: 'sd-exp-banner sd-exp-banner-info' }, 'AI 正在分析大纲与字数，生成扩写方案…（每 10 秒自动刷新）'),
+          h('div', { className: 'sd-exp-actions' }, sessionButton),
+          budgetBars,
+          notesBlock())
+      }
+      if (expansion.status === 'plan-ready') {
+        const capacityRows = expansionCapacityRows(expansion, bundle)
+        const fallbackRows = expansion.mode === 'chapter'
+          ? [{ chapter: Number(form.chapter) || maxChapter, targetWords: Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }]
+          : chapters.map((chapter) => ({ chapter: Number(chapter.id), targetWords: Number(expansion.targetWords) || Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }))
+        const targetRows = targets ?? (expansion.chapterTargets.length > 0 ? expansion.chapterTargets : fallbackRows)
+        const outlineChangeList = expansion.plan.outlineChanges.length > 0 ? expansion.plan.outlineChanges : expansion.outlineChanges
+        const metaRow = h('div', { className: 'sd-exp-meta-row' },
+          h(Tag, { tone: 'brand' }, expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
+          h('span', null, `目标字数：${expansion.targetWords}`),
+          h('span', null, `逐章目标：${expansion.chapterTargets.length} 章`),
+          expansion.scope.chapters.length ? h('span', null, `范围：第 ${expansion.scope.chapters.join('、')} 章`) : null)
+        const capacityTable = capacityRows.length === 0
+          ? h('p', { className: 'sd-exp-empty' }, '方案没有提供容量评估。')
+          : h('div', { className: 'sd-exp-table' },
+              h('div', { className: 'sd-exp-tr sd-exp-tr-head' },
+                h('span', null, '章'), h('span', null, '当前字数'), h('span', null, '大纲节拍'), h('span', null, '最多可到'), h('span', null, '目标')),
+              capacityRows.map((row) => h('div', { key: row.chapter, className: 'sd-exp-tr' },
+                h('span', null, `第 ${row.chapter} 章`),
+                h('span', null, String(row.currentWords)),
+                h('span', null, String(row.beats)),
+                h('span', null, row.maxWords === null ? '—' : String(row.maxWords)),
+                h('span', null, String(row.targetWords)))))
+        const targetTable = targetRows.length === 0
+          ? h('p', { className: 'sd-exp-empty' }, '方案没有提供逐章目标。')
+          : h('div', { className: 'sd-exp-table' },
+              h('div', { className: 'sd-exp-tr sd-exp-tr-head' },
+                h('span', null, '章'), h('span', null, '类型'), h('span', null, '新增'), h('span', null, '目标字数')),
+              targetRows.map((row, index) => h('div', { key: `${row.chapter}-${index}`, className: 'sd-exp-tr' },
+                h('span', null, `第 ${row.chapter} 章`),
+                h('span', null, row.type || '—'),
+                h('span', null, Array.isArray(row.additions) && row.additions.length ? row.additions.join('、') : '—'),
+                h('input', {
+                  className: 'sd-input sd-exp-target-input',
+                  type: 'number',
+                  min: 1,
+                  value: row.targetWords,
+                  onChange: (e) => setTargets(targetRows.map((item, position) => (position === index ? { ...item, targetWords: e.target.value } : item))),
+                }))))
+        const planActions = h('div', { className: 'sd-exp-actions' },
+          !planConfirmed
+            ? h(Btn, { kind: 'primary', onClick: confirmPlan, disabled: !!busy || targetRows.length === 0 }, busy === 'confirm' ? '确认中…' : '确认方案')
+            : h(React.Fragment, null,
+                h(Tag, { tone: 'success' }, '方案已确认'),
+                h(Btn, { kind: 'primary', onClick: start, disabled: !!busy }, busy === 'start' ? '启动中…' : expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
+                sessionButton))
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          section('方案概览', metaRow),
+          section('诊断', list(expansion.plan.diagnosis, '方案没有提供诊断。')),
+          section('每章容量', capacityTable),
+          section('逐章目标（可修改）', targetTable),
+          outlineChangeList.length > 0 ? section('大纲变更清单（执行时会再次要求确认）', list(outlineChangeList, '无')) : section('大纲变更', h('p', { className: 'sd-exp-empty' }, '方案未提出大纲变更。')),
+          section('方案备注', list(expansion.plan.notes, '无')),
+          planActions)
+      }
+      if (expansion.status === 'waiting-outline') {
+        const changes = expansion.outlineChanges.length > 0 ? expansion.outlineChanges : expansion.plan.outlineChanges
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 执行中发现需要动大纲，等你确认：确认后 AI 才会按新的结构继续扩写；不确认则只按大纲内可容纳的字数执行。'),
+          section('待确认的大纲变更', list(changes, '没有大纲变更条目。')),
+          h('div', { className: 'sd-exp-actions' },
+            h(Btn, { kind: 'primary', onClick: approveOutline, disabled: !!busy }, busy === 'approve' ? '确认中…' : '确认大纲变更并继续'),
+            sessionButton),
+          budgetBars,
+          notesBlock())
+      }
+      if (expansion.status === 'structuring' || expansion.status === 'running') {
+        const targetTotal = stats.achievements.length
+        const percent = targetTotal > 0 ? Math.round((stats.achievedCount / targetTotal) * 100) : 0
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          h('div', { className: 'sd-exp-progress' },
+            h('div', { className: 'sd-exp-progress-head' }, h('span', null, `逐章达成 ${stats.achievedCount}/${targetTotal}`), h('span', null, `${percent}%`)),
+            h('div', { className: 'sd-exp-progress-bar' }, h('div', { className: 'sd-exp-progress-fill', style: { width: `${percent}%` } }))),
+          budgetBars,
+          notesBlock(),
+          h('div', { className: 'sd-exp-actions' },
+            h(Btn, { onClick: pause, disabled: !!busy }, busy === 'pause' ? '暂停中…' : '暂停'),
+            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
+            sessionButton))
+      }
+      if (expansion.status === 'paused') {
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          h('div', { className: 'sd-exp-banner' }, '扩写已暂停：恢复后由后端继续推动本次 run。'),
+          budgetBars,
+          notesBlock(),
+          h('div', { className: 'sd-exp-actions' },
+            h(Btn, { kind: 'primary', onClick: resume, disabled: !!busy }, busy === 'resume' ? '恢复中…' : '恢复'),
+            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
+            sessionButton))
+      }
+      if (expansion.status === 'stuck') {
+        return h('div', { className: 'sd-exp-panel' },
+          statusHint,
+          h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 扩写流程卡住：会话可能已停止推进。可先「去对话查看」，必要时点「手动继续」让后端恢复。'),
+          notesBlock(),
+          h('div', { className: 'sd-exp-actions' },
+            h(Btn, { kind: 'primary', onClick: stuckResume, disabled: !!busy }, '手动继续'),
+            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
+            sessionButton))
+      }
+      // done
+      return h('div', { className: 'sd-exp-panel' },
+        statusHint,
+        h('div', { className: 'sd-exp-banner sd-exp-banner-done' }, '🎉 扩写完成：结果已自动采纳并保留原稿备份；建议把整本书交给独立审稿人复核冷读分。'),
+        section('扩写报告', h('div', { className: 'sd-exp-report' },
+          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '总字数'), h('span', { className: 'sd-exp-report-value' }, formatPipelineTokens(stats.totalWords))),
+          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '逐章达成'), h('span', { className: 'sd-exp-report-value' }, `${stats.achievedCount}/${stats.achievements.length}`)),
+          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '目标总字数'), h('span', { className: 'sd-exp-report-value' }, formatPipelineTokens(stats.targetTotal))),
+          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '冷读变化'), h('span', { className: 'sd-exp-report-value' }, stats.attention === null ? '—' : String(stats.attention))))),
+        stats.achievements.length > 0 ? section('逐章达成', h('div', { className: 'sd-exp-table' },
+          h('div', { className: 'sd-exp-tr sd-exp-tr-head' }, h('span', null, '章'), h('span', null, '当前字数'), h('span', null, '目标'), h('span', null, '达成')),
+          stats.achievements.map((item) => h('div', { key: item.chapter, className: 'sd-exp-tr' },
+            h('span', null, `第 ${item.chapter} 章`),
+            h('span', null, String(item.currentWords)),
+            h('span', null, String(item.targetWords)),
+            h('span', null, item.achieved ? '✓' : '—'))))) : null,
+        section('新增内容摘要', stats.additions.length > 0 ? list(stats.additions, '无') : h('p', { className: 'sd-exp-empty' }, expansion.notes.length > 0 ? expansionEntryText(expansion.notes[expansion.notes.length - 1]) : '无')),
+        section('大纲变更记录', list(stats.outlineChanges, '无')),
+        h('div', { className: 'sd-exp-actions' },
+          h(Btn, { onClick: again, disabled: !!busy }, '再次扩写'),
+          sessionButton),
+        budgetBars)
+    }
+
+    // ── 整本书页：子导航（生成整本书 / 扩写）──────────────────
+    function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard, expansionIntent, onExpansionConsumed }) {
+      const [section, setSection] = useState('pipeline')
+      const [pendingIntent, setPendingIntent] = useState(expansionIntent ?? null)
+      useEffect(() => {
+        if (!expansionIntent) return
+        setPendingIntent(expansionIntent)
+        setSection('expansion')
+        onExpansionConsumed?.()
+      }, [expansionIntent])
+      return h('div', { className: 'sd-page sd-pipe-page' },
+        h('div', { className: 'sd-pipe-subnav' },
+          h('button', {
+            type: 'button',
+            className: `sd-pipe-subtab${section === 'pipeline' ? ' sd-pipe-subtab-active' : ''}`,
+            onClick: () => setSection('pipeline'),
+          }, '📚 生成整本书'),
+          h('button', {
+            type: 'button',
+            className: `sd-pipe-subtab${section === 'expansion' ? ' sd-pipe-subtab-active' : ''}`,
+            onClick: () => { setPendingIntent(null); setSection('expansion') },
+          }, '✍️ 扩写')),
+        section === 'expansion'
+          ? h(ExpansionPanel, { bundle, projectId, intent: pendingIntent, onChanged, onGoTab })
+          : h(PipelineRunPanel, { bundle, projectId, onChanged, onGoTab, onOpenWizard }))
     }
 
     function PipelineOverviewCard({ bundle, onGoTab }) {
@@ -5278,6 +5830,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const [sendingCart, setSendingCart] = useState(false)
       const [focusLocation, setFocusLocation] = useState(null)
       const [pipelineWizard, setPipelineWizard] = useState(null)
+      const [expansionIntent, setExpansionIntent] = useState(null)
       const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
       const saveCart = (next) => {
         setCart(next)
@@ -5294,6 +5847,11 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
+      // 章节页 → 整本书「扩写」子页：带 token 的意图，重复点同一章也能重新预填。
+      const expandChapter = (chapterNumber) => {
+        setExpansionIntent({ mode: 'chapter', chapter: Number(chapterNumber) || 0, token: Date.now() })
+        setTab('pipeline')
+      }
       // 章节地图 → 世界页联动：切页 + 带 token 的 focusLocation，重复点同一地点也能重新高亮。
       const focusWorldLocation = (name) => {
         setFocusLocation({ name: String(name ?? ''), token: Date.now() })
@@ -5437,8 +5995,8 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                   tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, cartCount: cart.length, onOpenCart: () => setCartOpen(true), onGoTab: setTab }) : null,
                   tab === 'attention' ? h(AttentionTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onAddCart: addCart }) : null,
                   tab === 'dashboard' ? h(DashboardTab, { bundle, projectId }) : null,
-                  tab === 'pipeline' ? h(PipelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onOpenWizard: () => setPipelineWizard({}) }) : null,
-                  tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
+                  tab === 'pipeline' ? h(PipelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onOpenWizard: () => setPipelineWizard({}), expansionIntent, onExpansionConsumed: () => setExpansionIntent(null) }) : null,
+                  tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId), onExpandChapter: expandChapter }) : null,
                   tab === 'map' ? h(ChapterMapTab, { bundle, projectId, onGoTab: setTab, onFocusLocation: focusWorldLocation }) : null,
                   tab === 'world' ? h(WorldTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, focusLocation }) : null,
                   tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab }) : null,
@@ -6258,6 +6816,74 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-pipe-overview-head .sd-h3{margin:0}
 .sd-pipe-overview-head .sd-btn{margin-left:auto}
 .sd-pipe-overview-metrics{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
+/* 整本书子导航 + ✍️ 扩写面板 */
+.sd-pipe-subnav{display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--dsw-alias-border-l2,#e2e2e2);padding-bottom:2px}
+.sd-pipe-subtab{border:0;background:transparent;padding:6px 14px;border-radius:8px 8px 0 0;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;white-space:nowrap}
+.sd-pipe-subtab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));color:var(--dsw-alias-label-primary,#111)}
+.sd-pipe-subtab-active{color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
+.sd-exp-panel{display:flex;flex-direction:column;gap:12px}
+.sd-exp-head{display:flex;align-items:flex-start;gap:12px;justify-content:space-between;flex-wrap:wrap}
+.sd-exp-head .sd-h3{margin:0 0 4px}
+.sd-exp-status{display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;font-size:10.5px;line-height:20px;font-weight:600;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#666)}
+.sd-exp-status-planning,.sd-exp-status-plan-ready,.sd-exp-status-structuring{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
+.sd-exp-status-running,.sd-exp-status-done{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-exp-status-waiting-outline,.sd-exp-status-paused,.sd-exp-status-stuck{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
+.sd-exp-config,.sd-exp-section,.sd-exp-budget{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-exp-config{display:flex;flex-direction:column;gap:2px}
+.sd-exp-section + .sd-exp-section{margin-top:8px}
+.sd-exp-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sd-exp-section-head .sd-h3{margin:0 0 6px}
+.sd-exp-mode{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.sd-exp-chapter-pick{display:inline-flex;align-items:center;gap:6px}
+.sd-exp-chapter-pick .sd-input{min-width:180px}
+.sd-exp-target-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-exp-target-row .sd-input{max-width:220px}
+.sd-exp-required{margin:6px 0 0;font-size:11.5px;color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-exp-additions{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap}
+.sd-exp-additions-limit{display:inline-flex;align-items:center;gap:6px}
+.sd-exp-additions-limit .sd-input{width:86px}
+.sd-exp-outline-toggle{flex:1 1 100%}
+.sd-exp-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px}
+.sd-exp-budget-row{display:grid;grid-template-columns:52px minmax(120px,190px) minmax(0,1fr);gap:10px;align-items:center;font-size:11.5px;margin-top:6px}
+.sd-exp-budget-label{color:var(--dsw-alias-label-secondary,#666)}
+.sd-exp-budget-value{color:var(--dsw-alias-label-primary,#333);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-exp-budget-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
+.sd-exp-budget-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
+.sd-exp-budget-fill.sd-exp-budget-warn{background:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-exp-budget-fill.sd-exp-budget-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-exp-budget-hint{margin:8px 0 0;font-size:11px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-exp-budget-hint.sd-exp-budget-warn{color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-exp-budget-hint.sd-exp-budget-danger{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-exp-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sd-exp-banner{padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.6;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);background:var(--dsw-alias-bg-layer-1,#fafafa);color:var(--dsw-alias-label-primary,#333)}
+.sd-exp-banner-info{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
+.sd-exp-banner-warn{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent)}
+.sd-exp-banner-done{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-exp-progress{display:flex;flex-direction:column;gap:4px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-exp-progress-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-exp-progress-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
+.sd-exp-progress-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
+.sd-exp-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;overflow:hidden}
+.sd-exp-tr{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
+.sd-exp-tr:last-child{border-bottom:0}
+.sd-exp-tr-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
+.sd-exp-tr span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-exp-target-input{width:100%;padding:4px 6px;font-size:11.5px;box-sizing:border-box}
+.sd-exp-meta-row{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-exp-list{display:flex;flex-direction:column;gap:3px}
+.sd-exp-li{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary,#555);padding-left:14px;position:relative}
+.sd-exp-li:before{content:"·";position:absolute;left:4px;color:var(--dsw-alias-label-tertiary,#999)}
+.sd-exp-note-list{display:flex;flex-direction:column;gap:2px;max-height:220px;overflow:auto}
+.sd-exp-note{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:11.5px;line-height:1.55}
+.sd-exp-note:last-child{border-bottom:0}
+.sd-exp-note-time{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
+.sd-exp-note-text{min-width:0;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
+.sd-exp-report{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.sd-exp-report-stat{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
+.sd-exp-report-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-exp-report-value{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
+.sd-exp-empty{margin:4px 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
+@media (max-width:760px){.sd-pipe-subnav{overflow-x:auto}.sd-exp-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-exp-budget-bar{grid-column:1/-1}.sd-exp-config-grid{grid-template-columns:1fr 1fr}.sd-exp-table{overflow-x:auto}.sd-exp-tr{min-width:420px}.sd-exp-actions .sd-btn{flex:1 1 auto}.sd-exp-status{margin-left:0}}
 @media (max-width:760px){.sd-pipe-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-pipe-budget-bar{grid-column:1/-1}.sd-pipe-stage{grid-template-columns:20px minmax(80px,1fr) auto}.sd-pipe-stage-range{display:none}.sd-pipe-actions .sd-btn{flex:1 1 auto}.sd-pipe-overview-head .sd-btn{margin-left:0}.sd-pipe-status-session{margin-left:0}}
 @media (max-width:900px){.sd-principle-bar .sd-principle-hint{display:none}.sd-principle-hero{grid-template-columns:1fr}.sd-principle-hero-actions{grid-column:auto}}
 @media (max-width:760px){.sd-principle-bar .sd-principle-sub{display:none}.sd-principle-hero{padding:12px 14px}.sd-principle-hero-slogan{font-size:18px}.sd-principle-hero-stats{grid-template-columns:1fr 1fr}.sd-principle-inline{gap:4px}}

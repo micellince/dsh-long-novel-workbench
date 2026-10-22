@@ -35,6 +35,8 @@
 
 > **2026-10-22 夜新增（未发布）**：分工表第 10 个角色「独立审稿人（零上下文首读）」——`special: 'fresh-read'`，只拿一章正文、不读账本/预设/大纲/人物卡；「分工」页顶部高亮卡可选**读一章 / 读全书**，一键新开会话（`chat.send` + `task=fresh-read` + `scope=chapter|book` + `newSession`）；全书 ≤ 10 万字符直接投递整本，超出（如《鱼龙舞》111.7 万字符）转分批工作单由子 Agent 读文件汇总；总览页有紧凑入口；首读意见以 `dimension=首读` 写回审稿页。老作品打开时自动补入该角色，不覆盖作者已有分工。测试 48 个用例全绿。
 >
+> **2026-10-22 扩写（未发布）**：`docs/EXPANSION.md` + expansion.json/9 RPC/两套 prompt/大纲闸门/自动采纳+原稿备份/`novel_desk_expansion`/整本书页「扩写」子模块与章节入口；测试 151/151；未真机试跑。
+>
 > **2026-10-22 收尾新增（未发布）**：生成整本书全自动 goal 流水线——pipeline.json、9 个 pipeline RPC、准备阶段（蓝图+大纲+每章 attention 设计，作者验收）、goal prompt（create_goal + subagent + 每卷写→审→修 + 不中断）、章节修订按 pipelineRunId 自动采纳、novel_desk_pipeline 进度工具、token/费用预算与超限暂停、「📚 整本书」页/向导/总览卡/新建入口。`node --test` 130/130；真实会话首次试跑待验证。
 >
 > **2026-10-22 深夜新增（未发布）**：注意力一号原则「ATTENTION IS ALL YOU NEED / 一切为读者服务」落地——工作台常驻原则条 + 总览 hero；context/plan/交接 prompt 注入原则并把注意力段置顶（最近曲线/疲劳/目标分/四拍 + 强制补强）；`plan` 提案硬校验 `data.attention`；章节采纳合并 attention / 缺设计返回 `attentionWarning`；旧 ai.js 补齐注意力与世界观；fresh-read 保持零污染。测试 114/114。
