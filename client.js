@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
 
     // ── 工作台 → 对话 交接 ───────────────────────────────────
     async function sendToChat(payload) {
-      const target = payload.newSession ?? (window.localStorage.getItem('story-desk/send-target') === 'new')
+      const target = payload.newSession === true
       const value = await api('chat.send', { ...payload, newSession: target })
       setOpen(false)
       if (target && value?.sessionId) {
@@ -913,10 +913,8 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sd-pagehead-actions' },
             h(Btn, { kind: 'primary', onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'))),
         h('div', { className: 'sd-cart-banner' },
-          h('div', null,
-            h('strong', null, `🧺 本次处理清单${cartCount ? `：${cartCount} 项` : '（空）'}`),
-            h('span', { className: 'sd-hint' }, '把提案、审稿、检查加入清单；点右侧「打开清单」，在清单里统一发送到对话。')),
-          onOpenCart ? h(Btn, { kind: 'primary', onClick: onOpenCart }, '打开清单 · 统一发送') : null),
+          h('strong', null, `🧺 清单 ${cartCount} 项`),
+          onOpenCart ? h(Btn, { small: true, kind: 'primary', onClick: onOpenCart }, '打开清单') : null),
         h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
         h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
         h('div', { className: 'sd-two-col' },
@@ -2214,7 +2212,7 @@ window.__ModuleLoader__.load({
             h(IconBtn, { onClick: () => !sending && onClose(), title: '关闭' }, '✕')),
           h('div', { className: 'sd-modal-body' },
             items.length === 0
-              ? h(Empty, null, '清单是空的。去「审稿」「提案」「总览一致性检查」点「加入清单」，把要 AI 处理的事都加进来；然后在这里统一发送。')
+              ? h(Empty, null, '清单是空的。去审稿/提案/总览检查里点「加入清单」。')
               : h('div', { className: 'sd-cart-list' },
                   items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-row' },
                     h('div', { className: 'sd-cart-item' },
@@ -2396,7 +2394,6 @@ window.__ModuleLoader__.load({
       const [ai, setAi] = useState(null)
       const [cart, setCart] = useState([])
       const [cartOpen, setCartOpen] = useState(false)
-      const [sendTarget, setSendTarget] = useState(() => window.localStorage.getItem('story-desk/send-target') || 'current')
       const [sendingCart, setSendingCart] = useState(false)
       const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
       const saveCart = (next) => {
@@ -2414,11 +2411,7 @@ window.__ModuleLoader__.load({
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
-      const changeSendTarget = (value) => {
-        setSendTarget(value)
-        try { window.localStorage.setItem('story-desk/send-target', value) } catch { /* ignore */ }
-      }
-      const sendCart = async (allowContinue, target = sendTarget) => {
+      const sendCart = async (allowContinue, target = 'current') => {
         if (cart.length === 0) return
         setSendingCart(true)
         try {
@@ -2514,11 +2507,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sd-head-actions' },
               busy ? h('span', { className: 'sd-hint' }, '同步中…') : null,
               h(Btn, { small: true, onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
-              h('select', { className: 'sd-input sd-send-target', value: sendTarget, title: '发送到哪个对话', onChange: (e) => changeSendTarget(e.target.value) },
-                h('option', { value: 'current' }, '发到当前对话'),
-                h('option', { value: 'new' }, '新开对话')),
-              h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setCartOpen(true) }, `🧺 本次清单${cart.length ? ` (${cart.length})` : ''} · 统一发送`),
-              h('span', { className: 'sd-hint sd-cart-tip' }, '把提案/审稿/检查加进来，点清单发到对话'),
+              h(Btn, { kind: 'primary', disabled: !bundle, title: '把提案/审稿/检查加进清单，统一发送到对话', onClick: () => setCartOpen(true) }, `🧺 清单${cart.length ? ` (${cart.length})` : ''}`),
               bundle
                 ? h('select', { className: 'sd-input sd-export-select', value: exportFormat, title: '导出格式', onChange: (e) => setExportFormat(e.target.value) },
                     h('option', { value: 'md' }, 'Markdown'),
@@ -2559,7 +2548,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
-          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: sendTarget, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
+          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: 'current', onClose: () => setCartOpen(false), onSend: sendCart }) : null,
           importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) }, onAddCart: addCart, onOpenCart: () => setCartOpen(true) }) : null,
         ),
       )
@@ -2836,10 +2825,8 @@ window.__ModuleLoader__.load({
 
 .sd-decision-ai{font-size:12.5px;line-height:1.7;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);padding:4px 0 4px 10px;background:var(--dsw-alias-bg-layer-1,#fafafa);border-radius:0 6px 6px 0}
 
-.sd-send-target{max-width:130px;font-size:12px}
 .sd-send-options{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px}
 
-.sd-cart-tip{max-width:150px;font-size:10.5px;line-height:1.4}
 
 .sd-cart-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);margin-top:10px}
 .sd-cart-banner>div{display:flex;flex-direction:column;gap:2px;font-size:12px}
