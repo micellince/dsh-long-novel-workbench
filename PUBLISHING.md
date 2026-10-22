@@ -1,6 +1,6 @@
 # 发布与收录（DSH 插件）
 
-> 最后更新：2026-10-22 凌晨（v0.4.1 已发布到 npm；GitHub Release v0.4.1 已建；社区目录 PR #8520 已开，等仓库满 24h 自动转绿）
+> 最后更新：2026-10-22（v0.5.0：注意力一号原则/世界模型/章节地图/整本书流水线，tag 触发 CI 发布）
 
 ## 结论先说
 
@@ -39,7 +39,8 @@ DSH 插件**没有“官方登记”这一步**。一个插件要能被别人安
   - **仓库年龄门槛**：目录要求仓库创建满 24 小时（CI 的 Submission gate 自动检查）。
     本仓库创建于 **2026-10-21 22:50（Asia/Shanghai）**，门槛在 **2026-10-22 22:50** 之后自动满足。
     gate 会自己重跑并转绿，**不需要重提、push 或关掉重开**；等它变绿即可。
-- [ ] 0.4.0 发布：代码与测试已完成（`npm test` 全绿），待执行 `npm version`/`npm publish`（需要 Bypass 2FA token）
+- [x] 0.4.0 / 0.4.1 已发布
+- [ ] 0.5.0 发布：tag `v0.5.0` 触发 Publish workflow（需 `NPM_TOKEN` secret）；失败则用本机 token 手动 `npm publish --access public`
 - [ ] 目录合并后：确认目录页/市场能搜到
 
 ## 发版流程（以后每个版本）
@@ -95,7 +96,7 @@ name: micellince/dsh-long-novel-workbench
 category: workflow
 description:
   en: "Long-form Chinese novel workbench: chapters, timeline, fact ledger, foreshadowing, conflicts, characters, highlights, reviews, proposals, plan alignment, nine agent roles, author-style presets, and built-in AI generation and review."
-  zh: "长篇中文小说工作台：章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、9 个 Agent 分工、名家风格预设，并内置 AI 生成与审稿。"
+  zh: "长篇中文小说工作台：章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、11 个 Agent 分工（含注意力设计师、独立审稿人）、名家风格预设，并内置 AI 生成与审稿。"
 ```
 
 如需补提/更新（一般不用）：

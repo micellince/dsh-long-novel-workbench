@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Long-form Chinese Novel Workbench",
-    "description": "General workbench for long-form Chinese fiction: chapters, timeline, fact ledger, foreshadowing, conflicts, characters, highlights, reviews, proposals, plan alignment, 9 agent roles and writing presets; AI generation and review built in."
+    "description": "Attention-first workbench for long-form Chinese fiction: chapters, timeline, fact ledger, foreshadowing, conflicts, characters, highlights, reviews, proposals, plan alignment, world/location consistency, chapter map, full-book generation, 11 agent roles (incl. an attention designer and a zero-context fresh-read reviewer) and writing presets; AI generation and review built in."
   }
 }

@@ -13,7 +13,7 @@
 
 ## 1. 一句话
 
-一个装在 **DeepSeek Harness** 里的**长篇中文小说工作台**插件：14 个页签管理章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、Agent 分工、写作预设；v0.4 又加了人物关系图、时间线泳道、自动保存 + 章节历史/恢复/diff、批量审稿/采纳、事实生效区间、Markdown 导入、EPUB/DOCX 导出、多预设对齐。AI 可以直接读这些账本生成下一章/审稿/补时间线，但所有 AI 产出先进入「提案」，人工对比后才落盘。
+一个装在 **DeepSeek Harness** 里的**长篇中文小说工作台**插件：16 个页签（注意力 / 正文 / 验收 / 工具 四组）管理章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、Agent 分工、写作预设；v0.4 又加了人物关系图、时间线泳道、自动保存 + 章节历史/恢复/diff、批量审稿/采纳、事实生效区间、Markdown 导入、EPUB/DOCX 导出、多预设对齐。AI 可以直接读这些账本生成下一章/审稿/补时间线，但所有 AI 产出先进入「提案」，人工对比后才落盘。
 
 **不是针对某一本书写的**，不绑定《碧血青霜缘》或任何现有作品。数据默认在 `~/StoryDesk`，全是普通 Markdown/JSON。
 
@@ -23,15 +23,25 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.4.1，tag `v0.4.1`；`npm test` 35 个用例全绿 |
-| npm | **已发布 0.4.0**，`latest` = 0.4.0（由 tag `v0.4.0` 触发的 Publish workflow 完成）。本地再跑 `npm publish` 会报「版本已存在」，属正常 |
-| GitHub Release | **v0.4.0 已建**，附免版本号 tarball；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
+| 代码 | v0.5.0，tag `v0.5.0`；`npm test` 132 个用例全绿 |
+| npm | **v0.5.0 发布中/已发布**（由 tag `v0.5.0` 触发的 Publish workflow 完成）；上一版 0.4.1 |
+| GitHub Release | **v0.5.0**（附 tarball）；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
 | 社区目录 | PR #8520 已开、只加一个 YAML 文件；`PR check` 已通过，`Submission gate` 因仓库未满 24h 暂时失败；仓库创建于 2026-10-21 22:50，**24h 门槛在 2026-10-22 22:50 自动满足**（gate 会自己重跑转绿，不用重提） |
 | 自动化测试 | `test/`：`node:test` + `node:assert/strict`，零依赖，临时目录，不碰 `~/StoryDesk` |
 | CI | CI（Node 22/24）已绿：<https://github.com/micellince/dsh-long-novel-workbench/actions/runs/39636720312> |
 | 浏览器截图 | **已换成 v0.4 真实截图**：总览 / 时间线泳道 / 预设 / 关系图 / 章节历史 / 导入（`docs/screenshots/`） |
 | 真实浏览器验收 | **已做**：临时 `accept` profile + 本地 link + 无头 Chrome 155（CDP），自动点检关系图/泳道/历史/自动保存/批量/导入/导出，0 exception、0 error。详见 `docs/releases/v0.4.0.md` 第三节 |
+
+> **2026-10-22 夜新增（未发布）**：分工表第 10 个角色「独立审稿人（零上下文首读）」——`special: 'fresh-read'`，只拿一章正文、不读账本/预设/大纲/人物卡；「分工」页顶部高亮卡可选**读一章 / 读全书**，一键新开会话（`chat.send` + `task=fresh-read` + `scope=chapter|book` + `newSession`）；全书 ≤ 10 万字符直接投递整本，超出（如《鱼龙舞》111.7 万字符）转分批工作单由子 Agent 读文件汇总；总览页有紧凑入口；首读意见以 `dimension=首读` 写回审稿页。老作品打开时自动补入该角色，不覆盖作者已有分工。测试 48 个用例全绿。
+>
+> **2026-10-22 收尾新增（未发布）**：生成整本书全自动 goal 流水线——pipeline.json、9 个 pipeline RPC、准备阶段（蓝图+大纲+每章 attention 设计，作者验收）、goal prompt（create_goal + subagent + 每卷写→审→修 + 不中断）、章节修订按 pipelineRunId 自动采纳、novel_desk_pipeline 进度工具、token/费用预算与超限暂停、「📚 整本书」页/向导/总览卡/新建入口。`node --test` 130/130；真实会话首次试跑待验证。
+>
+> **2026-10-22 深夜新增（未发布）**：注意力一号原则「ATTENTION IS ALL YOU NEED / 一切为读者服务」落地——工作台常驻原则条 + 总览 hero；context/plan/交接 prompt 注入原则并把注意力段置顶（最近曲线/疲劳/目标分/四拍 + 强制补强）；`plan` 提案硬校验 `data.attention`；章节采纳合并 attention / 缺设计返回 `attentionWarning`；旧 ai.js 补齐注意力与世界观；fresh-read 保持零污染。测试 114/114。
+>
+> **2026-10-22 更晚新增（未发布）**：世界模型 P1–P3——`world.json`（单例）/`locations.json` 账本，世界页 SVG 坐标地图（拖拽/连接编辑）、新建向导世界设定、`world-build`/`world-infer` 清单任务、6 条空间 checks、只读 HTML 视图 `/novel-desk/view/{world|timeline|map}`（面板 iframe + 打印）、章节地图联动世界地图、时间线地点筛选。`docs/WORLD-MODEL.md` 有完整契约与实现记录；`node --test` 105/105。
+>
+> **2026-10-22 深夜新增（未发布）**：⚡ 注意力模块——`attention.json` 每章一个 0–100 总分 + 四拍 + 详细说明；新页签「⚡ 注意力」带 100 分制曲线与章节诊断卡，伏笔/冲突/高光按章号聚合（零迁移）；第 11 角色「注意力设计师」`weight=10`（总编 9、独立审稿人 8、其余 3），分工表加权重列；独立审稿人冷读加类型化评分（`novel_desk_propose(kind=attention)`）；8 条确定性 checks；侧边栏改为四组导航。`node --test` 74/74。
 
 ### npm 0.4.0 发布记录（已解决）
 
@@ -59,7 +69,7 @@ index.js            Host 半边：/novel-desk/api 路由 + 7 个 Agent 工具
 client.js           浏览器半边：全屏工作台 + 侧栏入口（React.createElement，无构建；v0.4 约 2350 行）
 lib/store.js        数据层：作品库、章节 frontmatter、账本、提案、审稿、预设、章节历史、批量操作、导出入口
 lib/checks.js       确定性检查：事实区间冲突、伏笔超期、人物未建卡、审稿、计划对齐（多预设/多卷）
-lib/defaults.js     默认写作方案 + 8 套名家风格预设 + 9 个 Agent 分工
+lib/defaults.js     默认写作方案 + 8 套名家风格预设 + 11 个 Agent 分工（含独立审稿人、注意力设计师）+ 类型化打分校准表
 lib/ai.js           宿主 LLM 调用：下一章方案/续写/审稿/抽取/补时间线/按意见修订
 lib/importer.js     v0.4：Markdown 目录扫描与导入（#/## 切章、append 续号）
 lib/zip.js          v0.4：零依赖 ZIP 打包（deflateRawSync + CRC32）

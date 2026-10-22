@@ -43,6 +43,37 @@ window.__ModuleLoader__.load({
       return value
     }
 
+    // ── 会话目标：清单发到哪个对话 ────────────────────────────
+    // DSH 的「当前会话」= 主视图 retain 的那个（宿主自己的 DocumentTitle 也这么判断）
+    function sessionSnapshot() {
+      try {
+        return clientCtx?.get?.('sessions')?.list?.getSnapshot?.() ?? null
+      } catch {
+        return null
+      }
+    }
+    function sessionTitleOf(sessionId, fromRpc = '') {
+      if (fromRpc) return fromRpc
+      const state = sessionSnapshot()
+      return (sessionId && state?.byId?.[sessionId]?.title) || ''
+    }
+    function currentMainSessionId() {
+      const state = sessionSnapshot()
+      const rows = Object.values(state?.byId ?? {}).filter((row) => (row?.retainedBy?.mainView ?? 0) > 0)
+      if (rows.length === 0) return ''
+      rows.sort((a, b) => (Date.parse(b.updatedAt ?? 0) || 0) - (Date.parse(a.updatedAt ?? 0) || 0))
+      return rows[0]?.id ?? ''
+    }
+    function relativeTime(value) {
+      const ms = Date.parse(value ?? '')
+      if (!Number.isFinite(ms)) return ''
+      const diff = Math.max(0, Date.now() - ms)
+      if (diff < 60000) return '刚刚'
+      if (diff < 3600000) return `${Math.round(diff / 60000)} 分钟前`
+      if (diff < 86400000) return `${Math.round(diff / 3600000)} 小时前`
+      return `${Math.round(diff / 86400000)} 天前`
+    }
+
     // ── API ───────────────────────────────────────────────────
     async function api(op, payload = {}) {
       const res = await fetch('/novel-desk/api', {
@@ -108,6 +139,100 @@ window.__ModuleLoader__.load({
     function Empty({ children }) {
       return h('div', { className: 'sd-empty' }, children)
     }
+
+    // ── 世界 / 地点常量（契约见 docs/WORLD-MODEL.md）───────────
+    const WORLD_SCALE_OPTIONS = [
+      ['city', '一座城'],
+      ['region', '一个地区'],
+      ['continent', '一整块大陆'],
+      ['realm', '多界 / 天下'],
+    ]
+    const WORLD_KIND_OPTIONS = [
+      ['historical', '现实历史'],
+      ['fictional', '架空'],
+      ['mixed', '混合'],
+    ]
+    const LOCATION_TYPES = [
+      ['capital', '都城'],
+      ['city', '城市'],
+      ['town', '城镇'],
+      ['village', '村庄'],
+      ['pass', '关隘'],
+      ['temple', '寺庙'],
+      ['mountain', '山岭'],
+      ['river', '河流'],
+      ['sea', '海域'],
+      ['other', '其他'],
+    ]
+    const LOCATION_TYPE_LABEL = Object.fromEntries(LOCATION_TYPES)
+    const LOCATION_TYPE_CLASS = Object.fromEntries(LOCATION_TYPES.map(([value]) => [value, `sd-loc-type-${value}`]))
+    const LOCATION_MODE_OPTIONS = [['walk', '步行'], ['horse', '骑马'], ['boat', '行船']]
+    const LOCATION_MODE_LABEL = Object.fromEntries(LOCATION_MODE_OPTIONS)
+    // 清单一律是 AI 唯一入口：世界页的两个 AI 动作都只「加入清单」。
+    const WORLD_CART = {
+      build: { kind: 'task', id: 'world-build', task: 'world-build', title: 'AI 生成世界地图' },
+      infer: { kind: 'task', id: 'world-infer', task: 'world-infer', title: 'AI 反推地点清单' },
+    }
+    // 新建作品向导的世界设定选项（城市日常不是 world.kind 契约值，只用于发给 AI 的指令）。
+    const CREATE_WORLD_KINDS = [['historical', '现实历史'], ['fictional', '架空'], ['mixed', '混合'], ['urban', '城市日常']]
+    const CREATE_WORLD_SCALES = [['city', '城市'], ['region', '地区'], ['continent', '大陆']]
+
+    // ── 注意力（⚡ ATTENTION）常量 ────────────────────────────
+    // 每章一条：主类型 + 0–100 总分（冷读实测）+ 目标分 + 四拍 + 弃读点。
+    // 伏笔 / 冲突 / 高光不改数据，注意力页按章号实时聚合。
+    const ATTENTION_TYPES = [
+      ['event', '事件'],
+      ['emotion', '情感'],
+      ['language', '语言'],
+      ['mystery', '悬念'],
+      ['relationship', '关系'],
+    ]
+    const ATTENTION_TYPE_LABEL = Object.fromEntries(ATTENTION_TYPES)
+    const ATTENTION_TYPE_CLASS = Object.fromEntries(ATTENTION_TYPES.map(([value]) => [value, `sd-att-c-${value}`]))
+    const ATTENTION_VERDICT_OPTIONS = [['会', '会'], ['犹豫', '犹豫'], ['不会', '不会']]
+    const ATTENTION_VERDICT_TONE = { 会: 'success', 犹豫: 'warn', 不会: 'error' }
+    const ATTENTION_WEAKEST_OPTIONS = [['hook', '钩子'], ['tension', '张力'], ['payoff', '回报'], ['cliff', '章末牵引']]
+    const ATTENTION_WEAKEST_LABEL = Object.fromEntries(ATTENTION_WEAKEST_OPTIONS)
+    const ATTENTION_STATUS_OPTIONS = [['planned', '计划'], ['drafted', '已写'], ['verified', '已验证']]
+    const ATTENTION_STATUS_LABEL = Object.fromEntries(ATTENTION_STATUS_OPTIONS)
+    // 四拍：钩子 → 张力 → 回报 → 章末牵引（卡片展示；emotion 是补充字段）
+    const ATTENTION_BEATS = [
+      ['hook', '钩子', '开篇 3 行内抛出的问题 / 画面'],
+      ['tension', '张力', '本章承压点：主角失去 / 被逼什么'],
+      ['payoff', '回报', '本章兑现了什么：爽点 / 揭示 / 情绪释放'],
+      ['cliff', '章末牵引', '章末留下的未决问题'],
+    ]
+    // 职责拆分：设计（类型/四拍/读者问题/目标分）由注意力设计师产出，总分由独立审稿人冷读。
+    // 老作品补齐设计统一走清单任务（清单是唯一 AI 入口），不直接发对话。
+    const ATTENTION_DESIGN_CART = { kind: 'task', id: 'attention-design', task: 'attention-design', title: 'AI 补齐注意力机制（逐章设计）' }
+    // 判断「有设计」只看设计字段：type / hook / tension / payoff / cliff 至少两项非空。
+    const ATTENTION_DESIGN_FIELDS = ['type', 'hook', 'tension', 'payoff', 'cliff']
+    // 一号原则（工作台常驻条 / 总览 hero / 注意力页 / 分工页共用文案）
+    const PRINCIPLE_SLOGAN = '⚡ ATTENTION IS ALL YOU NEED'
+    const PRINCIPLE_SUB = '怎么吸引读者怎么来 · 一切为读者服务'
+    const PRINCIPLE_HINT = '先抓人，再自洽：每章必须有核心注意力；事实自洽是底线，不是目标。'
+    const PRINCIPLE_REVIEW_HINT = '评的是读者会不会读下去，不是文笔好不好；低分不是错，是下一章要补强的地方。'
+    const PRINCIPLE_AGENTS_LINE = '注意力设计师权重最高（10）：每章先出注意力设计，再谈情节。'
+
+    // ── 整本书流水线（FULLBOOK PIPELINE）常量 ─────────────────
+    const PIPELINE_STATUS_META = {
+      idle: { label: '未开始', tone: 'muted' },
+      preparing: { label: '准备中', tone: 'brand' },
+      ready: { label: '已就绪', tone: 'brand' },
+      running: { label: '生成中', tone: 'success' },
+      paused: { label: '已暂停', tone: 'warn' },
+      done: { label: '已完成', tone: 'success' },
+      aborted: { label: '已停止', tone: 'error' },
+      stuck: { label: '流程卡住', tone: 'warn' },
+    }
+    const PIPELINE_STAGE_STATUS_META = {
+      pending: { icon: '○', label: '待开始', tone: 'muted' },
+      running: { icon: '◐', label: '进行中', tone: 'brand' },
+      done: { icon: '✓', label: '完成', tone: 'success' },
+      failed: { icon: '✕', label: '失败', tone: 'error' },
+      skipped: { icon: '−', label: '跳过', tone: 'muted' },
+    }
+    const PIPELINE_POLL_MS = 10000
 
     // ── 数据类型定义 ──────────────────────────────────────────
     const KIND_META = {
@@ -198,7 +323,7 @@ window.__ModuleLoader__.load({
       characters: {
         title: '人物',
         icon: '👤',
-        desc: '人物卡：目标、动机、缺陷、弧光、关系。章节里引用但未建卡的人物会被提示。',
+        desc: '人物卡：目标、动机、缺陷、弧光、关系。人物列表与卡片按重要性排序（主角 > 反派 > 配角 > 龙套，再按出场章数 / 冲突数）；章节里引用但未建卡的人物会被提示。',
         columns: [
           { k: 'name', t: '姓名' },
           { k: 'role', t: '定位', w: '100px' },
@@ -220,6 +345,26 @@ window.__ModuleLoader__.load({
           { k: 'tags', t: '标签', type: 'tags' },
         ],
       },
+      locations: {
+        title: '地点',
+        icon: '🏙️',
+        desc: '世界里的地点：名称 / 别名 / 类型 / 坐标 / 区域 / 首现章 / 连接道路。世界页使用专用地图编辑器（拖拽坐标与连接编辑），这里供其他入口复用简版列表与表单。',
+        columns: [
+          { k: 'name', t: '地点' },
+          { k: 'type', t: '类型', w: '90px', format: (v) => LOCATION_TYPE_LABEL[v] ?? v ?? '其他' },
+          { k: 'coords', t: '坐标', w: '96px', format: (v) => (v && Number.isFinite(Number(v.x)) && Number.isFinite(Number(v.y)) ? `${Number(v.x)}, ${Number(v.y)}` : '—') },
+          { k: 'region', t: '区域' },
+          { k: 'firstChapter', t: '首现章', w: '70px' },
+        ],
+        fields: [
+          { k: 'name', t: '名称', type: 'text', required: true },
+          { k: 'aliases', t: '别名', type: 'tags', ph: '如 京兆府、西京' },
+          { k: 'type', t: '类型', type: 'select', options: LOCATION_TYPES },
+          { k: 'region', t: '区域', type: 'text', ph: '如 关内道 / 北境' },
+          { k: 'firstChapter', t: '首现章', type: 'number' },
+          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
+        ],
+      },
       highlights: {
         title: '高光',
         icon: '✨',
@@ -236,6 +381,36 @@ window.__ModuleLoader__.load({
           { k: 'note', t: '为什么好', type: 'textarea', rows: 2 },
         ],
       },
+      attention: {
+        title: '注意力',
+        icon: '⚡',
+        desc: '每章一条注意力记录：设计（主类型、四拍、读者问题、目标分）由注意力设计师产出（写大纲 / 下一章方案时自动带，老作品用清单补齐）；0–100 总分与详细说明由独立审稿人冷读。伏笔 / 冲突 / 高光按章号自动聚合。',
+        columns: [
+          { k: 'chapter', t: '章', w: '56px' },
+          { k: 'type', t: '类型', w: '76px', format: (v) => ATTENTION_TYPE_LABEL[v] ?? v ?? '—' },
+          { k: 'score', t: '总分', w: '60px', format: (v) => (v === '' || v === null || v === undefined ? '—' : String(v)) },
+          { k: 'designScore', t: '目标分', w: '64px', format: (v) => (v === '' || v === null || v === undefined ? '—' : String(v)) },
+          { k: 'verdict', t: '下一章意愿', w: '84px' },
+        ],
+        fields: [
+          { k: 'chapter', t: '章号', type: 'number', required: true },
+          { k: 'type', t: '类型', type: 'select', options: ATTENTION_TYPES },
+          { k: 'score', t: '总分（0–100）', type: 'number', ph: '冷读实测；没读过就留空' },
+          { k: 'designScore', t: '目标分（0–100）', type: 'number', ph: '设计时定下的目标分' },
+          { k: 'verdict', t: '下一章意愿', type: 'select', options: ATTENTION_VERDICT_OPTIONS },
+          { k: 'weakest', t: '最弱一环', type: 'select', options: ATTENTION_WEAKEST_OPTIONS },
+          { k: 'hook', t: '钩子', type: 'textarea', rows: 2, ph: '开篇 3 行内抛出的问题 / 画面' },
+          { k: 'tension', t: '张力', type: 'textarea', rows: 2, ph: '本章承压点：主角失去 / 被逼什么' },
+          { k: 'payoff', t: '回报', type: 'textarea', rows: 2, ph: '本章兑现了什么：爽点 / 揭示 / 情绪释放' },
+          { k: 'cliff', t: '章末牵引', type: 'textarea', rows: 2, ph: '章末留下的未决问题' },
+          { k: 'emotion', t: '情绪（补充）', type: 'textarea', rows: 2, ph: '本章主情绪 / 情绪走向' },
+          { k: 'question', t: '读者最想知道', type: 'text', ph: '读到这里，读者最想知道的一句话' },
+          { k: 'dropRisk', t: '弃读点（位置 + 原因）', type: 'textarea', rows: 2, ph: '如：第 9 段回忆插叙约 600 字，与当下无关' },
+          { k: 'detail', t: '详细说明', type: 'textarea', rows: 6, ph: '四拍逐条给依据、引用原文；最弱一环；弃读点；下一章意愿' },
+          { k: 'status', t: '状态', type: 'select', options: ATTENTION_STATUS_OPTIONS },
+          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
+        ],
+      },
       reviews: {
         title: '审稿',
         icon: '📝',
@@ -249,7 +424,7 @@ window.__ModuleLoader__.load({
         ],
         fields: [
           { k: 'chapter', t: '章号', type: 'number' },
-          { k: 'dimension', t: '维度', type: 'select', options: [['情节', '情节'], ['人物', '人物'], ['文笔', '文笔'], ['连续性', '连续性'], ['节奏', '节奏'], ['对话', '对话'], ['世界观', '世界观'], ['主题', '主题']] },
+          { k: 'dimension', t: '维度', type: 'select', options: [['情节', '情节'], ['人物', '人物'], ['文笔', '文笔'], ['连续性', '连续性'], ['节奏', '节奏'], ['对话', '对话'], ['世界观', '世界观'], ['主题', '主题'], ['首读', '首读']] },
           { k: 'severity', t: '严重度', type: 'select', options: [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']] },
           { k: 'issue', t: '问题（引用原文）', type: 'textarea', rows: 3, required: true },
           { k: 'suggestion', t: '修改建议', type: 'textarea', rows: 3 },
@@ -260,9 +435,10 @@ window.__ModuleLoader__.load({
       agents: {
         title: 'Agent 分工',
         icon: '🤖',
-        desc: '9 个角色的职责与输入输出。总编派单，各角色按契约产出，审稿与写作上下文都会带上这份分工。',
+        desc: '11 个角色的职责与输入输出。总编派单，各角色按契约产出，审稿与写作上下文都会带上这份分工（含零上下文独立审稿人、权重最高的注意力设计师）。注意力设计师权重最高（10）：每章先出注意力设计，再谈情节。',
         columns: [
           { k: 'order', t: '#', w: '40px' },
+          { k: 'weight', t: '权重', w: '56px', render: (item) => agentWeightCell(item.weight) },
           { k: 'name', t: '角色', w: '120px' },
           { k: 'duty', t: '职责' },
           { k: 'outputs', t: '产出' },
@@ -322,23 +498,75 @@ window.__ModuleLoader__.load({
       },
     }
 
-    const TABS = [
-      { id: 'overview', label: '总览', icon: '📊' },
-      { id: 'dashboard', label: '仪表盘', icon: '📈' },
-      { id: 'chapters', label: '章节', icon: '📄' },
-      { id: 'timeline', label: '时间线', icon: '🕰️' },
-      { id: 'facts', label: '事实账本', icon: '⚖️' },
-      { id: 'foreshadow', label: '伏笔', icon: '🧩' },
-      { id: 'conflicts', label: '冲突', icon: '⚔️' },
-      { id: 'characters', label: '人物', icon: '👤' },
-      { id: 'highlights', label: '高光', icon: '✨' },
-      { id: 'reviews', label: '审稿', icon: '📝' },
-      { id: 'proposals', label: '提案', icon: '📥' },
-      { id: 'alignment', label: '对齐', icon: '🎯' },
-      { id: 'agents', label: '分工', icon: '🤖' },
-      { id: 'presets', label: '预设', icon: '🎛️' },
-      { id: 'settings', label: '设置', icon: '⚙️' },
+    // 侧边栏分组：页签一个都不删，只重排 + 加组标题（组标题不可点）。
+    // 顺序：总览（独立）→ 注意力 → 正文 → 验收 → 工具。
+    const NAV_GROUPS = [
+      {
+        id: 'home',
+        label: '',
+        tabs: [{ id: 'overview', label: '总览', icon: '📊' }],
+      },
+      {
+        id: 'attention',
+        label: '注意力',
+        tabs: [
+          { id: 'attention', label: '注意力', icon: '⚡' },
+          { id: 'foreshadow', label: '伏笔', icon: '🧩' },
+          { id: 'conflicts', label: '冲突', icon: '⚔️' },
+          { id: 'highlights', label: '高光', icon: '✨' },
+        ],
+      },
+      {
+        id: 'body',
+        label: '正文',
+        tabs: [
+          { id: 'chapters', label: '章节', icon: '📄' },
+          { id: 'map', label: '地图', icon: '🗺️' },
+          { id: 'world', label: '世界', icon: '🌍' },
+          { id: 'characters', label: '人物', icon: '👤' },
+          { id: 'timeline', label: '时间线', icon: '🕰️' },
+          { id: 'facts', label: '事实账本', icon: '⚖️' },
+        ],
+      },
+      {
+        id: 'acceptance',
+        label: '验收',
+        tabs: [
+          { id: 'reviews', label: '审稿', icon: '📝' },
+          { id: 'proposals', label: '提案', icon: '📥' },
+          { id: 'alignment', label: '对齐', icon: '🎯' },
+        ],
+      },
+      {
+        id: 'tools',
+        label: '工具',
+        tabs: [
+          { id: 'dashboard', label: '仪表盘', icon: '📈' },
+          { id: 'pipeline', label: '整本书', icon: '📚' },
+          { id: 'agents', label: '分工', icon: '🤖' },
+          { id: 'presets', label: '预设', icon: '🎛️' },
+          { id: 'settings', label: '设置', icon: '⚙️' },
+        ],
+      },
     ]
+
+    // 扁平页签表：保留原有 `TABS` 形状，供需要全量页签的地方使用。
+    const TABS = NAV_GROUPS.flatMap((group) => group.tabs)
+
+    /** 侧栏导航：按 NAV_GROUPS 渲染，组标题 `.sd-nav-group` 是分隔行（不可点）。 */
+    function Nav({ tab, onPick }) {
+      return h('nav', { className: 'sd-nav' }, NAV_GROUPS.map((group, groupIndex) => h(
+        React.Fragment,
+        { key: group.id || `group-${groupIndex}` },
+        group.label ? h('div', { className: 'sd-nav-group' }, group.label) : null,
+        group.tabs.map((t) => h('button', {
+          key: t.id,
+          type: 'button',
+          className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`,
+          onClick: () => onPick(t.id),
+        }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label))),
+      )))
+    }
 
     const STATUS_LABEL = { draft: '草稿', revised: '修订', final: '定稿' }
     const ROLE_LABEL = { protagonist: '主角', antagonist: '反派', supporting: '配角', minor: '龙套' }
@@ -351,6 +579,134 @@ window.__ModuleLoader__.load({
       if (Array.isArray(value)) return value.join('、')
       const maps = { status: { ...STATUS_LABEL, ...FOCUS_LABEL, ...CONFLICT_STATUS }, role: ROLE_LABEL, importance: EVENT_IMPORTANCE, type: { internal: '内心', interpersonal: '人际', society: '社会', environment: '环境', dialogue: '对白', description: '描写', twist: '反转', emotion: '情绪', action: '动作' } }
       return maps[key]?.[value] ?? String(value)
+    }
+
+    // ── 注意力：取数与统计（纯前端算，不改数据）─────────────────
+    function attentionRows(bundle) {
+      return (bundle?.attention ?? [])
+        .filter((row) => row && Number.isFinite(Number(row.chapter)))
+        .slice()
+        .sort((a, b) => Number(a.chapter) - Number(b.chapter))
+    }
+    function attentionHasScore(row) {
+      return !!row && row.score !== '' && row.score !== null && row.score !== undefined && Number.isFinite(Number(row.score))
+    }
+    function attentionHasDesign(row) {
+      return !!row && row.designScore !== '' && row.designScore !== null && row.designScore !== undefined && Number.isFinite(Number(row.designScore))
+    }
+    /** 设计字段是否已填：type/hook/tension/payoff/cliff 至少两项非空。 */
+    function attentionHasDesignContent(row) {
+      if (!row) return false
+      return ATTENTION_DESIGN_FIELDS.filter((key) => String(row[key] ?? '').trim() !== '').length >= 2
+    }
+    /**
+     * 设计 / 实测闭环状态（任务 6 规则）：
+     * - 设计 + 实测 → 已闭环（绿）
+     * - 只有设计 → 待冷读（蓝）
+     * - 只有实测 → 缺设计（黄）
+     * - 都没有 → 空白（灰）
+     */
+    function attentionStatusOf(row) {
+      const hasDesign = attentionHasDesignContent(row)
+      const hasScore = attentionHasScore(row)
+      if (hasDesign && hasScore) return { key: 'closed', label: '已闭环' }
+      if (hasDesign) return { key: 'waiting', label: '待冷读' }
+      if (hasScore) return { key: 'nodesign', label: '缺设计' }
+      return { key: 'blank', label: '空白' }
+    }
+    function attentionAverage(rows) {
+      const values = rows.filter(attentionHasScore).map((row) => Number(row.score))
+      if (values.length === 0) return null
+      return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
+    }
+    function attentionLowest(rows, count = 3) {
+      return rows
+        .filter(attentionHasScore)
+        .slice()
+        .sort((a, b) => Number(a.score) - Number(b.score) || Number(a.chapter) - Number(b.chapter))
+        .slice(0, count)
+    }
+    /** 有正文（content 非空）但还没有 attention 记录的章节，按章号升序。 */
+    function attentionUnmarkedChapters(bundle) {
+      const marked = new Set(attentionRows(bundle).map((row) => Number(row.chapter)))
+      return [...(bundle?.chapters ?? [])]
+        .filter((chapter) => String(chapter.content ?? '').trim().length > 0 && !marked.has(Number(chapter.id)))
+        .sort((a, b) => Number(a.id) - Number(b.id))
+    }
+    /**
+     * 疲劳 / 骤降预警（不花 token 的纯前端规则）：
+     * - 同一主类型连续 > 3 章（章号必须连续）
+     * - 相邻章总分下降 ≥ 15
+     */
+    function attentionWarnings(rows) {
+      const list = []
+      let runType = ''
+      let runLength = 0
+      let runStart = null
+      let prevChapter = null
+      for (const row of rows) {
+        const chapter = Number(row.chapter)
+        const type = row.type || ''
+        const sameRun = !!type && type === runType && prevChapter !== null && chapter === prevChapter + 1
+        if (sameRun) runLength += 1
+        else {
+          runType = type
+          runLength = type ? 1 : 0
+          runStart = chapter
+        }
+        prevChapter = chapter
+        if (runLength === 4) {
+          list.push({ kind: 'fatigue', text: `第 ${runStart}–${chapter} 章连续 ${runLength} 章都是「${ATTENTION_TYPE_LABEL[runType] ?? runType}」型，换一换主类型` })
+        }
+      }
+      for (let index = 1; index < rows.length; index += 1) {
+        const prev = rows[index - 1]
+        const curr = rows[index]
+        if (Number(curr.chapter) !== Number(prev.chapter) + 1) continue
+        if (!attentionHasScore(prev) || !attentionHasScore(curr)) continue
+        const drop = Number(prev.score) - Number(curr.score)
+        if (drop >= 15) list.push({ kind: 'drop', text: `第 ${prev.chapter} → ${curr.chapter} 章骤降 ${drop} 分（${prev.score} → ${curr.score}）` })
+      }
+      return list
+    }
+    function attentionStats(bundle) {
+      const rows = attentionRows(bundle)
+      return {
+        rows,
+        scored: rows.filter(attentionHasScore),
+        average: attentionAverage(rows),
+        lowest: attentionLowest(rows, 3),
+        unmarked: attentionUnmarkedChapters(bundle),
+        warnings: attentionWarnings(rows),
+      }
+    }
+    /** 按章号聚合子项：伏笔（埋 / 收）、冲突（本章引爆）、高光（本章）。 */
+    function attentionSubItems(bundle, chapter) {
+      const target = Number(chapter)
+      const isChapter = (value) => value !== undefined && value !== null && value !== '' && Number(value) === target
+      const foreshadow = bundle?.foreshadow ?? []
+      return {
+        plants: foreshadow.filter((row) => isChapter(row.setupChapter)),
+        payoffs: foreshadow.filter((row) => isChapter(row.payoffChapter)),
+        conflicts: (bundle?.conflicts ?? []).filter((row) => isChapter(row.resolveChapter)),
+        highlights: (bundle?.highlights ?? []).filter((row) => isChapter(row.chapter)),
+      }
+    }
+    /** 分数分档配色：0–39 读不下去 / 40–59 平淡 / 60–79 合格 / 80–100 强吸引。 */
+    function attentionScoreTone(score) {
+      if (score === null || score === undefined || !Number.isFinite(Number(score))) return ''
+      const value = Number(score)
+      if (value < 40) return ' sd-att-tone-low'
+      if (value < 60) return ' sd-att-tone-mid'
+      if (value < 80) return ' sd-att-tone-ok'
+      return ' sd-att-tone-top'
+    }
+    /** 分工页「权重」单元格：weight=10 用品牌色小徽章标出。 */
+    function agentWeightCell(weight) {
+      const empty = weight === undefined || weight === null || weight === ''
+      const value = empty ? null : Number(weight)
+      if (value === 10) return h('span', { className: 'sd-weight sd-weight-hi', title: '最高权重角色（注意力设计师）· 第一优先级' }, '10')
+      return h('span', { className: 'sd-weight', title: '权重越高，派单与汇总越靠前' }, empty || !Number.isFinite(value) ? '—' : String(value))
     }
 
     // ── 编辑器 ────────────────────────────────────────────────
@@ -414,14 +770,112 @@ window.__ModuleLoader__.load({
       return h(TextInput, { value, placeholder: field.ph, onChange: (v) => set(field.k, v) })
     }
 
+    // ── 零上下文首读（第 10 个角色：独立审稿人）───────────────
+    function sortedChapterRows(bundle) {
+      return [...(bundle?.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
+    }
+
+    /**
+     * 独立审稿人高亮卡：不依赖 agents 记录是否存在，任何情况下都显示。
+     * compact = true 时是总览页的紧凑入口（单章固定最后一章，另给「全书」按钮）。
+     * 发送后由 sendToChat 负责关面板/开新会话；这里只拼 payload，不拼 prompt。
+     */
+    function FreshReadCard({ bundle, projectId, compact = false }) {
+      const chapters = sortedChapterRows(bundle)
+      const last = chapters.length > 0 ? chapters[chapters.length - 1] : null
+      const lastId = last ? String(last.id) : ''
+      const [picked, setPicked] = useState(lastId)
+      const [scope, setScope] = useState('chapter')
+      const [busy, setBusy] = useState(false)
+      useEffect(() => setPicked(lastId), [lastId])
+      const totalChars = chapters.reduce((n, c) => n + String(c.content ?? '').length, 0)
+      const isBook = scope === 'book'
+      const target = compact ? lastId : picked
+      const label = (chapter) => `第 ${Number(chapter.id)} 章 · ${chapter.title || '未命名'}`
+      const rangeText = chapters.length === 0
+        ? '这本书还没有章节'
+        : `全书 ${chapters.length} 章 · ${(totalChars / 10000).toFixed(1)} 万字`
+      const bookHint = totalChars > 100000 ? '，会拆成多批由子 Agent 分别读，耗时与费用更高' : ''
+      const send = async (nextScope) => {
+        const useBook = nextScope === 'book'
+        if (!useBook && !target) return
+        if (useBook && chapters.length === 0) return
+        setBusy(true)
+        try {
+          await sendToChat({
+            projectId,
+            task: 'fresh-read',
+            scope: useBook ? 'book' : 'chapter',
+            ...(useBook ? {} : { chapter: Number(target) }),
+            newSession: true,
+          })
+        } catch (error) {
+          window.alert(`带正文进新会话失败：${error.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+      const options = chapters.map((c) => ({ value: String(c.id), label: label(c) }))
+      if (compact) {
+        return h('div', { className: 'sd-fresh sd-fresh-compact sd-mt' },
+          h('span', { className: 'sd-fresh-badge' }, '零上下文'),
+          h('div', { className: 'sd-fresh-compact-text' },
+            h('strong', null, '零上下文首读'),
+            h('span', { className: 'sd-hint' }, last ? '不读账本/大纲/人物卡，只拿正文，模拟第一次读到它的读者。' : '这本书还没有章节，写完第 1 章就能发首读。')),
+          h(Btn, {
+            small: true,
+            disabled: !last || busy,
+            onClick: () => send('chapter'),
+            title: last ? `${label(last)}` : '还没有章节',
+          }, busy ? '发送中…' : '首读最后一章'),
+          h(Btn, {
+            kind: 'primary',
+            small: true,
+            disabled: chapters.length === 0 || busy,
+            onClick: () => send('book'),
+            title: rangeText,
+          }, busy ? '发送中…' : '首读全书'))
+      }
+      return h('div', { className: 'sd-fresh' },
+        h('div', { className: 'sd-fresh-head' },
+          h('span', { className: 'sd-fresh-badge' }, '零上下文'),
+          h('strong', { className: 'sd-fresh-title' }, '独立审稿人 · 零上下文首读'),
+          h('span', { className: 'sd-fresh-rank' }, '分工表第 10 位')),
+        h('p', { className: 'sd-fresh-desc' }, '不读账本 / 预设 / 大纲 / 人物卡，只拿正文，模拟第一次读到的读者，给综合意见；可分岔路 / 弃读点。单章看这一章抓不抓人，全书看整体能不能读下去。'),
+        h('div', { className: 'sd-fresh-actions' },
+          h(ViewToggle, {
+            value: scope,
+            onChange: setScope,
+            options: [{ value: 'chapter', label: '读一章' }, { value: 'book', label: '读全书' }],
+          }),
+          isBook
+            ? h('span', { className: 'sd-fresh-pick-label' }, rangeText + bookHint)
+            : h('label', { className: 'sd-fresh-pick' },
+                h('span', { className: 'sd-fresh-pick-label' }, '选一章'),
+                h('select', {
+                  className: 'sd-input sd-fresh-select',
+                  value: picked,
+                  disabled: chapters.length === 0,
+                  title: chapters.length === 0 ? '还没有章节' : '选择要首读的章节',
+                  onChange: (e) => setPicked(e.target.value),
+                }, options.map((o) => h('option', { key: o.value, value: o.value }, o.label)))),
+          h(Btn, { kind: 'primary', disabled: chapters.length === 0 || busy, onClick: () => send(scope) },
+            busy ? '发送中…' : isBook ? '带全书进新会话 ▸' : '带这章进新会话 ▸'),
+          chapters.length === 0 ? h('span', { className: 'sd-hint' }, '这本书还没有章节，先写完第 1 章再发首读。') : null),
+      )
+    }
+
     // ── 通用数据页 ─────────────────────────────────────────────
     function EntityTab({ kind, bundle, projectId, onChanged, onAddCart }) {
       const meta = KIND_META[kind]
       const [editing, setEditing] = useState(null)
       const [mode, setMode] = useState('list')
+      const [detailId, setDetailId] = useState(null)
       const items = bundle[kind] ?? []
       const isCharacters = kind === 'characters'
-      const grid = meta.columns.map((c) => c.w || '1fr').join(' ') + ' 96px'
+      const listItems = isCharacters ? sortCharactersByImportance(items, bundle) : items
+      const detail = isCharacters && detailId !== null ? items.find((item) => String(item.id) === String(detailId)) : null
+      const grid = meta.columns.map((c) => c.w || '1fr').join(' ') + (isCharacters ? ' 136px' : ' 96px')
 
       const remove = async (item) => {
         if (!window.confirm(`删除这条${meta.title}？\n${item.title || item.name || item.id}`)) return
@@ -443,39 +897,566 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'sd-pagehead-actions' },
-            isCharacters ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'graph', label: '关系图' }] }) : null,
+            isCharacters
+              ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'card', label: '卡片' }, { value: 'graph', label: '关系图' }] })
+              : kind === 'facts'
+                ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'subject', label: '按主体' }] })
+                : kind === 'conflicts'
+                  ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'party', label: '按参与方' }] })
+                  : kind === 'foreshadow'
+                    ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'arc', label: '按回收段' }] })
+                    : null,
             onAddCart && ['characters', 'foreshadow', 'highlights', 'facts', 'events', 'conflicts', 'outlines'].includes(kind)
               ? h(Btn, { onClick: () => onAddCart({ kind: 'task', id: `enrich-${kind}`, task: `enrich-${kind}`, title: `AI 丰富${meta.title}` }) }, `＋ 加入清单：AI 丰富${meta.title}`)
               : null,
             h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'),
           ),
         ),
-        isCharacters && mode === 'graph'
+        kind === 'agents'
+          ? h('p', { className: 'sd-principle-inline' },
+              h('strong', null, PRINCIPLE_SLOGAN),
+              h('span', null, PRINCIPLE_AGENTS_LINE))
+          : null,
+        kind === 'agents' ? h(FreshReadCard, { bundle, projectId }) : null,
+        kind === 'facts' && mode === 'subject'
+          ? h(FactsBySubject, { bundle, projectId, onChanged })
+          : kind === 'conflicts' && mode === 'party'
+          ? h(ConflictsByParty, { bundle, projectId, onChanged })
+          : kind === 'foreshadow' && mode === 'arc'
+          ? h(ForeshadowByArc, { bundle, projectId, onChanged })
+          : isCharacters && mode === 'card'
+          ? h(CharacterCards, { characters: items, bundle, onOpenDetail: (character) => setDetailId(character.id) })
+          : isCharacters && mode === 'graph'
           ? h(RelationshipGraph, { characters: items, onEdit: (item) => setEditing(item), onCreate: (name) => setEditing({ name }) })
-          : items.length === 0
+          : listItems.length === 0
           ? h(Empty, null, `还没有${meta.title}记录。点右上角「新增」开始。`)
           : h(
               'div',
               { className: 'sd-table' },
               h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } }, meta.columns.map((c) => h('div', { key: c.k }, c.t)), h('div', { className: 'sd-actions-col' }, '操作')),
-              items.map((item) =>
+              listItems.map((item) =>
                 h(
                   'div',
-                  { key: item.id, className: 'sd-row', style: { gridTemplateColumns: grid } },
+                  { key: item.id, className: `sd-row${kind === 'agents' && Number(item.weight) >= 10 ? ' sd-row-hi' : ''}`, style: { gridTemplateColumns: grid } },
                   meta.columns.map((c) => {
+                    if (c.render) return h('div', { key: c.k, className: 'sd-cell' }, c.render(item))
                     const text = c.format ? String(c.format(item[c.k], item)) : displayValue(c.k, item[c.k])
                     return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
                   }),
                   h(
                     'div',
                     { className: 'sd-row-actions' },
+                    isCharacters ? h(Btn, { small: true, onClick: () => setDetailId(item.id) }, '详情') : null,
                     h(Btn, { small: true, onClick: () => setEditing(item) }, '编辑'),
                     h(Btn, { small: true, kind: 'danger', onClick: () => remove(item) }, '删除'),
                   ),
                 ),
               ),
             ),
+        detail ? h(CharacterDetail, { character: detail, bundle, projectId, onClose: () => setDetailId(null), onSaved: onChanged }) : null,
         editing !== null ? h(EntityEditor, { kind, item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    // ── 事实账本：按主体合并（避免几十条事实散成一张平表）────────
+    /** 纯函数：把事实按主体分组；query 命中主体/属性/取值。 */
+    function groupFactsBySubject(facts, query = '') {
+      const keyword = String(query ?? '').trim().toLowerCase()
+      const groups = new Map()
+      for (const fact of facts ?? []) {
+        const subject = String(fact.subject ?? '').trim() || '未署名'
+        const attribute = String(fact.attribute ?? '').trim() || '未署名属性'
+        const haystack = `${subject} ${attribute} ${fact.value ?? ''} ${fact.note ?? ''}`.toLowerCase()
+        if (keyword && !haystack.includes(keyword)) continue
+        if (!groups.has(subject)) groups.set(subject, { subject, attributes: new Map(), count: 0, latestChapter: 0 })
+        const group = groups.get(subject)
+        if (!group.attributes.has(attribute)) group.attributes.set(attribute, [])
+        group.attributes.get(attribute).push(fact)
+        group.count += 1
+        group.latestChapter = Math.max(group.latestChapter, Number(fact.chapter) || Number(fact.validFrom) || 0)
+      }
+      return [...groups.values()].sort((a, b) => b.latestChapter - a.latestChapter || b.count - a.count || a.subject.localeCompare(b.subject, 'zh'))
+    }
+
+    function FactsBySubject({ bundle, projectId, onChanged }) {
+      const [query, setQuery] = useState('')
+      const [open, setOpen] = useState(() => new Set())
+      const [editing, setEditing] = useState(null)
+      const facts = bundle.facts ?? []
+      const groups = groupFactsBySubject(facts, query)
+      const conflictKeys = new Set((bundle.checks ?? [])
+        .filter((check) => String(check.id || '').startsWith('fact-conflict:'))
+        .map((check) => String(check.id).slice('fact-conflict:'.length)))
+      const subjectConflicts = (group) => [...group.attributes.keys()].some((attribute) => conflictKeys.has(`${group.subject}::${attribute}`))
+      const toggle = (subject) => setOpen((prev) => {
+        const next = new Set(prev)
+        if (next.has(subject)) next.delete(subject)
+        else next.add(subject)
+        return next
+      })
+      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.subject))
+      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.subject)))
+      const remove = async (fact) => {
+        if (!window.confirm(`删除这条事实？
+${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'facts', entityId: fact.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
+      const renderFactRow = (fact) => h('div', { key: fact.id, className: 'sd-facts-row' },
+        h('div', { className: 'sd-facts-value' }, String(fact.value ?? '—')),
+        h('div', { className: 'sd-facts-chapter' }, fact.chapter ? `第 ${fact.chapter} 章` : '—'),
+        h('div', { className: 'sd-facts-range' }, formatFactRange(fact.validFrom, fact.validTo)),
+        h('div', { className: 'sd-facts-note', title: fact.note ?? '' }, String(fact.note ?? '')),
+        h('div', { className: 'sd-facts-actions' },
+          h(Btn, { small: true, onClick: () => setEditing(fact) }, '编辑'),
+          h(Btn, { small: true, kind: 'danger', onClick: () => remove(fact) }, '删除')))
+      if (facts.length === 0) return h(Empty, null, '还没有事实记录。点右上角「新增」或「加入清单：AI 丰富事实账本」。')
+      return h('div', { className: 'sd-facts-wrap' },
+        h('div', { className: 'sd-facts-toolbar' },
+          h('input', { className: 'sd-input sd-facts-search', value: query, placeholder: '搜索主体 / 属性 / 取值…', onChange: (e) => setQuery(e.target.value) }),
+          h('span', { className: 'sd-hint' }, `${facts.length} 条事实 · ${groups.length} 个主体`),
+          h('div', { className: 'sd-facts-toolbar-actions' },
+            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+        groups.length === 0
+          ? h(Empty, null, '没有匹配的事实。')
+          : groups.map((group) => {
+              const isOpen = open.has(group.subject)
+              const hasConflict = subjectConflicts(group)
+              return h('div', { key: group.subject, className: `sd-facts-group${hasConflict ? ' sd-facts-group-conflict' : ''}` },
+                h('button', { type: 'button', className: 'sd-facts-head', onClick: () => toggle(group.subject) },
+                  h('span', { className: 'sd-facts-caret' }, isOpen ? '▾' : '▸'),
+                  h('span', { className: 'sd-facts-subject' }, group.subject),
+                  h(Tag, { tone: 'muted' }, `${group.count} 条`),
+                  group.attributes.size > 1 ? h(Tag, { tone: 'muted' }, `${group.attributes.size} 个属性`) : null,
+                  group.latestChapter > 0 ? h(Tag, { tone: 'brand' }, `最近第 ${group.latestChapter} 章`) : null,
+                  hasConflict ? h(Tag, { tone: 'error' }, '有冲突') : null,
+                  h('span', { className: 'sd-facts-head-hint' }, isOpen ? '收起' : '展开')),
+                isOpen ? h('div', { className: 'sd-facts-body' },
+                  [...group.attributes.entries()].map(([attribute, rows]) => h('div', { key: attribute, className: 'sd-facts-attr' },
+                    h('div', { className: 'sd-facts-attr-head' },
+                      h('span', { className: 'sd-facts-attr-name' }, attribute),
+                      conflictKeys.has(`${group.subject}::${attribute}`) ? h(Tag, { tone: 'error' }, '取值冲突') : null),
+                    h('div', { className: 'sd-facts-rows' }, rows.map(renderFactRow)),
+                    h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({ subject: group.subject, attribute }) }, '＋ 加一条'))),
+                  h('div', { className: 'sd-facts-group-actions' },
+                    h(Btn, { small: true, onClick: () => setEditing({ subject: group.subject }) }, `＋ 新增「${group.subject}」的事实`)))
+                  : null)
+            }),
+        editing !== null ? h(EntityEditor, { kind: 'facts', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    // ── 人物：重要性排序 / 角色配色 / 数据聚合 ─────────────────
+    const ROLE_IMPORTANCE = { protagonist: 4, antagonist: 3, supporting: 2, minor: 1 }
+    function characterRoleKey(role) {
+      return Object.prototype.hasOwnProperty.call(ROLE_IMPORTANCE, role) ? role : 'other'
+    }
+    /** 出场章节：章节元数据 characters 优先；无命中回退 events.participants。 */
+    function characterAppearanceChapters(character, bundle) {
+      const name = String(character?.name ?? '').trim()
+      const chapters = [...(bundle?.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
+      const chapterById = new Map(chapters.map((chapter) => [Number(chapter.id), chapter]))
+      const byMeta = name === '' ? [] : chapters.filter((chapter) => relationshipList(chapter.characters).includes(name))
+      const byEvents = name === '' ? [] : [...new Set((bundle?.events ?? [])
+        .filter((event) => relationshipList(event.participants).includes(name))
+        .map((event) => Number(event.chapter))
+        .filter((value) => Number.isFinite(value) && value > 0))].sort((a, b) => a - b)
+      const source = byMeta.length > 0 ? 'chapters' : byEvents.length > 0 ? 'events' : 'none'
+      const list = byMeta.length > 0
+        ? byMeta.map((chapter) => ({ chapter: Number(chapter.id), title: chapter.title || '' }))
+        : byEvents.map((chapter) => ({ chapter, title: chapterById.get(chapter)?.title || '' }))
+      return { list, source }
+    }
+    function characterRelatedFacts(character, bundle) {
+      const name = String(character?.name ?? '').trim()
+      if (name === '') return []
+      return (bundle?.facts ?? []).filter((fact) => String(fact.subject ?? '').trim() === name)
+    }
+    function characterRelatedConflicts(character, bundle) {
+      const name = String(character?.name ?? '').trim()
+      if (name === '') return []
+      return (bundle?.conflicts ?? []).filter((conflict) => relationshipList(conflict.parties).includes(name))
+    }
+    function characterRelatedHighlights(character, bundle, appearanceChapters) {
+      const name = String(character?.name ?? '').trim()
+      if (name === '') return []
+      const chapters = appearanceChapters ?? new Set(characterAppearanceChapters(character, bundle).list.map((item) => item.chapter))
+      return (bundle?.highlights ?? [])
+        .filter((highlight) => chapters.has(Number(highlight.chapter)) && String(highlight.quote ?? highlight.text ?? '').includes(name))
+        .slice(0, 5)
+    }
+    /** 注意力均分：该人物出场章里 bundle.attention 的 score 平均（整数，无则 null）。 */
+    function characterAttentionAverage(character, bundle) {
+      const chapters = new Set(characterAppearanceChapters(character, bundle).list.map((item) => item.chapter))
+      if (chapters.size === 0) return null
+      const scores = attentionRows(bundle)
+        .filter((row) => chapters.has(Number(row.chapter)) && attentionHasScore(row))
+        .map((row) => Number(row.score))
+      if (scores.length === 0) return null
+      return Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length)
+    }
+    /**
+     * 重要性排序：role 权重（主角 4 > 反派 3 > 配角 2 > 龙套 1 > 其他 0）
+     * → 出场章数降序 → 参与冲突数降序 → 名字 zh 排序。
+     */
+    function characterImportance(character, bundle) {
+      return {
+        role: ROLE_IMPORTANCE[character?.role] ?? 0,
+        appearances: characterAppearanceChapters(character, bundle).list.length,
+        conflicts: characterRelatedConflicts(character, bundle).length,
+      }
+    }
+    function sortCharactersByImportance(items, bundle) {
+      return [...(items ?? [])].sort((a, b) => {
+        const left = characterImportance(a, bundle)
+        const right = characterImportance(b, bundle)
+        return right.role - left.role
+          || right.appearances - left.appearances
+          || right.conflicts - left.conflicts
+          || String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN')
+      })
+    }
+
+    // ── 人物：详情卡 ──────────────────────────────────────────
+    const CHARACTER_BASIC_FIELDS = [
+      ['goal', '目标'],
+      ['motivation', '动机'],
+      ['flaw', '缺陷'],
+      ['personality', '性格'],
+      ['arc', '人物弧光'],
+      ['appearance', '外貌'],
+      ['age', '年龄'],
+      ['gender', '性别'],
+      ['note', '备注'],
+    ]
+    // 详情卡左栏只放这六张字段卡；年龄 / 性别 / 备注在头部 meta 行展示。
+    const CHARACTER_CORE_FIELDS = CHARACTER_BASIC_FIELDS.filter(([key]) => ['goal', 'motivation', 'flaw', 'personality', 'arc', 'appearance'].includes(key))
+
+    function CharacterDetail({ character, bundle, projectId, onClose, onSaved }) {
+      const [editing, setEditing] = useState(null)
+      const name = String(character.name ?? '').trim()
+      const roleKey = characterRoleKey(character.role)
+      const roleLabel = ROLE_LABEL[character.role] ?? character.role ?? '未定位'
+      const appearance = characterAppearanceChapters(character, bundle)
+      const appearances = appearance.list
+      const appearanceChapters = new Set(appearances.map((item) => item.chapter))
+      const relationships = relationshipList(character.relationships)
+      const tags = relationshipList(character.tags)
+      const facts = characterRelatedFacts(character, bundle)
+      const factGroups = new Map()
+      for (const fact of facts) {
+        const attribute = String(fact.attribute ?? '').trim() || '未署名属性'
+        if (!factGroups.has(attribute)) factGroups.set(attribute, [])
+        factGroups.get(attribute).push(fact)
+      }
+      const conflicts = characterRelatedConflicts(character, bundle)
+      const highlights = characterRelatedHighlights(character, bundle, appearanceChapters)
+      const attentionAverage = characterAttentionAverage(character, bundle)
+      const extraMeta = [['年龄', character.age], ['性别', character.gender], ['备注', character.note]]
+        .filter(([, value]) => String(value ?? '').trim() !== '')
+      const numbers = [
+        ['出场章节', String(appearances.length), '章'],
+        ['参与冲突', String(conflicts.length), '条'],
+        ['相关事实', String(facts.length), '条'],
+        ['相关高光', String(highlights.length), '条'],
+        ['注意力均分', attentionAverage === null ? '—' : String(attentionAverage), attentionAverage === null ? '' : '/100'],
+      ]
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide sd-char-detail' },
+          h('div', { className: `sd-char-detail-head sd-char-role-${roleKey}` },
+            h('div', { className: 'sd-char-avatar-lg' }, name.slice(0, 1) || '?'),
+            h('div', { className: 'sd-char-detail-ident' },
+              h('div', { className: 'sd-char-detail-name' }, name || '未命名人物'),
+              h('div', { className: 'sd-char-detail-badges' },
+                h('span', { className: 'sd-char-role-badge' }, roleLabel),
+                tags.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value))),
+              extraMeta.length > 0
+                ? h('div', { className: 'sd-char-detail-meta' }, extraMeta.map(([label, value]) => h('span', { key: label, className: 'sd-char-detail-meta-item' }, `${label}：${value}`)))
+                : null),
+            h('div', { className: 'sd-char-detail-actions' },
+              h(Btn, { small: true, onClick: () => setEditing(character) }, '编辑'),
+              h(IconBtn, { onClick: onClose, title: '关闭' }, '✕'))),
+          h('div', { className: 'sd-char-numbers' }, numbers.map(([label, value, unit]) => h('div', { key: label, className: 'sd-char-number' },
+            h('div', { className: 'sd-char-number-value' }, value, unit ? h('span', { className: 'sd-char-number-unit' }, unit) : null),
+            h('div', { className: 'sd-char-number-label' }, label)))),
+          h('div', { className: 'sd-modal-body sd-char-body' },
+            h('div', { className: 'sd-char-detail-cols' },
+              h('div', { className: 'sd-char-col' },
+                h('h3', { className: 'sd-char-section-title' }, '基础'),
+                CHARACTER_CORE_FIELDS.map(([key, label]) => h('div', { key, className: 'sd-char-field sd-char-basic-field' },
+                  h('div', { className: 'sd-char-field-label' }, label),
+                  h('div', { className: 'sd-char-field-value' }, String(character[key] ?? '').trim() || '—')))),
+              h('div', { className: 'sd-char-col' },
+                h('section', { className: 'sd-char-section' },
+                  h('h3', { className: 'sd-char-section-title' }, `关系（${relationships.length}）`),
+                  relationships.length === 0
+                    ? h('div', { className: 'sd-hint' }, '—')
+                    : h('div', { className: 'sd-char-tags' }, relationships.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))),
+                h('section', { className: 'sd-char-section' },
+                  h('h3', { className: 'sd-char-section-title' }, `出场章节（${appearances.length}）`),
+                  appearances.length === 0
+                    ? h('div', { className: 'sd-hint' }, '—')
+                    : h('div', { className: 'sd-char-chips' }, appearances.map((item) => h('span', { key: item.chapter, className: 'sd-char-chip', title: item.title || '' },
+                        `第 ${item.chapter} 章${item.title ? ` · ${item.title}` : ''}`))),
+                  appearance.source === 'events' ? h('div', { className: 'sd-hint' }, '章节元数据没有引用这个名字，以上章号来自事件参与人。') : null),
+                h('section', { className: 'sd-char-section' },
+                  h('h3', { className: 'sd-char-section-title' }, `相关事实（${facts.length}）`),
+                  facts.length === 0
+                    ? h('div', { className: 'sd-hint' }, '—')
+                    : [...factGroups.entries()].map(([attribute, rows]) => h('div', { key: attribute, className: 'sd-char-fact-group' },
+                        h('div', { className: 'sd-char-fact-head' }, attribute, h(Tag, { tone: 'muted' }, `${rows.length} 条`)),
+                        rows.map((fact) => h('div', { key: fact.id, className: 'sd-char-fact-row' },
+                          h('span', { className: 'sd-char-fact-value' }, String(fact.value ?? '—')),
+                          h('span', { className: 'sd-char-fact-meta' }, [
+                            fact.chapter ? `第 ${fact.chapter} 章` : '',
+                            formatFactRange(fact.validFrom, fact.validTo),
+                          ].filter(Boolean).join(' · '))))))),
+                h('section', { className: 'sd-char-section' },
+                  h('h3', { className: 'sd-char-section-title' }, `相关冲突（${conflicts.length}）`),
+                  conflicts.length === 0
+                    ? h('div', { className: 'sd-hint' }, '—')
+                    : conflicts.map((conflict) => h('div', { key: conflict.id, className: 'sd-char-row' },
+                        h('span', { className: 'sd-char-row-main' }, conflict.title || '未命名冲突'),
+                        h('span', { className: 'sd-char-row-meta' }, [
+                          CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '',
+                          displayValue('type', conflict.type),
+                          conflict.resolveChapter ? `第 ${conflict.resolveChapter} 章解决` : '',
+                        ].filter((value) => value && value !== '—').join(' · '))))),
+                h('section', { className: 'sd-char-section' },
+                  h('h3', { className: 'sd-char-section-title' }, `相关高光（${highlights.length}）`),
+                  highlights.length === 0
+                    ? h('div', { className: 'sd-hint' }, '—')
+                    : highlights.map((highlight) => h('div', { key: highlight.id, className: 'sd-char-row' },
+                        h('span', { className: 'sd-char-row-main' }, String(highlight.quote ?? highlight.text ?? '')),
+                        h('span', { className: 'sd-char-row-meta' }, [
+                          `第 ${highlight.chapter} 章`,
+                          displayValue('type', highlight.type),
+                        ].filter((value) => value && value !== '—').join(' · ')))))))),
+        ),
+        editing !== null ? h(EntityEditor, { kind: 'characters', item: editing, projectId, onClose: () => setEditing(null), onSaved }) : null,
+      )
+    }
+
+    /** 卡片视图：按重要性排序的游戏风人物卡网格。 */
+    function CharacterCards({ characters, bundle, onOpenDetail }) {
+      const sorted = sortCharactersByImportance(characters, bundle)
+      if (sorted.length === 0) return h(Empty, null, '还没有人物。点右上角「＋ 新增」开始。')
+      return h('div', { className: 'sd-charcards' }, sorted.map((character) => {
+        const name = String(character.name ?? '').trim()
+        const roleKey = characterRoleKey(character.role)
+        const relationships = relationshipList(character.relationships).slice(0, 3)
+        const tags = relationshipList(character.tags)
+        const appearances = characterAppearanceChapters(character, bundle).list.length
+        const conflicts = characterRelatedConflicts(character, bundle).length
+        const facts = characterRelatedFacts(character, bundle).length
+        const attention = characterAttentionAverage(character, bundle)
+        return h('button', {
+          key: character.id,
+          type: 'button',
+          className: `sd-char-card sd-char-role-${roleKey}`,
+          title: `打开 ${name || '未命名人物'} 的人物卡`,
+          onClick: () => onOpenDetail(character),
+        },
+          h('span', { className: 'sd-char-card-head' },
+            h('span', { className: 'sd-char-card-avatar' }, name.slice(0, 1) || '?'),
+            h('span', { className: 'sd-char-card-ident' },
+              h('span', { className: 'sd-char-card-name' }, name || '未命名人物'),
+              h('span', { className: 'sd-char-card-role' }, ROLE_LABEL[character.role] ?? character.role ?? '未定位')),
+            h('span', { className: `sd-char-card-att${attention === null ? ' sd-char-card-att-empty' : ''}` }, attention === null ? '⚡ —' : `⚡ ${attention}`)),
+          tags.length > 0
+            ? h('span', { className: 'sd-char-card-tags' }, tags.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))
+            : null,
+          h('span', { className: 'sd-char-card-stats' },
+            h('span', null, `出场 ${appearances} 章`),
+            h('span', null, `冲突 ${conflicts}`),
+            h('span', null, `事实 ${facts}`)),
+          relationships.length > 0
+            ? h('span', { className: 'sd-char-card-rel' },
+                h('span', { className: 'sd-char-card-rel-label' }, '关系'),
+                relationships.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))
+            : h('span', { className: 'sd-char-card-rel sd-hint' }, '暂无关系'))
+      }))
+    }
+
+    // ── 冲突：按参与方合并（平表之外的合并视图）──────────────────
+    /** 纯函数：按 parties 组合分组；parties 排序后 join('×')，空值归「未署名参与方」。 */
+    function groupConflictsByParty(conflicts, query = '') {
+      const keyword = String(query ?? '').trim().toLowerCase()
+      const groups = new Map()
+      for (const conflict of conflicts ?? []) {
+        const parties = relationshipList(conflict.parties).sort((a, b) => a.localeCompare(b, 'zh-CN'))
+        const key = parties.length > 0 ? parties.join('×') : '未署名参与方'
+        const haystack = [
+          conflict.title,
+          parties.join(' '),
+          displayValue('type', conflict.type),
+          conflict.stakes,
+          conflict.escalation,
+          conflict.note,
+        ].filter(Boolean).join(' ').toLowerCase()
+        if (keyword && !haystack.includes(keyword)) continue
+        if (!groups.has(key)) groups.set(key, { key, parties, items: [] })
+        groups.get(key).items.push(conflict)
+      }
+      return [...groups.values()].sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key, 'zh-CN'))
+    }
+
+    function ConflictsByParty({ bundle, projectId, onChanged }) {
+      const [query, setQuery] = useState('')
+      const [open, setOpen] = useState(() => new Set())
+      const [editing, setEditing] = useState(null)
+      const conflicts = bundle.conflicts ?? []
+      const groups = groupConflictsByParty(conflicts, query)
+      const activeOf = (items) => items.filter((item) => item.status === 'active').length
+      const resolvedOf = (items) => items.filter((item) => item.status === 'resolved').length
+      const toggle = (key) => setOpen((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.key))
+      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.key)))
+      const remove = async (conflict) => {
+        if (!window.confirm(`删除这条冲突？\n${conflict.title || conflict.id}`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'conflicts', entityId: conflict.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
+      const renderRow = (conflict) => h('div', { key: conflict.id, className: 'sd-conf-row' },
+        h('div', { className: 'sd-conf-row-head' },
+          h('strong', { className: 'sd-conf-title' }, conflict.title || '未命名冲突'),
+          h(Tag, { tone: 'muted' }, displayValue('type', conflict.type)),
+          h(Tag, { tone: conflict.status === 'active' ? 'brand' : 'muted' }, CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '—'),
+          conflict.resolveChapter ? h(Tag, { tone: 'muted' }, `第 ${conflict.resolveChapter} 章解决`) : null,
+          h('div', { className: 'sd-conf-actions' },
+            h(Btn, { small: true, onClick: () => setEditing(conflict) }, '编辑'),
+            h(Btn, { small: true, kind: 'danger', onClick: () => remove(conflict) }, '删除'))),
+        conflict.stakes ? h('div', { className: 'sd-conf-line' }, h('span', null, '赌注'), String(conflict.stakes)) : null,
+        conflict.escalation ? h('div', { className: 'sd-conf-line' }, h('span', null, '升级'), String(conflict.escalation)) : null,
+        conflict.note ? h('div', { className: 'sd-conf-line sd-conf-line-note' }, h('span', null, '备注'), String(conflict.note)) : null)
+      if (conflicts.length === 0) return h(Empty, null, '还没有冲突记录。点「＋ 新增」或去平表添加。')
+      return h('div', { className: 'sd-conf-wrap' },
+        h('div', { className: 'sd-conf-toolbar' },
+          h('input', { className: 'sd-input sd-conf-search', value: query, placeholder: '搜索标题 / 参与方 / 类型 / 赌注…', onChange: (e) => setQuery(e.target.value) }),
+          h('span', { className: 'sd-hint' }, `${conflicts.length} 条冲突 · ${groups.length} 组参与方`),
+          h('div', { className: 'sd-conf-toolbar-actions' },
+            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+        groups.length === 0
+          ? h(Empty, null, '没有匹配的冲突。')
+          : groups.map((group) => {
+              const isOpen = open.has(group.key)
+              return h('div', { key: group.key, className: 'sd-conf-group' },
+                h('button', { type: 'button', className: 'sd-conf-head', onClick: () => toggle(group.key) },
+                  h('span', { className: 'sd-conf-caret' }, isOpen ? '▾' : '▸'),
+                  h('span', { className: 'sd-conf-parties' }, group.key),
+                  h(Tag, { tone: 'muted' }, `${group.items.length} 条`),
+                  activeOf(group.items) > 0 ? h(Tag, { tone: 'brand' }, `进行中 ${activeOf(group.items)}`) : null,
+                  resolvedOf(group.items) > 0 ? h(Tag, { tone: 'muted' }, `已解决 ${resolvedOf(group.items)}`) : null,
+                  h('span', { className: 'sd-conf-head-hint' }, isOpen ? '收起' : '展开')),
+                isOpen ? h('div', { className: 'sd-conf-body' }, group.items.map(renderRow)) : null)
+            }),
+        editing !== null ? h(EntityEditor, { kind: 'conflicts', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    // ── 伏笔：按回收段合并（每 10 章一段）──────────────────────
+    const FORESHADOW_ARC_SIZE = 10
+    function foreshadowArcRange(payoffChapter) {
+      const chapter = Number(payoffChapter)
+      if (!Number.isFinite(chapter) || chapter <= 0) return null
+      const start = Math.floor((chapter - 1) / FORESHADOW_ARC_SIZE) * FORESHADOW_ARC_SIZE + 1
+      return { start, end: start + FORESHADOW_ARC_SIZE - 1 }
+    }
+    /** 纯函数：按回收章所在 10 章段分组；无效/0 归「未定回收」排最后。 */
+    function groupForeshadowByArc(items, query = '') {
+      const keyword = String(query ?? '').trim().toLowerCase()
+      const groups = new Map()
+      for (const item of items ?? []) {
+        const haystack = `${item.title ?? ''} ${item.plantedText ?? ''} ${item.note ?? ''}`.toLowerCase()
+        if (keyword && !haystack.includes(keyword)) continue
+        const range = foreshadowArcRange(item.payoffChapter)
+        const key = range ? `arc-${range.start}` : 'undecided'
+        if (!groups.has(key)) groups.set(key, { key, start: range ? range.start : null, end: range ? range.end : null, items: [] })
+        groups.get(key).items.push(item)
+      }
+      const list = [...groups.values()]
+      const decided = list.filter((group) => group.start !== null).sort((a, b) => a.start - b.start)
+      const undecided = list.filter((group) => group.start === null)
+      return [...decided, ...undecided]
+    }
+
+    function ForeshadowByArc({ bundle, projectId, onChanged }) {
+      const [query, setQuery] = useState('')
+      const [open, setOpen] = useState(() => new Set())
+      const [editing, setEditing] = useState(null)
+      const foreshadow = bundle.foreshadow ?? []
+      const groups = groupForeshadowByArc(foreshadow, query)
+      const paidOf = (items) => items.filter((item) => item.status === 'paid').length
+      const toggle = (key) => setOpen((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.key))
+      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.key)))
+      const remove = async (item) => {
+        if (!window.confirm(`删除这条伏笔？\n${item.title || item.id}`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'foreshadow', entityId: item.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
+      const renderRow = (item) => h('div', { key: item.id, className: 'sd-fore-row' },
+        h('div', { className: 'sd-fore-row-head' },
+          h('strong', { className: 'sd-fore-title' }, item.title || '未命名伏笔'),
+          h(Tag, { tone: item.status === 'paid' ? 'success' : item.status === 'dropped' ? 'muted' : 'brand' }, FOCUS_LABEL[item.status] ?? item.status ?? '未回收'),
+          h('span', { className: 'sd-fore-meta' }, [
+            item.setupChapter ? `第 ${item.setupChapter} 章` : '未定埋设',
+            '→',
+            item.payoffChapter ? `第 ${item.payoffChapter} 章` : '未定回收',
+          ].join(' ')),
+          h('div', { className: 'sd-fore-actions' },
+            h(Btn, { small: true, onClick: () => setEditing(item) }, '编辑'),
+            h(Btn, { small: true, kind: 'danger', onClick: () => remove(item) }, '删除'))),
+        String(item.plantedText ?? '').trim() ? h('div', { className: 'sd-fore-text', title: String(item.plantedText) }, String(item.plantedText)) : null,
+        String(item.note ?? '').trim() ? h('div', { className: 'sd-fore-note', title: String(item.note) }, String(item.note)) : null)
+      if (foreshadow.length === 0) return h(Empty, null, '还没有伏笔记录。点「＋ 新增」或去平表添加。')
+      return h('div', { className: 'sd-fore-wrap' },
+        h('div', { className: 'sd-fore-toolbar' },
+          h('input', { className: 'sd-input sd-fore-search', value: query, placeholder: '搜索伏笔 / 埋设原文 / 备注…', onChange: (e) => setQuery(e.target.value) }),
+          h('span', { className: 'sd-hint' }, `${foreshadow.length} 条伏笔 · ${groups.length} 个回收段`),
+          h('div', { className: 'sd-fore-toolbar-actions' },
+            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+        groups.length === 0
+          ? h(Empty, null, '没有匹配的伏笔。')
+          : groups.map((group) => {
+              const isOpen = open.has(group.key)
+              const paid = paidOf(group.items)
+              return h('div', { key: group.key, className: 'sd-fore-group' },
+                h('button', { type: 'button', className: 'sd-fore-head', onClick: () => toggle(group.key) },
+                  h('span', { className: 'sd-fore-caret' }, isOpen ? '▾' : '▸'),
+                  h('span', { className: 'sd-fore-arc' }, group.start === null ? '未定回收' : `第 ${group.start}–${group.end} 章回收`),
+                  h(Tag, { tone: 'muted' }, `${group.items.length} 条`),
+                  h(Tag, { tone: 'success' }, `已回收 ${paid}`),
+                  h(Tag, { tone: 'muted' }, `未回收 ${group.items.length - paid}`),
+                  h('span', { className: 'sd-fore-head-hint' }, isOpen ? '收起' : '展开')),
+                isOpen ? h('div', { className: 'sd-fore-body' }, group.items.map(renderRow)) : null)
+            }),
+        editing !== null ? h(EntityEditor, { kind: 'foreshadow', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
       )
     }
 
@@ -786,9 +1767,1233 @@ window.__ModuleLoader__.load({
     }
 
     // ── 时间线页 ──────────────────────────────────────────────
-    function TimelineTab({ bundle, projectId, onChanged }) {
+    // ── 章节地图（只读进度地图）────────────────────────────────
+    const MAP_STATUS_LABEL = { draft: '草稿', revised: '修订', final: '定稿', planned: '计划' }
+    const MAP_LEGEND_STATUS = [
+      ['draft', '草稿'],
+      ['revised', '修订'],
+      ['final', '定稿'],
+      ['planned', '计划章（虚线）'],
+    ]
+
+    function chapterMapIsWritten(chapter) {
+      const content = chapter?.content
+      if (content === undefined || content === null) return Number(chapter?.words) > 0
+      return String(content).trim().length > 0
+    }
+
+    function chapterMapStatusKey(entry) {
+      if (entry.planned) return 'planned'
+      return MAP_STATUS_LABEL[entry.status] ? entry.status : 'draft'
+    }
+
+    function formatMapWords(words) {
+      const value = Number(words) || 0
+      if (value >= 10000) return (value / 10000).toFixed(1) + ' 万'
+      if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
+      return String(value)
+    }
+
+    function chapterMapAttentionTone(attention) {
+      if (!attention) return 'none'
+      if (!attentionHasScore(attention)) return 'untested'
+      const score = Number(attention.score)
+      if (score < 60) return 'low'
+      if (score < 80) return 'mid'
+      return 'high'
+    }
+
+    /**
+     * 纯函数：把 chapters / outlines / attention / events / conflicts(收束章) /
+     * foreshadow(埋收章) / highlights 按章号聚合成地图节点（章号升序）。
+     * 节点集合只来自 chapters + outlines；找不到所属章的素材不生成节点（仍计入统计条覆盖数）。
+     */
+    function buildChapterMapEntries(bundle) {
+      const entryMap = new Map()
+      const ensure = (chapterNumber) => {
+        const number = Number(chapterNumber)
+        if (!Number.isFinite(number) || number <= 0) return null
+        if (!entryMap.has(number)) {
+          entryMap.set(number, {
+            chapter: number,
+            title: '',
+            status: 'draft',
+            words: 0,
+            summary: '',
+            outlineSummary: '',
+            location: '',
+            written: false,
+            hasChapter: false,
+            hasOutline: false,
+            outline: null,
+            planned: false,
+            attention: null,
+            events: [],
+            conflicts: [],
+            plants: [],
+            payoffs: [],
+            highlights: [],
+          })
+        }
+        return entryMap.get(number)
+      }
+      for (const chapter of bundle?.chapters ?? []) {
+        const entry = ensure(chapter?.id)
+        if (!entry) continue
+        entry.hasChapter = true
+        entry.written = chapterMapIsWritten(chapter)
+        entry.status = MAP_STATUS_LABEL[chapter.status] ? chapter.status : 'draft'
+        entry.title = String(chapter.title ?? '').trim() || entry.title
+        entry.words = Number(chapter.words) || 0
+        entry.summary = String(chapter.summary ?? '')
+        entry.location = String(chapter.location ?? '').trim()
+      }
+      for (const outline of bundle?.outlines ?? []) {
+        const entry = ensure(outline?.chapter)
+        if (!entry) continue
+        entry.hasOutline = true
+        entry.outline = outline
+        entry.title = entry.title || String(outline.title ?? '').trim()
+        entry.outlineSummary = String(outline.summary ?? '')
+      }
+      for (const entry of entryMap.values()) entry.planned = entry.hasOutline && !entry.written
+      const attach = (chapterNumber, key, value) => {
+        const entry = entryMap.get(Number(chapterNumber))
+        if (entry) entry[key].push(value)
+      }
+      for (const event of bundle?.events ?? []) attach(event.chapter, 'events', event)
+      for (const conflict of bundle?.conflicts ?? []) attach(conflict.resolveChapter, 'conflicts', conflict)
+      for (const item of bundle?.foreshadow ?? []) {
+        attach(item.setupChapter, 'plants', item)
+        attach(item.payoffChapter, 'payoffs', item)
+      }
+      for (const highlight of bundle?.highlights ?? []) attach(highlight.chapter, 'highlights', highlight)
+      for (const record of attentionRows(bundle)) {
+        const entry = entryMap.get(Number(record.chapter))
+        if (entry) entry.attention = record
+      }
+      // 章节没有 location 时回退到本章第一个带地点的事件
+      for (const entry of entryMap.values()) {
+        if (!entry.location) {
+          const eventWithLocation = entry.events.find((event) => String(event.location ?? '').trim() !== '')
+          entry.location = String(eventWithLocation?.location ?? '').trim()
+        }
+      }
+      return [...entryMap.values()].sort((a, b) => a.chapter - b.chapter)
+    }
+
+    function chapterMapStats(bundle, entries) {
+      const chapters = bundle?.chapters ?? []
+      const target = Number(bundle?.project?.targetChapters) || 0
+      const written = chapters.filter(chapterMapIsWritten).length
+      const planned = entries.filter((entry) => entry.planned).length
+      const words = chapters.reduce((sum, chapter) => sum + (Number(chapter.words) || 0), 0)
+      const attention = attentionAverage(attentionRows(bundle))
+      return {
+        written,
+        totalChapters: chapters.length,
+        planned,
+        target,
+        words,
+        attention,
+        attentionCount: attentionRows(bundle).filter(attentionHasScore).length,
+        events: (bundle?.events ?? []).length,
+        conflicts: (bundle?.conflicts ?? []).filter((conflict) => Number(conflict.resolveChapter) > 0).length,
+        foreshadow: (bundle?.foreshadow ?? []).filter((item) => Number(item.setupChapter) > 0 || Number(item.payoffChapter) > 0).length,
+        highlights: (bundle?.highlights ?? []).length,
+      }
+    }
+
+    /** 蛇形分页：按 rowSize 切行，奇数行交给 CSS 反向（direction:rtl）。 */
+    function chunkChapterMapRows(entries, rowSize) {
+      const size = Math.max(1, Number(rowSize) || 12)
+      const rows = []
+      for (let index = 0; index < entries.length; index += size) rows.push(entries.slice(index, index + size))
+      return rows
+    }
+
+    function useMapColumns() {
+      const readColumns = () => (typeof window !== 'undefined' && Number(window.innerWidth) > 0 && Number(window.innerWidth) <= 900 ? 6 : 12)
+      const [columns, setColumns] = useState(readColumns)
+      useEffect(() => {
+        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
+        const update = () => setColumns(readColumns())
+        window.addEventListener('resize', update)
+        return () => window.removeEventListener('resize', update)
+      }, [])
+      return columns
+    }
+
+    function ChapterMapDetail({ entry, onClose, onGoTab, locations, onFocusLocation }) {
+      const statusKey = chapterMapStatusKey(entry)
+      const record = entry.attention
+      const matchedLocation = findLocationByName(locations, entry.location)
+      const section = (title, content) => h('section', { className: 'sd-map-section' },
+        h('h3', { className: 'sd-map-section-title' }, title),
+        content)
+      const rowLine = (main, meta, key) => h('div', { key, className: 'sd-map-rowline' },
+        h('span', { className: 'sd-map-rowline-main' }, main),
+        meta ? h('span', { className: 'sd-map-rowline-meta' }, meta) : null)
+      const empty = () => h('div', { className: 'sd-map-empty' }, '—')
+      const verdict = record?.verdict ?? ''
+      const designScore = record && record.designScore !== '' && record.designScore !== null && record.designScore !== undefined ? String(record.designScore) : ''
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide sd-map-detail' },
+          h('div', { className: 'sd-modal-head sd-map-detail-head' },
+            h('strong', { className: 'sd-map-detail-title' }, `第 ${entry.chapter} 章${entry.title ? `《${entry.title}》` : ''}`),
+            h(Tag, { tone: statusKey === 'planned' ? 'muted' : 'brand' }, MAP_STATUS_LABEL[statusKey]),
+            entry.written ? h(Tag, { tone: 'muted' }, `${formatMapWords(entry.words)} 字`) : null,
+            h('div', { className: 'sd-map-detail-actions' },
+              matchedLocation && onFocusLocation ? h(Btn, { small: true, onClick: () => onFocusLocation(matchedLocation.name) }, '在世界地图中查看') : null,
+              onGoTab ? h(Btn, { small: true, kind: 'primary', onClick: () => onGoTab('chapters') }, '打开章节页') : null,
+              h(Btn, { small: true, onClick: onClose }, '关闭'))),
+          h('div', { className: 'sd-modal-body sd-map-detail-body' },
+            section('章节信息', h('div', { className: 'sd-map-detail-meta' }, [
+              `状态：${MAP_STATUS_LABEL[statusKey]}`,
+              `字数：${entry.written ? formatMapWords(entry.words) + ' 字' : '—'}`,
+              entry.hasOutline ? '有大纲' : '无大纲',
+              `地点：${entry.location || '—'}`,
+            ].join(' · '))),
+            section('章节摘要', entry.summary ? h('div', { className: 'sd-map-text' }, entry.summary) : empty()),
+            entry.hasOutline ? section('大纲摘要', entry.outlineSummary ? h('div', { className: 'sd-map-text' }, entry.outlineSummary) : empty()) : null,
+            section('注意力', record
+              ? h('div', { className: 'sd-map-att' },
+                  h('div', { className: 'sd-map-att-head' },
+                    h('span', { className: `sd-map-att-score${attentionHasScore(record) ? ' sd-map-att-score-' + chapterMapAttentionTone(record) : ''}` }, attentionHasScore(record) ? `${Number(record.score)} 分` : '未测'),
+                    h('span', { className: 'sd-map-att-meta' }, [
+                      ATTENTION_TYPE_LABEL[record.type] ?? '未分型',
+                      verdict ? `下一章：${verdict}` : '',
+                      designScore ? `目标 ${designScore}` : '',
+                    ].filter(Boolean).join(' · '))),
+                  rowLine('最弱一环', record.weakest ? ATTENTION_WEAKEST_LABEL[record.weakest] ?? record.weakest : '—'),
+                  rowLine('章末牵引', String(record.cliff ?? '').trim() || '—'),
+                  record.dropRisk ? rowLine('弃读点', record.dropRisk) : null)
+              : h('div', { className: 'sd-map-empty' }, '未标注意力（冷读后回填 score，或在编辑器里手动补一条）。')),
+            section(`本章事件（${entry.events.length}）`, entry.events.length === 0
+              ? empty()
+              : entry.events.map((event, index) => rowLine(event.title || event.id || '未命名事件', event.storyTime || '', event.id ?? `event-${index}`))),
+            section(`本章冲突（${entry.conflicts.length}）`, entry.conflicts.length === 0
+              ? empty()
+              : entry.conflicts.map((conflict, index) => rowLine(conflict.title || '未命名冲突', CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '', conflict.id ?? `conflict-${index}`))),
+            section(`本章伏笔（埋 ${entry.plants.length} / 收 ${entry.payoffs.length}）`, entry.plants.length + entry.payoffs.length === 0
+              ? empty()
+              : h('div', null,
+                  entry.plants.map((item, index) => rowLine(`埋：${item.title ?? '未命名'}`, Number(item.payoffChapter) > 0 ? `→ 第 ${item.payoffChapter} 章回收` : '→ 未定回收', `plant-${item.id ?? index}`)),
+                  entry.payoffs.map((item) => rowLine(`收：${item.title ?? '未命名'}`, Number(item.setupChapter) > 0 ? `第 ${item.setupChapter} 章 →` : '未定埋设 →')))),
+            section(`本章高光（${entry.highlights.length}）`, entry.highlights.length === 0
+              ? empty()
+              : entry.highlights.map((highlight, index) => rowLine(highlight.title || highlight.quote || highlight.text || '未命名高光', displayValue('type', highlight.type) === '—' ? '' : displayValue('type', highlight.type), highlight.id ?? `highlight-${index}`))),
+          ),
+        ),
+      )
+    }
+
+    function ChapterMapTab({ bundle, projectId, onGoTab, onFocusLocation }) {
+      const [detailChapter, setDetailChapter] = useState(null)
+      const [viewOpen, setViewOpen] = useState(false)
+      const entries = buildChapterMapEntries(bundle)
+      const stats = chapterMapStats(bundle, entries)
+      const columns = useMapColumns()
+      const rows = chunkChapterMapRows(entries, columns)
+      const detail = detailChapter === null ? null : entries.find((entry) => entry.chapter === Number(detailChapter)) ?? null
+      const nodeTitle = (entry) => {
+        const attention = entry.attention
+        const attentionText = attention ? (attentionHasScore(attention) ? `${Number(attention.score)} 分` : '未测') : '未标'
+        const parts = [
+          `第 ${entry.chapter} 章${entry.title ? `《${entry.title}》` : ''}`,
+          MAP_STATUS_LABEL[chapterMapStatusKey(entry)],
+          `注意力 ${attentionText}`,
+        ]
+        if (entry.events.length) parts.push(`事件 ${entry.events.length}`)
+        if (entry.conflicts.length) parts.push(`冲突收束 ${entry.conflicts.length}`)
+        if (entry.plants.length + entry.payoffs.length) parts.push(`伏笔 ${entry.plants.length + entry.payoffs.length}`)
+        if (entry.highlights.length) parts.push(`高光 ${entry.highlights.length}`)
+        if (entry.words) parts.push(`${formatMapWords(entry.words)} 字`)
+        return parts.join(' · ')
+      }
+      if (entries.length === 0) {
+        return h('div', { className: 'sd-page' },
+          h('div', { className: 'sd-pagehead' },
+            h('div', null, h('h2', { className: 'sd-h2' }, '🗺️ 地图'), h('p', { className: 'sd-desc' }, '章节地图：按章号排成蛇形进度地图，节点汇总状态、注意力分与事件 / 冲突 / 伏笔 / 高光。只读，AI 入口仍在清单。')),
+            h('div', { className: 'sd-pagehead-actions' },
+              h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'))),
+          h(Empty, null, '还没有章节。先在章节页写第 1 章，或让 AI 生成大纲。'),
+          viewOpen ? h(HtmlViewDialog, { title: '🗺️ 章节地图 · 只读视图', path: novelDeskViewPath('map', projectId), onClose: () => setViewOpen(false) }) : null)
+      }
+      const statusSwatch = (statusKey) => h('span', { className: `sd-map-swatch sd-map-swatch-${statusKey}` })
+      const attentionSwatch = (tone) => h('span', { className: `sd-map-swatch sd-map-swatch-att-${tone}` })
+      return h('div', { className: 'sd-page sd-map-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, '🗺️ 地图'),
+            h('p', { className: 'sd-desc' }, `章节地图：按章号排成蛇形进度地图（${entries.length} 个节点），节点汇总状态、注意力分与事件 / 冲突 / 伏笔 / 高光。只读；写作与 AI 入口仍在章节页与清单。`)),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'),
+            onGoTab ? h(Btn, { onClick: () => onGoTab('chapters') }, '去章节页写下一章') : null)),
+        h('div', { className: 'sd-map-stats' },
+          h('div', { className: 'sd-map-stat' },
+            h('div', { className: 'sd-map-stat-label' }, '已写章节'),
+            h('div', { className: 'sd-map-stat-big' }, String(stats.written)),
+            h('div', { className: 'sd-map-stat-hint' }, `章节记录 ${stats.totalChapters} 章`)),
+          h('div', { className: 'sd-map-stat' },
+            h('div', { className: 'sd-map-stat-label' }, '计划章节'),
+            h('div', { className: 'sd-map-stat-big' }, String(stats.planned)),
+            h('div', { className: 'sd-map-stat-hint' }, stats.target > 0 ? `目标 ${stats.target} 章` : '来自大纲')),
+          h('div', { className: 'sd-map-stat' },
+            h('div', { className: 'sd-map-stat-label' }, '总字数'),
+            h('div', { className: 'sd-map-stat-big' }, formatMapWords(stats.words)),
+            h('div', { className: 'sd-map-stat-hint' }, '正文累计')),
+          h('div', { className: 'sd-map-stat' },
+            h('div', { className: 'sd-map-stat-label' }, '平均注意力分'),
+            h('div', { className: `sd-map-stat-big${attentionScoreTone(stats.attention)}` }, stats.attention === null ? '—' : String(stats.attention)),
+            h('div', { className: 'sd-map-stat-hint' }, `${stats.attentionCount} 章有实测分`)),
+          h('div', { className: 'sd-map-stat sd-map-stat-cover' },
+            h('div', { className: 'sd-map-stat-label' }, '素材覆盖'),
+            h('div', { className: 'sd-map-cover' },
+              h('span', null, `事件 ${stats.events}`),
+              h('span', null, `冲突收束 ${stats.conflicts}`),
+              h('span', null, `伏笔埋收 ${stats.foreshadow}`),
+              h('span', null, `高光 ${stats.highlights}`)))),
+        h('div', { className: 'sd-map-legend' },
+          h('span', { className: 'sd-map-legend-title' }, '状态'),
+          MAP_LEGEND_STATUS.map(([key, label]) => h('span', { key, className: 'sd-map-legend-item' }, statusSwatch(key), label)),
+          h('span', { className: 'sd-map-legend-sep' }, '·'),
+          h('span', { className: 'sd-map-legend-title' }, '注意力'),
+          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('low'), '<60 红'),
+          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('mid'), '60–79 黄'),
+          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('high'), '≥80 绿'),
+          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('untested'), '未测'),
+          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('none'), '未标')),
+        h('div', { className: 'sd-map-board' }, rows.map((row, rowIndex) => h('div', { key: `row-${rowIndex}`, className: `sd-map-row${rowIndex % 2 === 1 ? ' sd-map-row-rev' : ''}` },
+          row.map((entry) => {
+            const statusKey = chapterMapStatusKey(entry)
+            const attention = entry.attention
+            const tone = chapterMapAttentionTone(attention)
+            const attentionLabel = attention
+              ? (attentionHasScore(attention) ? String(Number(attention.score)) : '未测')
+              : '未标'
+            const badges = [
+              entry.events.length ? { key: 'event', label: '事', count: entry.events.length, title: `事件 ${entry.events.length} 条：${entry.events.map((item) => item.title ?? '未命名').join('、')}` } : null,
+              entry.conflicts.length ? { key: 'conflict', label: '冲', count: entry.conflicts.length, title: `冲突收束 ${entry.conflicts.length} 条：${entry.conflicts.map((item) => item.title ?? '未命名').join('、')}` } : null,
+              entry.plants.length + entry.payoffs.length ? { key: 'foreshadow', label: '伏', count: entry.plants.length + entry.payoffs.length, title: `伏笔 埋 ${entry.plants.length} / 收 ${entry.payoffs.length}` } : null,
+              entry.highlights.length ? { key: 'highlight', label: '高', count: entry.highlights.length, title: `高光 ${entry.highlights.length} 条` } : null,
+            ].filter(Boolean)
+            return h('button', {
+              key: entry.chapter,
+              type: 'button',
+              className: `sd-mapnode sd-mapnode-status-${statusKey}`,
+              title: nodeTitle(entry),
+              onClick: () => setDetailChapter(entry.chapter),
+            },
+              h('span', { className: 'sd-mapnode-top' },
+                h('span', { className: 'sd-mapnode-chapter' }, String(entry.chapter)),
+                h('span', { className: `sd-mapnode-att sd-mapnode-att-${tone}` }, attentionLabel)),
+              h('span', { className: 'sd-mapnode-title', title: entry.title || '' }, entry.title || '未命名'),
+              h('span', { className: 'sd-mapnode-meta' },
+                h('span', { className: 'sd-mapnode-status' }, MAP_STATUS_LABEL[statusKey]),
+                h('span', { className: 'sd-mapnode-words' }, entry.words ? `${formatMapWords(entry.words)} 字` : '—')),
+              badges.length > 0
+                ? h('span', { className: 'sd-mapnode-badges' }, badges.map((badge) => h('span', { key: badge.key, className: `sd-mapnode-badge sd-mapnode-badge-${badge.key}`, title: badge.title }, `${badge.label}${badge.count}`)))
+                : null)
+          })))),
+        detail ? h(ChapterMapDetail, { entry: detail, onClose: () => setDetailChapter(null), onGoTab, locations: bundle.locations ?? [], onFocusLocation }) : null,
+        viewOpen ? h(HtmlViewDialog, { title: '🗺️ 章节地图 · 只读视图', path: novelDeskViewPath('map', projectId), onClose: () => setViewOpen(false) }) : null,
+      )
+    }
+
+    // ── 世界 / 地点：辅助函数 + 世界页 + 地点编辑器 + 只读视图 ─────
+    function novelDeskViewPath(view, projectId) {
+      return `/novel-desk/view/${view}?projectId=${encodeURIComponent(String(projectId ?? ''))}`
+    }
+
+    function worldMapSize(world) {
+      const w = Number(world?.mapSize?.w)
+      const h = Number(world?.mapSize?.h)
+      return {
+        w: Number.isFinite(w) && w > 0 ? w : 1000,
+        h: Number.isFinite(h) && h > 0 ? h : 1000,
+      }
+    }
+
+    function clampWorldCoord(value, max) {
+      const n = Number(value)
+      if (!Number.isFinite(n)) return 0
+      const limit = Number.isFinite(Number(max)) && Number(max) > 0 ? Number(max) : 1000
+      return Math.min(limit, Math.max(0, n))
+    }
+
+    function locationCoords(location, world) {
+      const size = worldMapSize(world)
+      return {
+        x: clampWorldCoord(location?.coords?.x, size.w),
+        y: clampWorldCoord(location?.coords?.y, size.h),
+      }
+    }
+
+    /** 地点名 / 别名匹配（章节、事件里的 location 文本 → locations 实体）。 */
+    function findLocationByName(locations, name) {
+      const target = String(name ?? '').trim()
+      if (target === '') return null
+      return (locations ?? []).find((location) => {
+        if (String(location?.name ?? '').trim() === target) return true
+        return relationshipList(location?.aliases).includes(target)
+      }) ?? null
+    }
+
+    /** 连接双向只画一次：按 id 排序去重，避免 A→B / B→A 两条线重叠。 */
+    function buildWorldEdges(locations) {
+      const byId = new Map((locations ?? []).map((location) => [String(location.id), location]))
+      const seen = new Set()
+      const edges = []
+      for (const location of locations ?? []) {
+        for (const connection of location.connections ?? []) {
+          const fromId = String(location.id)
+          const toId = String(connection?.to ?? '')
+          if (!byId.has(toId) || fromId === toId) continue
+          const key = [fromId, toId].sort().join('|')
+          if (seen.has(key)) continue
+          seen.add(key)
+          edges.push({ id: key, from: location, to: byId.get(toId), connection })
+        }
+      }
+      return edges
+    }
+
+    function normalizeWorldForm(world) {
+      const size = worldMapSize(world)
+      const travel = world?.travelModel ?? {}
+      return {
+        id: world?.id ?? 'world',
+        name: String(world?.name ?? ''),
+        scale: WORLD_SCALE_OPTIONS.some(([value]) => value === world?.scale) ? world.scale : 'region',
+        kind: WORLD_KIND_OPTIONS.some(([value]) => value === world?.kind) ? world.kind : 'mixed',
+        era: String(world?.era ?? ''),
+        mapSize: size,
+        travelModel: {
+          walkKmPerDay: Number(travel.walkKmPerDay) || 30,
+          horseKmPerDay: Number(travel.horseKmPerDay) || 80,
+          boatKmPerDay: Number(travel.boatKmPerDay) || 60,
+        },
+        locked: world?.locked === true,
+        note: String(world?.note ?? ''),
+      }
+    }
+
+    function worldBuildInstruction(kind, scale, era) {
+      const kindLabel = CREATE_WORLD_KINDS.find(([value]) => value === kind)?.[1] ?? '混合'
+      const scaleLabel = CREATE_WORLD_SCALES.find(([value]) => value === scale)?.[1] ?? '地区'
+      const eraText = String(era ?? '').trim() || '未指定'
+      return `背景：${kindLabel}；尺度：${scaleLabel}；时代：${eraText}`
+    }
+
+    function HtmlViewDialog({ title, path, onClose }) {
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide sd-htmlview' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, title || '只读视图'),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          h('div', { className: 'sd-htmlview-body' },
+            h('iframe', { className: 'sd-htmlview-frame', src: path, title: title || '只读视图' })),
+          h('div', { className: 'sd-modal-foot sd-htmlview-foot' },
+            h('span', { className: 'sd-hint' }, '同源只读 HTML，可直接用浏览器打印。'),
+            h(Btn, { onClick: onClose }, '关闭'))),
+      )
+    }
+
+    function LocationEditor({ location, locations, world, projectId, onClose, onSaved }) {
+      const size = worldMapSize(world)
+      const otherLocations = (locations ?? []).filter((item) => String(item.id) !== String(location?.id ?? ''))
+      const [form, setForm] = useState(() => ({
+        name: String(location?.name ?? ''),
+        aliases: relationshipList(location?.aliases),
+        type: LOCATION_TYPE_LABEL[location?.type] ? location.type : 'other',
+        coords: locationCoords(location, world),
+        region: String(location?.region ?? ''),
+        firstChapter: location?.firstChapter === 0 || location?.firstChapter ? String(location.firstChapter) : '',
+        note: String(location?.note ?? ''),
+        connections: (location?.connections ?? []).map((connection) => ({
+          to: String(connection?.to ?? ''),
+          distanceKm: connection?.distanceKm === undefined || connection?.distanceKm === null ? '' : String(connection.distanceKm),
+          days: connection?.days === undefined || connection?.days === null ? '' : String(connection.days),
+          mode: LOCATION_MODE_LABEL[connection?.mode] ? connection.mode : 'walk',
+          bearing: String(connection?.bearing ?? ''),
+        })),
+      }))
+      const [busy, setBusy] = useState(false)
+      const setFormField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
+      const setCoord = (key, value) => setForm((prev) => ({ ...prev, coords: { ...prev.coords, [key]: value } }))
+      const setConnection = (index, key, value) => setForm((prev) => ({
+        ...prev,
+        connections: prev.connections.map((connection, position) => (position === index ? { ...connection, [key]: value } : connection)),
+      }))
+      const addConnection = () => setForm((prev) => ({
+        ...prev,
+        connections: [...prev.connections, { to: otherLocations[0]?.id ? String(otherLocations[0].id) : '', distanceKm: '', days: '', mode: 'walk', bearing: '' }],
+      }))
+      const removeConnection = (index) => setForm((prev) => ({ ...prev, connections: prev.connections.filter((connection, position) => position !== index) }))
+      const aliasesText = relationshipList(form.aliases).join('、')
+      const save = async () => {
+        if (!String(form.name).trim()) {
+          window.alert('请填写地点名称')
+          return
+        }
+        setBusy(true)
+        try {
+          const item = {
+            ...(location ?? {}),
+            name: String(form.name).trim(),
+            aliases: relationshipList(form.aliases),
+            type: form.type,
+            coords: {
+              x: clampWorldCoord(form.coords.x, size.w),
+              y: clampWorldCoord(form.coords.y, size.h),
+            },
+            region: String(form.region ?? '').trim(),
+            firstChapter: String(form.firstChapter ?? '').trim() === '' ? null : Number(form.firstChapter) || 0,
+            note: String(form.note ?? ''),
+            connections: form.connections
+              .filter((connection) => connection.to)
+              .map((connection) => ({
+                to: connection.to,
+                distanceKm: Number(connection.distanceKm) || 0,
+                days: Number(connection.days) || 0,
+                mode: connection.mode,
+                bearing: String(connection.bearing ?? '').trim(),
+              })),
+          }
+          await api('entity.upsert', { projectId, kind: 'locations', item })
+          onSaved()
+          onClose()
+        } catch (error) {
+          window.alert(error.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide sd-loc-editor' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, location?.id ? `编辑地点 · ${location.name || ''}` : '新增地点'),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-body sd-loc-editor-body' },
+            h('div', { className: 'sd-loc-form-grid' },
+              h(Field, { label: '名称 *' }, h(TextInput, { value: form.name, onChange: (value) => setFormField('name', value), placeholder: '如：长安' })),
+              h(Field, { label: '别名', hint: '逗号 / 顿号分隔' }, h(TextInput, { value: aliasesText, onChange: (value) => setFormField('aliases', value.split(/[、,，]/).map((part) => part.trim()).filter(Boolean)), placeholder: '如 京兆府、西京' })),
+              h(Field, { label: '类型' }, h(Select, { value: form.type, onChange: (value) => setFormField('type', value), options: LOCATION_TYPES.map(([value, label]) => ({ value, label })) })),
+              h(Field, { label: '区域' }, h(TextInput, { value: form.region, onChange: (value) => setFormField('region', value), placeholder: '如 关内道 / 北境' })),
+              h(Field, { label: '首现章' }, h(TextInput, { value: form.firstChapter, type: 'number', onChange: (value) => setFormField('firstChapter', value) })),
+              h(Field, { label: '坐标 X', hint: `0–${size.w}` }, h(TextInput, { value: form.coords.x, type: 'number', onChange: (value) => setCoord('x', value) })),
+              h(Field, { label: '坐标 Y', hint: `0–${size.h}` }, h(TextInput, { value: form.coords.y, type: 'number', onChange: (value) => setCoord('y', value) })),
+              h(Field, { label: '备注' }, h(TextArea, { value: form.note, rows: 2, onChange: (value) => setFormField('note', value) }))),
+            h('div', { className: 'sd-loc-conn-head' },
+              h('h3', { className: 'sd-h3' }, `连接道路（${form.connections.length}）`),
+              h(Btn, { small: true, onClick: addConnection, disabled: otherLocations.length === 0 }, '＋ 添加连接')),
+            otherLocations.length === 0
+              ? h('div', { className: 'sd-hint' }, '至少再有一个地点才能建立连接。')
+              : form.connections.length === 0
+                ? h('div', { className: 'sd-hint' }, '还没有连接。添加后地图会画线并标注距离 / 天数。')
+                : h('div', { className: 'sd-loc-conn-list' }, form.connections.map((connection, index) => h('div', { key: index, className: 'sd-loc-conn-row' },
+                    h('select', { className: 'sd-input sd-loc-conn-select', value: connection.to, onChange: (e) => setConnection(index, 'to', e.target.value) },
+                      h('option', { value: '' }, '（选择地点）'),
+                      otherLocations.map((item) => h('option', { key: item.id, value: item.id }, item.name || item.id))),
+                    h('input', { className: 'sd-input', type: 'number', value: connection.distanceKm, placeholder: '距离 km', title: '距离 km', onChange: (e) => setConnection(index, 'distanceKm', e.target.value) }),
+                    h('input', { className: 'sd-input', type: 'number', value: connection.days, placeholder: '天数', title: '行程天数', onChange: (e) => setConnection(index, 'days', e.target.value) }),
+                    h('select', { className: 'sd-input sd-loc-conn-mode', value: connection.mode, onChange: (e) => setConnection(index, 'mode', e.target.value) },
+                      LOCATION_MODE_OPTIONS.map(([value, label]) => h('option', { key: value, value }, label))),
+                    h('input', { className: 'sd-input', value: connection.bearing, placeholder: '方位 east…', title: '方位（east / west / north / south…）', onChange: (e) => setConnection(index, 'bearing', e.target.value) }),
+                    h(IconBtn, { onClick: () => removeConnection(index), title: '删除这条连接' }, '✕')))),
+          ),
+          h('div', { className: 'sd-modal-foot' },
+            h(Btn, { onClick: onClose }, '取消'),
+            h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存地点'))),
+      )
+    }
+
+    function WorldTab({ bundle, projectId, onChanged, onAddCart, focusLocation }) {
+      const locations = [...(bundle.locations ?? [])].sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN'))
+      const worldSignature = JSON.stringify(bundle.world ?? null)
+      const [worldForm, setWorldForm] = useState(() => normalizeWorldForm(bundle.world))
+      const [busy, setBusy] = useState(false)
+      const [viewOpen, setViewOpen] = useState(false)
+      const [locEditing, setLocEditing] = useState(null)
+      const [focusId, setFocusId] = useState(null)
+      const [focusTip, setFocusTip] = useState('')
+      const [hoverId, setHoverId] = useState(null)
+      const [drag, setDrag] = useState(null)
+      const svgRef = useRef(null)
+      const mapRef = useRef(null)
+      const suppressClickRef = useRef(false)
+      useEffect(() => setWorldForm(normalizeWorldForm(bundle.world)), [worldSignature])
+      useEffect(() => {
+        if (!focusLocation) return
+        const name = typeof focusLocation === 'string' ? focusLocation : focusLocation.name
+        const target = findLocationByName(locations, name)
+        if (target) {
+          setFocusId(String(target.id))
+          setFocusTip('')
+          try {
+            mapRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+          } catch {
+            /* 区块不可滚动时忽略 */
+          }
+        } else {
+          setFocusTip(`世界地图里还没有「${String(name ?? '')}」：可以先添加地点或让 AI 反推地点。`)
+        }
+      }, [focusLocation, bundle.locations])
+      const size = worldMapSize(worldForm)
+      const edges = buildWorldEdges(locations)
+      const activeId = hoverId !== null ? String(hoverId) : focusId !== null ? String(focusId) : null
+      const neighborIds = new Set()
+      if (activeId !== null) {
+        for (const edge of edges) {
+          if (String(edge.from.id) === activeId) neighborIds.add(String(edge.to.id))
+          if (String(edge.to.id) === activeId) neighborIds.add(String(edge.from.id))
+        }
+      }
+      const coordsOf = (location) => {
+        if (drag && String(drag.id) === String(location.id)) return { x: drag.x, y: drag.y }
+        return locationCoords(location, worldForm)
+      }
+      const hasWorld = !!bundle.world && (String(bundle.world.name ?? '').trim() !== '' || locations.length > 0)
+      const focusLocationRow = focusId === null ? null : locations.find((location) => String(location.id) === String(focusId)) ?? null
+      const saveWorld = async () => {
+        setBusy(true)
+        try {
+          await api('world.save', { projectId, world: { ...worldForm, id: worldForm.id || 'world' } })
+          onChanged()
+        } catch (error) {
+          window.alert(`保存世界失败：${error.message}`)
+        } finally {
+          setBusy(false)
+        }
+      }
+      const setWorldField = (key, value) => setWorldForm((prev) => ({ ...prev, [key]: value }))
+      const setTravelField = (key, value) => setWorldForm((prev) => ({ ...prev, travelModel: { ...prev.travelModel, [key]: Number(value) || 0 } }))
+      const mapPointOf = (event) => {
+        const svg = svgRef.current
+        if (!svg) return null
+        // 优先用 SVG 坐标变换，正确处理 viewBox 等比缩放产生的留白；失败再退回矩形比例。
+        if (typeof svg.createSVGPoint === 'function' && typeof svg.getScreenCTM === 'function') {
+          try {
+            const matrix = svg.getScreenCTM()
+            if (matrix) {
+              const point = svg.createSVGPoint()
+              point.x = Number(event.clientX) || 0
+              point.y = Number(event.clientY) || 0
+              const local = point.matrixTransform(matrix.inverse())
+              return { x: clampWorldCoord(local.x, size.w), y: clampWorldCoord(local.y, size.h) }
+            }
+          } catch {
+            /* 退回矩形比例 */
+          }
+        }
+        if (typeof svg.getBoundingClientRect !== 'function') return null
+        const rect = svg.getBoundingClientRect()
+        if (!rect.width || !rect.height) return null
+        return {
+          x: clampWorldCoord(((Number(event.clientX) || 0) - rect.left) / rect.width * size.w, size.w),
+          y: clampWorldCoord(((Number(event.clientY) || 0) - rect.top) / rect.height * size.h, size.h),
+        }
+      }
+      const startDrag = (event, location) => {
+        if (event?.button !== undefined && event.button !== 0) return
+        const coords = locationCoords(location, worldForm)
+        setDrag({ id: String(location.id), startClientX: Number(event?.clientX) || 0, startClientY: Number(event?.clientY) || 0, x: coords.x, y: coords.y, moved: false })
+        event?.preventDefault?.()
+        event?.stopPropagation?.()
+      }
+      const moveDrag = (event) => {
+        if (!drag) return
+        const point = mapPointOf(event)
+        if (!point) return
+        const moved = drag.moved || Math.abs((Number(event.clientX) || 0) - drag.startClientX) > 3 || Math.abs((Number(event.clientY) || 0) - drag.startClientY) > 3
+        setDrag({ ...drag, x: point.x, y: point.y, moved })
+      }
+      const endDrag = async () => {
+        if (!drag) return
+        const current = drag
+        setDrag(null)
+        if (!current.moved) return
+        suppressClickRef.current = true
+        const location = locations.find((item) => String(item.id) === current.id)
+        if (!location) return
+        try {
+          await api('entity.upsert', {
+            projectId,
+            kind: 'locations',
+            item: { ...location, coords: { x: clampWorldCoord(current.x, size.w), y: clampWorldCoord(current.y, size.h) } },
+          })
+          onChanged()
+        } catch (error) {
+          window.alert(`保存坐标失败：${error.message}`)
+        }
+      }
+      const locateLocation = (location) => {
+        setFocusId(String(location.id))
+        setFocusTip('')
+        try {
+          mapRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+        } catch {
+          /* ignore */
+        }
+      }
+      const removeLocation = async (location) => {
+        if (!window.confirm(`删除地点「${location.name || location.id}」？`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'locations', entityId: location.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
+      const typeLabel = (value) => LOCATION_TYPE_LABEL[value] ?? value ?? '其他'
+      return h('div', { className: 'sd-page sd-world-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, '🌍 世界'),
+            h('p', { className: 'sd-desc' }, '世界设定与坐标地图：地点按类型着色、连接线标距离 / 天数，拖拽节点松手即保存；AI 只通过清单入口生成或反推地点。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: () => setLocEditing({}) }, '＋ 地点'),
+            onAddCart ? h(Btn, { onClick: () => onAddCart(WORLD_CART.build) }, '＋ 加入清单：AI 生成世界') : null,
+            onAddCart ? h(Btn, { onClick: () => onAddCart(WORLD_CART.infer) }, '＋ 加入清单：AI 反推地点') : null,
+            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'))),
+        !hasWorld
+          ? h('div', { className: 'sd-world-guide' },
+              h('div', null,
+                h('strong', null, '还没有世界设定'),
+                h('p', { className: 'sd-hint' }, '先填写下面的名称 / 尺度 / 类型 / 时代，或加入清单让 AI 生成 8–20 个核心地点与连接；生成后可以在地图上拖拽校准。')),
+              onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart(WORLD_CART.build) }, '＋ 加入清单：AI 生成世界地图') : null)
+          : null,
+        h('section', { className: 'sd-section sd-world-settings' },
+          h('div', { className: 'sd-world-settings-head' },
+            h('h3', { className: 'sd-h3' }, '世界设定'),
+            h('span', { className: 'sd-hint' }, hasWorld ? '修改后点保存；坐标 0–1000 归一化。' : '还没有生成，可先让 AI 生成或手动填写。')),
+          h('div', { className: 'sd-world-settings-grid' },
+            h(Field, { label: '世界名称' }, h(TextInput, { value: worldForm.name, onChange: (value) => setWorldField('name', value), placeholder: '如：大唐天宝' })),
+            h(Field, { label: '尺度' }, h(Select, { value: worldForm.scale, onChange: (value) => setWorldField('scale', value), options: WORLD_SCALE_OPTIONS.map(([value, label]) => ({ value, label })) })),
+            h(Field, { label: '背景类型' }, h(Select, { value: worldForm.kind, onChange: (value) => setWorldField('kind', value), options: WORLD_KIND_OPTIONS.map(([value, label]) => ({ value, label })) })),
+            h(Field, { label: '时代' }, h(TextInput, { value: worldForm.era, onChange: (value) => setWorldField('era', value), placeholder: '如：唐·天宝年间' })),
+            h(Field, { label: '步行 km/日' }, h(TextInput, { value: worldForm.travelModel.walkKmPerDay, type: 'number', onChange: (value) => setTravelField('walkKmPerDay', value) })),
+            h(Field, { label: '骑马 km/日' }, h(TextInput, { value: worldForm.travelModel.horseKmPerDay, type: 'number', onChange: (value) => setTravelField('horseKmPerDay', value) })),
+            h(Field, { label: '行船 km/日' }, h(TextInput, { value: worldForm.travelModel.boatKmPerDay, type: 'number', onChange: (value) => setTravelField('boatKmPerDay', value) }))),
+          h('div', { className: 'sd-world-settings-actions' },
+            h(Btn, { kind: 'primary', onClick: saveWorld, disabled: busy }, busy ? '保存中…' : '保存世界'),
+            h('span', { className: 'sd-hint' }, '行程以 connections 的 distanceKm / days 为准；地图坐标只用于相对方位。'))),
+        h('section', { className: 'sd-world-map', ref: mapRef },
+          h('div', { className: 'sd-world-map-head' },
+            h('h3', { className: 'sd-h3' }, '🗺️ 世界地图'),
+            h('span', { className: 'sd-hint' }, `${locations.length} 个地点 · ${edges.length} 条连接 · 拖拽节点松手保存坐标`)),
+          focusTip ? h('div', { className: 'sd-world-focus-banner sd-world-focus-banner-warn' }, focusTip) : null,
+          focusLocationRow ? h('div', { className: 'sd-world-focus-banner' },
+            h('span', null, `正在查看：${focusLocationRow.name}`),
+            h(Btn, { small: true, onClick: () => { setFocusId(null); setFocusTip('') } }, '取消高亮')) : null,
+          h('div', { className: 'sd-world-map-scroll' }, locations.length === 0
+            ? h('div', { className: 'sd-world-map-empty' }, '还没有地点：点「＋ 地点」手动添加，或加入清单让 AI 生成世界地图。')
+            : h('svg', {
+                ref: svgRef,
+                className: 'sd-world-svg',
+                viewBox: `0 0 ${size.w} ${size.h}`,
+                role: 'img',
+                'aria-label': '世界坐标地图',
+                onMouseMove: moveDrag,
+                onMouseUp: endDrag,
+                onMouseLeave: endDrag,
+              },
+              h('rect', { className: 'sd-world-map-bg', x: 0, y: 0, width: size.w, height: size.h }),
+              edges.map((edge) => {
+                const from = coordsOf(edge.from)
+                const to = coordsOf(edge.to)
+                const hot = activeId !== null && (String(edge.from.id) === activeId || String(edge.to.id) === activeId)
+                const distance = Number(edge.connection.distanceKm) || 0
+                const days = Number(edge.connection.days) || 0
+                const label = [distance ? `${distance} km` : '', days ? `${days} 天` : ''].filter(Boolean).join(' / ')
+                return h('g', {
+                  key: edge.id,
+                  className: `sd-world-edge${hot ? ' sd-world-edge-hot' : ''}${activeId !== null && !hot ? ' sd-world-edge-dim' : ''}`,
+                },
+                  h('line', { className: 'sd-world-edge-line', x1: from.x, y1: from.y, x2: to.x, y2: to.y }),
+                  label ? h('text', { className: 'sd-world-edge-label', x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 5, textAnchor: 'middle' }, label) : null,
+                  h('title', null, `${edge.from.name} ↔ ${edge.to.name}${label ? '：' + label : ''}`))
+              }),
+              locations.map((location) => {
+                const coords = coordsOf(location)
+                const id = String(location.id)
+                const hot = activeId === id
+                const adjacent = neighborIds.has(id)
+                const className = [
+                  'sd-world-node',
+                  LOCATION_TYPE_CLASS[location.type] ?? 'sd-loc-type-other',
+                  hot ? 'sd-world-node-hot' : '',
+                  adjacent ? 'sd-world-node-adj' : '',
+                  String(focusId) === id ? 'sd-world-node-focus' : '',
+                  drag && String(drag.id) === id ? 'sd-world-node-drag' : '',
+                ].filter(Boolean).join(' ')
+                return h('g', {
+                  key: id,
+                  className,
+                  onMouseDown: (event) => startDrag(event, location),
+                  onMouseEnter: () => setHoverId(id),
+                  onMouseLeave: () => setHoverId(null),
+                  onClick: () => {
+                    if (suppressClickRef.current) {
+                      suppressClickRef.current = false
+                      return
+                    }
+                    setLocEditing(location)
+                  },
+                },
+                  h('circle', { className: 'sd-world-node-circle', cx: coords.x, cy: coords.y, r: 11 }),
+                  h('text', { className: 'sd-world-node-label', x: coords.x, y: coords.y + 25, textAnchor: 'middle' }, location.name || '未命名'),
+                  h('title', null, `${location.name || '未命名'}（${typeLabel(location.type)}）${location.region ? ' · ' + location.region : ''} · 连接 ${(location.connections ?? []).length} 条${location.firstChapter ? ' · 首现第 ' + location.firstChapter + ' 章' : ''}`))
+              }))),
+          h('div', { className: 'sd-world-legend' }, LOCATION_TYPES.map(([value, label]) => h('span', { key: value, className: 'sd-world-legend-item' },
+            h('span', { className: `sd-world-legend-swatch ${LOCATION_TYPE_CLASS[value]}` }), label)))),
+        h('section', { className: 'sd-section sd-world-locations' },
+          h('div', { className: 'sd-world-locations-head' },
+            h('h3', { className: 'sd-h3' }, `地点（${locations.length}）`),
+            h('span', { className: 'sd-hint' }, '点名称在地图上定位；编辑里可改坐标与连接道路。')),
+          locations.length === 0
+            ? h(Empty, null, '还没有地点。点右上角「＋ 地点」开始。')
+            : h('div', { className: 'sd-loc-table' },
+                h('div', { className: 'sd-loc-row sd-loc-row-head' },
+                  h('div', null, '名称'),
+                  h('div', null, '类型'),
+                  h('div', null, '坐标'),
+                  h('div', null, '连接'),
+                  h('div', null, '首现章'),
+                  h('div', { className: 'sd-loc-actions' }, '操作')),
+                locations.map((location) => h('div', {
+                  key: location.id,
+                  className: `sd-loc-row${String(focusId) === String(location.id) ? ' sd-loc-row-focus' : ''}`,
+                },
+                  h('button', { type: 'button', className: 'sd-loc-name', onClick: () => locateLocation(location) }, location.name || '未命名'),
+                  h('span', { className: 'sd-loc-type' }, h('span', { className: `sd-loc-dot ${LOCATION_TYPE_CLASS[location.type] ?? 'sd-loc-type-other'}` }), typeLabel(location.type)),
+                  h('span', { className: 'sd-loc-coords' }, `${locationCoords(location, worldForm).x}, ${locationCoords(location, worldForm).y}`),
+                  h('span', { className: 'sd-loc-connections' }, String((location.connections ?? []).length)),
+                  h('span', { className: 'sd-loc-first' }, location.firstChapter ? `第 ${location.firstChapter} 章` : '—'),
+                  h('div', { className: 'sd-loc-actions' },
+                    h(Btn, { small: true, onClick: () => setLocEditing(location) }, '编辑'),
+                    h(Btn, { small: true, kind: 'danger', onClick: () => removeLocation(location) }, '删除')))))),
+        locEditing !== null
+          ? h(LocationEditor, { location: locEditing?.id ? locEditing : {}, locations: bundle.locations ?? [], world: worldForm, projectId, onClose: () => setLocEditing(null), onSaved: onChanged })
+          : null,
+        viewOpen ? h(HtmlViewDialog, { title: '🌍 世界 · 只读视图', path: novelDeskViewPath('world', projectId), onClose: () => setViewOpen(false) }) : null,
+      )
+    }
+
+    // ── 整本书流水线：数据归一化 + 向导 + 页面 + 总览卡 ─────────
+    function normalizePipeline(input) {
+      const raw = input && typeof input === 'object' ? input : {}
+      const base = raw.base && typeof raw.base === 'object' ? raw.base : {}
+      const budget = raw.budget && typeof raw.budget === 'object' ? raw.budget : {}
+      const prepared = raw.prepared && typeof raw.prepared === 'object' ? raw.prepared : {}
+      const status = PIPELINE_STATUS_META[raw.status] ? raw.status : 'idle'
+      const stages = (Array.isArray(raw.stages) ? raw.stages : []).map((stage, index) => ({
+        id: String(stage?.id ?? `stage-${index + 1}`),
+        kind: String(stage?.kind ?? ''),
+        name: String(stage?.name ?? stage?.id ?? `阶段 ${index + 1}`),
+        status: PIPELINE_STAGE_STATUS_META[stage?.status] ? stage.status : 'pending',
+        chapterFrom: Number(stage?.chapterFrom) || 0,
+        chapterTo: Number(stage?.chapterTo) || 0,
+      }))
+      return {
+        status,
+        mode: raw.mode === 'chapters' ? 'chapters' : 'book',
+        count: Number(raw.count) || 0,
+        runId: String(raw.runId ?? ''),
+        sessionId: String(raw.sessionId ?? ''),
+        targetChapter: Number(raw.targetChapter) || 0,
+        base: {
+          premise: String(base.premise ?? ''),
+          genre: String(base.genre ?? ''),
+          style: String(base.style ?? ''),
+          era: String(base.era ?? ''),
+          locations: String(base.locations ?? ''),
+          characters: String(base.characters ?? ''),
+          volumes: Number(base.volumes) || 3,
+          chaptersPerVolume: Number(base.chaptersPerVolume) || 10,
+          wordsPerChapter: Number(base.wordsPerChapter) || 3000,
+        },
+        budget: {
+          maxTokens: Number(budget.maxTokens) || 0,
+          maxCostCNY: Number(budget.maxCostCNY) || 0,
+          usedTokens: Number(budget.usedTokens) || 0,
+          usedCostCNY: Number(budget.usedCostCNY) || 0,
+        },
+        stages,
+        currentStage: String(raw.currentStage ?? ''),
+        prepared: { blueprint: prepared.blueprint === true, outline: prepared.outline === true },
+        notes: (Array.isArray(raw.notes) ? raw.notes : []).map((note, index) => ({
+          key: index,
+          at: String(note?.at ?? ''),
+          text: String(note?.text ?? ''),
+        })),
+        updatedAt: String(raw.updatedAt ?? ''),
+      }
+    }
+
+    function pipelineStageInfo(pipeline) {
+      const stages = pipeline.stages ?? []
+      const done = stages.filter((stage) => stage.status === 'done').length
+      const total = stages.length
+      const current = stages.find((stage) => stage.id === pipeline.currentStage) || stages.find((stage) => stage.status === 'running') || null
+      return { done, total, current, percent: total > 0 ? Math.round((done / total) * 100) : pipeline.status === 'done' ? 100 : 0 }
+    }
+
+    function pipelineBudgetInfo(pipeline) {
+      const budget = pipeline.budget ?? {}
+      const tokenPercent = budget.maxTokens > 0 ? (budget.usedTokens / budget.maxTokens) * 100 : null
+      const costPercent = budget.maxCostCNY > 0 ? (budget.usedCostCNY / budget.maxCostCNY) * 100 : null
+      const percents = [tokenPercent, costPercent].filter((value) => value !== null)
+      return { tokenPercent, costPercent, percent: percents.length > 0 ? Math.max(...percents) : null }
+    }
+
+    function pipelinePrepared(pipeline) {
+      return pipeline.prepared?.blueprint === true && pipeline.prepared?.outline === true
+    }
+
+    function pipelineStatusMeta(pipeline) {
+      return PIPELINE_STATUS_META[pipeline.status] ?? PIPELINE_STATUS_META.idle
+    }
+
+    function formatPipelineTokens(value) {
+      const n = Number(value) || 0
+      if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M'
+      if (n >= 10000) return (n / 10000).toFixed(1) + ' 万'
+      return String(n)
+    }
+
+    function formatPipelineMoney(value) {
+      return '¥' + (Number(value) || 0).toFixed(2)
+    }
+
+    function pipelineWizardEstimate(form) {
+      const chapters = Math.max(0, (Number(form.volumes) || 0) * (Number(form.chaptersPerVolume) || 0))
+      const wordsPerChapter = Math.max(0, Number(form.wordsPerChapter) || 0)
+      return { chapters, words: chapters * wordsPerChapter, tokens: Math.round(chapters * wordsPerChapter * 3.6) }
+    }
+
+    function PipelineWizard({ bundle, projectId, prefill, onClose, onFinished }) {
+      const pipeline = normalizePipeline(bundle.pipeline)
+      const project = bundle.project ?? {}
+      const hasChapters = (bundle.chapters ?? []).length > 0
+      const prepared = pipelinePrepared(pipeline)
+      const currentMaxChapter = Math.max(0, ...(bundle.chapters ?? []).map((chapter) => Number(chapter.id) || 0))
+      const outlineMaxChapter = Math.max(0, ...(bundle.outlines ?? []).map((outline) => Number(outline.chapter) || 0))
+      const suggestedTarget = pipeline.targetChapter || Number(project.targetChapters) || outlineMaxChapter || (currentMaxChapter + 30)
+      const [form, setForm] = useState(() => ({
+        mode: pipeline.mode === 'chapters' ? 'chapters' : 'book',
+        count: pipeline.count || 10,
+        premise: prefill?.premise || prefill?.name || pipeline.base.premise || project.logline || project.name || '',
+        genre: prefill?.genre || pipeline.base.genre || project.genre || '',
+        style: pipeline.base.style,
+        era: pipeline.base.era,
+        locations: pipeline.base.locations,
+        characters: pipeline.base.characters,
+        volumes: pipeline.base.volumes || 3,
+        chaptersPerVolume: pipeline.base.chaptersPerVolume || 10,
+        wordsPerChapter: pipeline.base.wordsPerChapter || 3000,
+        maxTokens: pipeline.budget.maxTokens || 0,
+        maxCostCNY: pipeline.budget.maxCostCNY || 0,
+        targetChapter: suggestedTarget,
+      }))
+      const [busy, setBusy] = useState('')
+      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
+      const estimate = pipelineWizardEstimate(form)
+      const canStart = prepared || hasChapters
+      const basePayload = () => ({
+        premise: String(form.premise ?? '').trim(),
+        genre: String(form.genre ?? '').trim(),
+        style: String(form.style ?? '').trim(),
+        era: String(form.era ?? '').trim(),
+        locations: String(form.locations ?? '').trim(),
+        characters: String(form.characters ?? '').trim(),
+        volumes: Math.max(1, Number(form.volumes) || 3),
+        chaptersPerVolume: Math.max(1, Number(form.chaptersPerVolume) || 10),
+        wordsPerChapter: Math.max(100, Number(form.wordsPerChapter) || 3000),
+      })
+      const run = async (label, action) => {
+        if (busy) return
+        if (label === 'prepare' && !String(form.premise ?? '').trim()) {
+          window.alert('请先填写一句话设定')
+          return
+        }
+        setBusy(label)
+        try {
+          const value = await action()
+          onFinished?.(value)
+        } catch (error) {
+          window.alert(error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      const prepare = () => run('prepare', () => api('pipeline.prepare', {
+        projectId,
+        base: basePayload(),
+        budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
+      }))
+      const start = () => run('start', () => api('pipeline.startRun', {
+        projectId,
+        mode: form.mode,
+        count: form.mode === 'chapters' ? Math.max(1, Number(form.count) || 10) : 0,
+        targetChapter: form.mode === 'book' ? Math.max(0, Number(form.targetChapter) || 0) : 0,
+        base: basePayload(),
+        budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
+      }))
+      const statusMeta = pipelineStatusMeta(pipeline)
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide sd-pipe-wizard' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, '📚 生成整本书'),
+            h(Tag, { tone: statusMeta.tone }, statusMeta.label),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-body sd-pipe-wizard-body' },
+            h('section', { className: 'sd-pipe-wizard-section' },
+              h('h3', { className: 'sd-h3' }, '生成模式'),
+              h(ViewToggle, {
+                value: form.mode,
+                onChange: (value) => set('mode', value),
+                options: [{ value: 'book', label: '生成全文' }, { value: 'chapters', label: '按 N 章生成' }],
+              }),
+              form.mode === 'chapters'
+                ? h(Field, { label: '生成章数 N', hint: '本次只生成接下来 N 章，写完审一次、修一次后停。' },
+                    h(TextInput, { value: form.count, type: 'number', min: 1, onChange: (value) => set('count', value) }))
+                : h(Field, { label: '目标章数（写到第几章完结）', hint: `当前已写到第 ${currentMaxChapter} 章；留空或小于当前进度会启动失败。` },
+                    h(TextInput, { value: form.targetChapter, type: 'number', min: currentMaxChapter + 1, onChange: (value) => set('targetChapter', value) }))),
+            h('section', { className: 'sd-pipe-wizard-section' },
+              h('h3', { className: 'sd-h3' }, '基础设定'),
+              h('div', { className: 'sd-pipe-wizard-grid' },
+                h(Field, { label: '一句话设定 *' }, h(TextArea, { value: form.premise, rows: 2, placeholder: '如：唐末长安，一名失忆的仵作追查连环命案，牵出二十年前的宫变。', onChange: (value) => set('premise', value) })),
+                h(Field, { label: '类型' }, h(TextInput, { value: form.genre, placeholder: '武侠 / 科幻 / 悬疑 / 言情…', onChange: (value) => set('genre', value) })),
+                h(Field, { label: '风格' }, h(TextInput, { value: form.style, placeholder: '冷峻 / 幽默 / 典雅…', onChange: (value) => set('style', value) })),
+                h(Field, { label: '时代' }, h(TextInput, { value: form.era, placeholder: '如：唐·天宝年间 / 架空蒸汽时代', onChange: (value) => set('era', value) })),
+                h(Field, { label: '地点' }, h(TextInput, { value: form.locations, placeholder: '如：长安、潼关、洛阳', onChange: (value) => set('locations', value) })),
+                h(Field, { label: '关键人物' }, h(TextInput, { value: form.characters, placeholder: '如：沈砚、柳七、裴无咎', onChange: (value) => set('characters', value) }))),
+              hasChapters ? h('p', { className: 'sd-hint' }, '已有正文：可以跳过准备直接生成；现有蓝图 / 大纲将作为依据。') : null),
+            h('section', { className: 'sd-pipe-wizard-section' },
+              h('h3', { className: 'sd-h3' }, '规模'),
+              h('div', { className: 'sd-pipe-wizard-grid' },
+                h(Field, { label: '卷数' }, h(TextInput, { value: form.volumes, type: 'number', min: 1, onChange: (value) => set('volumes', value) })),
+                h(Field, { label: '每卷章数' }, h(TextInput, { value: form.chaptersPerVolume, type: 'number', min: 1, onChange: (value) => set('chaptersPerVolume', value) })),
+                h(Field, { label: '每章字数' }, h(TextInput, { value: form.wordsPerChapter, type: 'number', min: 100, onChange: (value) => set('wordsPerChapter', value) }))),
+              h('div', { className: 'sd-pipe-wizard-total' },
+                h('span', null, `共 ${estimate.chapters} 章`),
+                h('span', null, `预计 ${formatPipelineTokens(estimate.words)} 字`),
+                estimate.tokens > 0 ? h('span', { className: 'sd-hint' }, `粗估 ${formatPipelineTokens(estimate.tokens)} token`) : null)),
+            h('section', { className: 'sd-pipe-wizard-section' },
+              h('h3', { className: 'sd-h3' }, '预算（0 = 不限）'),
+              h('div', { className: 'sd-pipe-wizard-grid' },
+                h(Field, { label: 'token 上限' }, h(TextInput, { value: form.maxTokens, type: 'number', min: 0, onChange: (value) => set('maxTokens', value) })),
+                h(Field, { label: '费用上限（¥）' }, h(TextInput, { value: form.maxCostCNY, type: 'number', min: 0, onChange: (value) => set('maxCostCNY', value) }))),
+              h('p', { className: 'sd-pipe-wizard-warn' }, '⚠ 估算不准，仅作参考：实际用量会受上下文、审阅与修订影响，明显更高。')),
+            h('div', { className: 'sd-pipe-wizard-state' },
+              h('span', { className: 'sd-hint' }, `蓝图：${pipeline.prepared.blueprint ? '已验收' : '未验收'} · 大纲：${pipeline.prepared.outline ? '已验收' : '未验收'} · 当前状态：${statusMeta.label}`),
+              pipeline.status === 'preparing' ? h('span', { className: 'sd-hint' }, '准备阶段进行中：完成后在工作台验收，再回来点②。') : null)),
+          h('div', { className: 'sd-modal-foot sd-pipe-wizard-actions' },
+            h(Btn, { onClick: onClose }, '取消'),
+            h(Btn, {
+              onClick: prepare,
+              disabled: !!busy || pipeline.status === 'running',
+            }, busy === 'prepare' ? '准备中…' : '① 准备蓝图与大纲'),
+            h(Btn, {
+              kind: 'primary',
+              onClick: start,
+              disabled: !!busy || !canStart || pipeline.status === 'preparing' || pipeline.status === 'running',
+              title: canStart ? '' : '需要先完成准备并验收蓝图与大纲（或已有正文）',
+            }, busy === 'start' ? '启动中…' : form.mode === 'chapters' ? `② 生成接下来 ${Math.max(1, Number(form.count) || 10)} 章` : '② 生成全文')),
+        ),
+      )
+    }
+
+    function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard }) {
+      const [live, setLive] = useState(null)
+      const [busy, setBusy] = useState('')
+      const pipeline = normalizePipeline(live?.pipeline ?? bundle.pipeline)
+      const stageInfo = pipelineStageInfo(pipeline)
+      const budgetInfo = pipelineBudgetInfo(pipeline)
+      const statusMeta = pipelineStatusMeta(pipeline)
+      const prepared = pipelinePrepared(pipeline)
+      const hasChapters = (bundle.chapters ?? []).length > 0
+      const active = pipeline.status === 'preparing' || pipeline.status === 'running'
+      const load = useCallback(async () => {
+        try {
+          const value = await api('pipeline.get', { projectId })
+          setLive({ pipeline: value?.pipeline ?? value ?? null, usage: value?.usage ?? null })
+        } catch {
+          /* 后端可能尚未实现 pipeline.get：静默降级为 bundle.pipeline */
+        }
+      }, [projectId])
+      useEffect(() => { load() }, [load])
+      useEffect(() => {
+        if (!active) return undefined
+        const timer = setInterval(() => { load() }, PIPELINE_POLL_MS)
+        return () => clearInterval(timer)
+      }, [active, load])
+      const run = async (label, action) => {
+        if (busy) return
+        setBusy(label)
+        try {
+          await action()
+          await load()
+          onChanged?.()
+        } catch (error) {
+          window.alert(error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      const markPrepared = () => run('prepared', () => api('pipeline.markPrepared', { projectId }))
+      const startRun = (mode) => run('start', () => api('pipeline.startRun', { projectId, mode, count: mode === 'chapters' ? pipeline.count || 10 : 0 }))
+      const pause = () => run('pause', () => api('pipeline.pause', { projectId }))
+      const resume = () => run('resume', () => api('pipeline.resume', { projectId }))
+      const stop = () => {
+        if (!window.confirm('停止本次流程？会清除运行状态与阶段进度，正文与账本保留。')) return
+        run('stop', () => api('pipeline.reset', { projectId }))
+      }
+      const restart = () => {
+        if (!window.confirm('重新开始会新建一次 runId 并回到未开始状态；正文、账本与提案都保留。继续？')) return
+        run('restart', () => api('pipeline.reset', { projectId }))
+      }
+      const stuckResume = () => {
+        if (!window.confirm('流程卡住时手动恢复：由后端重新推动会话，继续本次生成。继续？')) return
+        resume()
+      }
+      const openSession = () => {
+        if (!pipeline.sessionId) {
+          window.alert('还没有生成会话：先完成准备并启动一次生成。')
+          return
+        }
+        try {
+          const workspace = clientCtx?.get?.('uiWorkspace')
+          const opened = workspace?.openSession?.(pipeline.sessionId)
+          if (!opened) throw new Error('无法打开会话')
+        } catch {
+          window.alert(`请到工作区会话列表打开该会话（ID：${pipeline.sessionId}）。`)
+        }
+      }
+      const actions = []
+      if (pipeline.status === 'preparing') {
+        actions.push(h(Btn, { key: 'prepared', kind: 'primary', disabled: !!busy, onClick: markPrepared }, busy === 'prepared' ? '标记中…' : '我验收完了：蓝图与大纲'))
+        actions.push(h(Btn, { key: 'pause', onClick: pause, disabled: !!busy }, '暂停'))
+      } else if (pipeline.status === 'running') {
+        actions.push(h(Btn, { key: 'pause', onClick: pause, disabled: !!busy }, busy === 'pause' ? '暂停中…' : '暂停'))
+        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
+      } else if (pipeline.status === 'paused') {
+        actions.push(h(Btn, { key: 'resume', kind: 'primary', onClick: resume, disabled: !!busy }, busy === 'resume' ? '恢复中…' : '恢复'))
+        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
+      } else if (pipeline.status === 'stuck') {
+        actions.push(h(Btn, { key: 'resume', kind: 'primary', onClick: stuckResume, disabled: !!busy }, '手动继续'))
+        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
+      } else if (pipeline.status === 'done') {
+        actions.push(h(Btn, { key: 'agents', kind: 'primary', onClick: () => onGoTab?.('agents') }, '交给独立审稿人'))
+        actions.push(h(Btn, { key: 'attention', onClick: () => onGoTab?.('attention') }, '打开注意力页冷读'))
+        actions.push(h(Btn, { key: 'restart', onClick: restart, disabled: !!busy }, '重新开始'))
+      } else {
+        actions.push(h(Btn, { key: 'wizard', kind: pipeline.status === 'idle' ? 'primary' : undefined, onClick: onOpenWizard }, '准备蓝图与大纲'))
+        if (prepared || hasChapters) {
+          actions.push(h(Btn, { key: 'book', kind: 'primary', onClick: () => startRun('book'), disabled: !!busy }, busy === 'start' ? '启动中…' : '生成全文'))
+          actions.push(h(Btn, { key: 'chapters', onClick: () => startRun('chapters'), disabled: !!busy }, `生成接下来 ${pipeline.count || 10} 章`))
+        }
+        if (pipeline.status === 'aborted') actions.push(h(Btn, { key: 'restart', onClick: restart, disabled: !!busy }, '重新开始'))
+      }
+      if (pipeline.sessionId) actions.push(h(Btn, { key: 'session', onClick: openSession }, '去对话查看'))
+      if (onOpenWizard) actions.push(h(Btn, { key: 'settings', small: true, onClick: onOpenWizard }, '生成设置'))
+      const refreshUsage = live?.usage ?? null
+      const budgetPercent = budgetInfo.percent
+      const budgetClass = budgetPercent === null ? '' : budgetPercent > 100 ? ' sd-pipe-budget-danger' : budgetPercent > 80 ? ' sd-pipe-budget-warn' : ''
+      return h('div', { className: 'sd-page sd-pipe-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, '📚 整本书'),
+            h('p', { className: 'sd-desc' }, '全自动长流程：准备 → 作者验收蓝图与大纲 → 生成（按卷写作 / 审阅 / 修订）→ 总审 → 交给独立审稿人。流程由后端新会话的 goal + subagent 自动推进，工作台不发「继续」消息。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: onOpenWizard }, '生成设置'),
+            h(Btn, { onClick: () => { load(); onChanged?.() } }, '刷新'))),
+        h('section', { className: 'sd-pipe-status-card' },
+          h('div', { className: 'sd-pipe-status-head' },
+            h('span', { className: `sd-pipe-status-chip sd-pipe-status-${pipeline.status}` }, statusMeta.label),
+            h('span', { className: 'sd-pipe-status-mode' }, pipeline.mode === 'chapters' ? `按 ${pipeline.count || 10} 章生成` : '生成全文'),
+            h('span', { className: 'sd-pipe-status-target' }, pipeline.targetChapter > 0 ? `目标第 ${pipeline.targetChapter} 章` : '目标章数未定'),
+            h('span', { className: 'sd-pipe-status-session' }, `会话：${pipeline.sessionId ? pipeline.sessionId.slice(0, 12) + '…' : '—'}`)),
+          h('div', { className: 'sd-pipe-status-meta' },
+            h('span', null, stageInfo.current ? `当前阶段：${stageInfo.current.name}（${Math.min(stageInfo.done + 1, stageInfo.total)}/${stageInfo.total}）` : '当前阶段：未开始'),
+            h('span', null, pipeline.runId ? `runId：${pipeline.runId}` : 'runId：—')),
+          h('div', { className: 'sd-pipe-actions' }, actions),
+          h('div', { className: 'sd-pipe-progress' },
+            h('div', { className: 'sd-pipe-progress-head' },
+              h('span', null, `阶段进度 ${stageInfo.done}/${stageInfo.total}`),
+              h('span', null, `${stageInfo.percent}%`)),
+            h('div', { className: 'sd-pipe-progress-bar' }, h('div', { className: 'sd-pipe-progress-fill', style: { width: `${stageInfo.percent}%` } })))),
+        pipeline.status === 'done'
+          ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-done' }, '🎉 全书完成：随时把整本书交给独立审稿人冷读，检查每章注意力分与最低章。')
+          : null,
+        pipeline.status === 'stuck' ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-warn' }, '⚠ 流程卡住：会话可能已停止推进。可先「去对话查看」，必要时点「手动继续」让后端恢复（默认不会自动发送）。') : null,
+        budgetPercent !== null && budgetPercent > 100 ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-danger' }, '⚠ 预算已超过上限：建议暂停并在生成设置里调高预算，或停止本次流程。') : null,
+        h('section', { className: 'sd-pipe-budget' },
+          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, '预算'), h('span', { className: 'sd-hint' }, '⚠ 估算不准，仅作参考；0 = 不限')),
+          h('div', { className: 'sd-pipe-budget-row' },
+            h('span', { className: 'sd-pipe-budget-label' }, 'token'),
+            h('span', { className: 'sd-pipe-budget-value' }, `${formatPipelineTokens(pipeline.budget.usedTokens)} / ${pipeline.budget.maxTokens > 0 ? formatPipelineTokens(pipeline.budget.maxTokens) : '不限'}`),
+            h('div', { className: 'sd-pipe-budget-bar' }, h('div', {
+              className: `sd-pipe-budget-fill${budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 100 ? ' sd-pipe-budget-danger' : budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 80 ? ' sd-pipe-budget-warn' : ''}`,
+              style: { width: `${Math.min(100, budgetInfo.tokenPercent ?? 0)}%` },
+            }))),
+          h('div', { className: 'sd-pipe-budget-row' },
+            h('span', { className: 'sd-pipe-budget-label' }, '费用'),
+            h('span', { className: 'sd-pipe-budget-value' }, `${formatPipelineMoney(pipeline.budget.usedCostCNY)} / ${pipeline.budget.maxCostCNY > 0 ? formatPipelineMoney(pipeline.budget.maxCostCNY) : '不限'}`),
+            h('div', { className: 'sd-pipe-budget-bar' }, h('div', {
+              className: `sd-pipe-budget-fill${budgetInfo.costPercent !== null && budgetInfo.costPercent > 100 ? ' sd-pipe-budget-danger' : budgetInfo.costPercent !== null && budgetInfo.costPercent > 80 ? ' sd-pipe-budget-warn' : ''}`,
+              style: { width: `${Math.min(100, budgetInfo.costPercent ?? 0)}%` },
+            }))),
+          refreshUsage ? h('p', { className: 'sd-hint' }, `本次会话用量参考：${formatPipelineTokens(refreshUsage.tokens)} token · ${formatPipelineMoney(refreshUsage.costCNY)}（${budgetPercent === null ? '未设总预算' : `总预算已用 ${Math.round(budgetPercent)}%`}）`) : null,
+          h('div', { className: `sd-pipe-budget-summary${budgetClass}` }, budgetPercent === null ? '总预算：未设上限（可在生成设置里填写 token / 费用上限）' : `总预算使用 ${Math.round(budgetPercent)}%`)),
+        h('section', { className: 'sd-pipe-stages' },
+          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, `阶段（${stageInfo.done}/${stageInfo.total}）`), h('span', { className: 'sd-hint' }, '阶段由 AI 通过工作台工具上报')),
+          pipeline.stages.length === 0
+            ? h('p', { className: 'sd-pipe-empty' }, '阶段还没生成：准备完成后由后端写入准备 / 各卷 / 总审阶段。')
+            : h('div', { className: 'sd-pipe-stage-list' }, pipeline.stages.map((stage, index) => {
+                const stageMeta = PIPELINE_STAGE_STATUS_META[stage.status] ?? PIPELINE_STAGE_STATUS_META.pending
+                const current = String(pipeline.currentStage) === String(stage.id)
+                return h('div', { key: stage.id, className: `sd-pipe-stage${current ? ' sd-pipe-stage-current' : ''} sd-pipe-stage-${stage.status}` },
+                  h('span', { className: 'sd-pipe-stage-icon' }, stageMeta.icon),
+                  h('span', { className: 'sd-pipe-stage-name' }, `${index + 1}. ${stage.name}`),
+                  h('span', { className: 'sd-pipe-stage-range' }, stage.chapterFrom && stage.chapterTo ? `第 ${stage.chapterFrom}–${stage.chapterTo} 章` : stage.chapterFrom ? `第 ${stage.chapterFrom} 章起` : ''),
+                  h(Tag, { tone: stageMeta.tone }, stageMeta.label))
+              }))),
+        h('section', { className: 'sd-pipe-notes' },
+          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, `进度提示（${pipeline.notes.length}）`)),
+          pipeline.notes.length === 0
+            ? h('p', { className: 'sd-pipe-empty' }, '还没有进度提示。运行中 AI 会通过工作台工具写回。')
+            : h('div', { className: 'sd-pipe-note-list' }, pipeline.notes.slice(-20).reverse().map((note) => h('div', { key: note.key, className: 'sd-pipe-note' },
+                h('span', { className: 'sd-pipe-note-time' }, note.at ? formatDateTime(note.at) : '—'),
+                h('span', { className: 'sd-pipe-note-text' }, note.text))))),
+        prepared ? h('p', { className: 'sd-pipe-prepared-hint' }, '✓ 蓝图与大纲已验收，可以生成。') : h('p', { className: 'sd-pipe-prepared-hint' }, '准备完成后请先在工作台验收蓝图与大纲（提案页），再回来点「我验收完了」。'),
+      )
+    }
+
+    function PipelineOverviewCard({ bundle, onGoTab }) {
+      const pipeline = normalizePipeline(bundle.pipeline)
+      if (pipeline.status === 'idle' && pipeline.stages.length === 0) return null
+      const stageInfo = pipelineStageInfo(pipeline)
+      const budgetInfo = pipelineBudgetInfo(pipeline)
+      const statusMeta = pipelineStatusMeta(pipeline)
+      return h('section', { className: 'sd-section sd-pipe-overview' },
+        h('div', { className: 'sd-pipe-overview-head' },
+          h('h3', { className: 'sd-h3' }, '📚 整本书'),
+          h(Tag, { tone: statusMeta.tone }, statusMeta.label),
+          onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('pipeline') }, '查看整本书 ▸') : null),
+        h('div', { className: 'sd-pipe-overview-metrics' },
+          h('span', null, stageInfo.current ? `第 ${Math.min(stageInfo.done + 1, stageInfo.total)}/${stageInfo.total} 步 · ${stageInfo.current.name}` : '阶段未开始'),
+          h('span', null, `阶段 ${stageInfo.done}/${stageInfo.total}`),
+          h('span', null, budgetInfo.percent === null ? '预算未设上限' : `预算 ${Math.round(budgetInfo.percent)}%`)),
+        h('div', { className: 'sd-pipe-progress-bar' }, h('div', { className: `sd-pipe-progress-fill${budgetInfo.percent !== null && budgetInfo.percent > 100 ? ' sd-pipe-progress-danger' : ''}`, style: { width: `${stageInfo.percent}%` } })))
+    }
+
+    function TimelineTab({ bundle, projectId, onChanged, onGoTab }) {
       const [editing, setEditing] = useState(null)
       const [mode, setMode] = useState('list')
+      const [viewOpen, setViewOpen] = useState(false)
       const events = [...(bundle.events ?? [])].sort((a, b) => (Number(a.chapter) || 0) - (Number(b.chapter) || 0))
       return h(
         'div',
@@ -796,15 +3001,18 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '🕰️ 时间线'), h('p', { className: 'sd-desc' }, '按章排列的事件流。故事内时间用于排序与检查；泳道视图按卷或每 20 章分道，并画出伏笔埋收弧线。')),
+          h('div', null, h('h2', { className: 'sd-h2' }, '🕰️ 时间线'), h('p', { className: 'sd-desc' }, '按章排列的事件流。故事内时间用于排序与检查；泳道视图按卷或每 20 章分道并画伏笔弧线；全景视图按章聚合事件 / 伏笔埋收 / 冲突 / 高光 / 注意力。')),
           h(
             'div',
             { className: 'sd-pagehead-actions' },
-            h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'lane', label: '泳道' }] }),
+            h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'lane', label: '泳道' }, { value: 'pano', label: '全景' }] }),
+            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'),
             h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增事件'),
           ),
         ),
-        mode === 'lane'
+        mode === 'pano'
+          ? h(TimelinePanorama, { bundle, onGoTab })
+          : mode === 'lane'
           ? h(TimelineLanes, { events, foreshadow: bundle.foreshadow ?? [], onEdit: (item) => setEditing(item) })
           : events.length === 0
           ? h(Empty, null, '还没有事件。把关键剧情点记进来，时间线会自动成列。')
@@ -830,6 +3038,135 @@ window.__ModuleLoader__.load({
               ),
             ),
         editing !== null ? h(EntityEditor, { kind: 'events', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+        viewOpen ? h(HtmlViewDialog, { title: '🕰️ 时间线 · 只读视图', path: novelDeskViewPath('timeline', projectId), onClose: () => setViewOpen(false) }) : null,
+      )
+    }
+
+    // ── 时间线全景：按章聚合所有素材 ──────────────────────────
+    const PANO_SECTIONS = [
+      ['events', '事件'],
+      ['plant', '伏笔埋设'],
+      ['payoff', '伏笔回收'],
+      ['conflicts', '冲突'],
+      ['highlights', '高光'],
+      ['attention', '注意力'],
+    ]
+
+    function TimelinePanorama({ bundle, onGoTab }) {
+      const [filters, setFilters] = useState({ events: true, plant: true, payoff: true, conflicts: true, highlights: true, attention: true })
+      const [locationFilter, setLocationFilter] = useState('all')
+      const toggleFilter = (key) => setFilters((prev) => ({ ...prev, [key]: !prev[key] }))
+      const chapters = bundle.chapters ?? []
+      const titleOf = (chapter) => String(chapters.find((item) => Number(item.id) === Number(chapter))?.title ?? '').trim()
+      const chapterLocation = new Map(chapters.map((chapter) => [Number(chapter.id), String(chapter.location ?? '').trim()]))
+      const truncate = (text, size = 40) => {
+        const value = String(text ?? '').trim()
+        return value.length > size ? value.slice(0, size) + '…' : value
+      }
+      const byChapter = new Map()
+      const ensure = (chapter) => {
+        const number = Number(chapter)
+        if (!Number.isFinite(number) || number <= 0) return null
+        if (!byChapter.has(number)) byChapter.set(number, { chapter: number, location: '', events: [], plants: [], payoffs: [], conflicts: [], highlights: [] })
+        return byChapter.get(number)
+      }
+      for (const event of bundle.events ?? []) ensure(event.chapter)?.events.push(event)
+      for (const item of bundle.foreshadow ?? []) {
+        if (Number(item.setupChapter) > 0) ensure(item.setupChapter)?.plants.push(item)
+        if (Number(item.payoffChapter) > 0) ensure(item.payoffChapter)?.payoffs.push(item)
+      }
+      for (const conflict of bundle.conflicts ?? []) ensure(conflict.resolveChapter)?.conflicts.push(conflict)
+      for (const highlight of bundle.highlights ?? []) ensure(highlight.chapter)?.highlights.push(highlight)
+      const attentionByChapter = new Map(attentionRows(bundle).map((row) => [Number(row.chapter), row]))
+      for (const chapter of attentionByChapter.keys()) ensure(chapter)
+      const all = [...byChapter.values()].sort((a, b) => a.chapter - b.chapter)
+      // 本章地点：chapter.location 优先，缺则取本章第一个 events.location
+      for (const entry of all) {
+        entry.location = chapterLocation.get(entry.chapter) || String(entry.events.find((event) => String(event.location ?? '').trim() !== '')?.location ?? '').trim()
+      }
+      if (all.length === 0) return h(Empty, null, '还没有可展示的素材。先写事件 / 伏笔 / 冲突 / 高光，或给章节标注意力。')
+      const locationValues = [...new Set(all.map((entry) => entry.location).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
+      const visibleAll = all.filter((entry) => (locationFilter === 'all' ? true : locationFilter === '__none__' ? !entry.location : entry.location === locationFilter))
+      const cards = []
+      for (const entry of visibleAll) {
+        const sections = []
+        if (filters.events && entry.events.length > 0) {
+          sections.push(['事件', entry.events.map((event) => ({
+            key: `event-${event.id}`,
+            main: event.title || event.id || '未命名事件',
+            meta: [event.storyTime, event.location ? '📍 ' + event.location : ''].filter(Boolean).join(' · '),
+          }))])
+        }
+        if (filters.plant && entry.plants.length > 0) {
+          sections.push(['伏笔·埋', entry.plants.map((item) => ({
+            key: `plant-${item.id}`,
+            main: item.title || '未命名伏笔',
+            meta: Number(item.payoffChapter) > 0 ? `→ 计划第 ${item.payoffChapter} 章回收` : '→ 未定回收',
+          }))])
+        }
+        if (filters.payoff && entry.payoffs.length > 0) {
+          sections.push(['伏笔·收', entry.payoffs.map((item) => ({
+            key: `payoff-${item.id}`,
+            main: item.title || '未命名伏笔',
+            meta: Number(item.setupChapter) > 0 ? `第 ${item.setupChapter} 章 →` : '未定埋设 →',
+          }))])
+        }
+        if (filters.conflicts && entry.conflicts.length > 0) {
+          sections.push(['冲突', entry.conflicts.map((conflict) => ({
+            key: `conflict-${conflict.id}`,
+            main: conflict.title || '未命名冲突',
+            meta: [CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '', displayValue('type', conflict.type)].filter((value) => value && value !== '—').join(' / '),
+          }))])
+        }
+        if (filters.highlights && entry.highlights.length > 0) {
+          sections.push(['高光', entry.highlights.map((highlight) => ({
+            key: `highlight-${highlight.id}`,
+            main: truncate(highlight.title || highlight.quote || highlight.text || '未命名高光'),
+            meta: displayValue('type', highlight.type) === '—' ? '' : displayValue('type', highlight.type),
+          }))])
+        }
+        const attention = attentionByChapter.get(entry.chapter) ?? null
+        if (sections.length === 0 && !(filters.attention && attention)) continue
+        cards.push({ entry, sections, attention })
+      }
+      const attentionText = (attention) => {
+        if (!attention) return '未标注意力'
+        return ['⚡', attentionHasScore(attention) ? `${Number(attention.score)} 分` : '未测', ATTENTION_TYPE_LABEL[attention.type] ?? '', attention.verdict ?? '']
+          .filter(Boolean).join(' · ')
+      }
+      const renderRow = (row) => h('div', { key: row.key, className: 'sd-pano-row' },
+        h('span', { className: 'sd-pano-row-main' }, row.main),
+        row.meta ? h('span', { className: 'sd-pano-row-meta' }, row.meta) : null)
+      const renderSection = ([label, rows]) => h('div', { key: label, className: 'sd-pano-sec' },
+        h('div', { className: 'sd-pano-sec-label' }, label),
+        rows.map(renderRow))
+      const renderCard = ({ entry, sections, attention }) => h('section', { key: entry.chapter, className: 'sd-pano-card' },
+        h('div', { className: 'sd-pano-head' },
+          h('button', { type: 'button', className: 'sd-pano-title', title: onGoTab ? '去章节页' : '章节', onClick: () => onGoTab && onGoTab('chapters') },
+            `第 ${entry.chapter} 章${titleOf(entry.chapter) ? `《${titleOf(entry.chapter)}》` : ''}`),
+          filters.attention
+            ? h('span', { className: `sd-pano-att${attention ? '' : ' sd-pano-att-empty'}` }, attentionText(attention))
+            : null,
+          entry.location ? h('span', { className: 'sd-pano-loc', title: '本章地点' }, `📍 ${entry.location}`) : null),
+        sections.map(renderSection))
+      return h('div', { className: 'sd-pano-wrap' },
+        h('div', { className: 'sd-pano-toolbar' },
+          PANO_SECTIONS.map(([key, label]) => h('label', { key, className: 'sd-cb sd-pano-filter' },
+            h('input', { type: 'checkbox', checked: filters[key], onChange: () => toggleFilter(key) }), label)),
+          h('label', { className: 'sd-pano-location' },
+            h('span', { className: 'sd-hint' }, '地点'),
+            h('select', {
+              className: 'sd-input sd-select-inline sd-pano-location-select',
+              value: locationFilter,
+              onChange: (e) => setLocationFilter(e.target.value),
+            },
+              h('option', { value: 'all' }, '全部地点'),
+              locationValues.map((location) => h('option', { key: location, value: location }, location)),
+              h('option', { value: '__none__' }, '未标地点'))),
+          h('span', { className: 'sd-hint sd-pano-count' }, `${cards.length} 章有素材`)),
+        cards.length === 0
+          ? h(Empty, null, '当前过滤条件下没有可展示的素材，请至少打开一个开关。')
+          : h('div', { className: 'sd-pano-cards' }, cards.map(renderCard)),
       )
     }
 
@@ -874,7 +3211,38 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function OverviewTab({ bundle, projectId, onChanged, onAddCart, cartCount = 0, onOpenCart }) {
+    // ── 一号原则：总览页 hero（口号 + 注意力三指标 + 去注意力页）──
+    function PrincipleHero({ bundle, onGoTab }) {
+      const stats = attentionStats(bundle)
+      const hasScores = stats.scored.length > 0
+      const statCell = (label, value, unit, hint) => h('div', { key: label, className: 'sd-principle-hero-stat' },
+        h('div', { className: 'sd-principle-hero-label' }, label),
+        h('div', { className: `sd-principle-hero-value${value === '—' ? ' sd-principle-hero-value-empty' : ''}` },
+          value, unit ? h('span', { className: 'sd-principle-hero-unit' }, unit) : null),
+        hint ? h('div', { className: 'sd-principle-hero-stat-hint' }, hint) : null)
+      return h('section', { className: 'sd-principle-hero' },
+        h('div', { className: 'sd-principle-hero-main' },
+          h('h2', { className: 'sd-principle-hero-slogan' }, PRINCIPLE_SLOGAN),
+          h('p', { className: 'sd-principle-hero-sub' }, PRINCIPLE_SUB),
+          h('p', { className: 'sd-principle-hero-hint' }, hasScores
+            ? PRINCIPLE_HINT
+            : '还没有注意力记录：去分工页让独立审稿人冷读，或写下一章方案时让 AI 自动带设计。')),
+        h('div', { className: 'sd-principle-hero-stats' },
+          statCell('平均注意力', stats.average === null ? '—' : String(stats.average), stats.average === null ? '' : '/100', hasScores ? `${stats.scored.length} 章有实测分` : '暂无实测分'),
+          h('div', { className: 'sd-principle-hero-stat' },
+            h('div', { className: 'sd-principle-hero-label' }, '最低三章'),
+            stats.lowest.length === 0
+              ? h('div', { className: 'sd-principle-hero-value sd-principle-hero-value-empty' }, '—')
+              : h('div', { className: 'sd-principle-hero-list' }, stats.lowest.map((row) => h('span', { key: row.id ?? `hero-low-${row.chapter}`, className: 'sd-principle-hero-list-item' }, `第 ${Number(row.chapter)} 章 · ${Number(row.score)}`))),
+            stats.lowest.length === 0 ? h('div', { className: 'sd-principle-hero-stat-hint' }, '暂无实测分') : null),
+          statCell('未标注意力', String(stats.unmarked.length), '章', '有正文但无注意力记录')),
+        h('div', { className: 'sd-principle-hero-actions' },
+          onGoTab ? h(Btn, { kind: 'primary', onClick: () => onGoTab('attention') }, '打开注意力页') : null,
+          onGoTab ? h(Btn, { onClick: () => onGoTab('agents') }, '去分工页冷读') : null),
+      )
+    }
+
+    function OverviewTab({ bundle, projectId, onChanged, onAddCart, cartCount = 0, onOpenCart, onGoTab }) {
       const [form, setForm] = useState(() => ({ ...bundle.project }))
       const [busy, setBusy] = useState(false)
       const [dash, setDash] = useState(null)
@@ -911,6 +3279,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'sd-page' },
+        h(PrincipleHero, { bundle, onGoTab }),
         h('div', { className: 'sd-pagehead' },
           h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。')),
           h('div', { className: 'sd-pagehead-actions' },
@@ -920,6 +3289,9 @@ window.__ModuleLoader__.load({
           onOpenCart ? h(Btn, { small: true, kind: 'primary', onClick: onOpenCart }, '打开清单') : null),
         h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
         h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
+        h(AttentionOverviewCard, { bundle, onGoTab, onAddCart }),
+        h(PipelineOverviewCard, { bundle, onGoTab }),
+        h(FreshReadCard, { bundle, projectId, compact: true }),
         h('div', { className: 'sd-two-col' },
           h('section', { className: 'sd-section' },
             h('h3', { className: 'sd-h3' }, '作品设定'),
@@ -1000,7 +3372,18 @@ window.__ModuleLoader__.load({
 
     // ── 新建作品 ──────────────────────────────────────────────
     function CreateProjectDialog({ onClose, onCreated }) {
-      const [form, setForm] = useState({ name: '', genre: '', logline: '', targetChapters: 0, targetWords: 0 })
+      const [form, setForm] = useState({
+        name: '',
+        genre: '',
+        logline: '',
+        targetChapters: 0,
+        targetWords: 0,
+        worldKind: 'mixed',
+        worldScale: 'region',
+        worldEra: '',
+        generateWorld: true,
+        openPipeline: false,
+      })
       const [busy, setBusy] = useState(false)
       const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
       const save = async () => {
@@ -1009,20 +3392,50 @@ window.__ModuleLoader__.load({
           return
         }
         setBusy(true)
+        let project = null
         try {
-          const project = await api('project.create', { input: form })
-          onCreated(project.id)
+          // 世界设定不进 project 字段：仅作为 world-build 任务 instruction（契约见 docs/WORLD-MODEL.md）。
+          project = await api('project.create', {
+            input: {
+              name: form.name,
+              genre: form.genre,
+              logline: form.logline,
+              targetChapters: form.targetChapters,
+              targetWords: form.targetWords,
+            },
+          })
+          onCreated(
+            project.id,
+            form.openPipeline === true
+              ? { openPipeline: true, prefill: { name: form.name, premise: form.logline || '', genre: form.genre || '' } }
+              : null,
+          )
           onClose()
         } catch (error) {
           window.alert(error.message)
-        } finally {
           setBusy(false)
+          return
+        }
+        setBusy(false)
+        // 唯一允许直接发对话的入口：创建后立刻让 AI 生成世界（与导入后立即审阅同模式）。
+        // 勾选「创建后进入整本书」时不再额外发 world-build：准备阶段会一起出蓝图/大纲，避免两个会话打架。
+        if (form.generateWorld !== false && form.openPipeline !== true && project?.id) {
+          try {
+            await sendToChat({
+              projectId: project.id,
+              task: 'world-build',
+              newSession: true,
+              instruction: worldBuildInstruction(form.worldKind, form.worldScale, form.worldEra),
+            })
+          } catch (error) {
+            window.alert(`作品已创建，但发送世界生成任务失败：${error.message}`)
+          }
         }
       }
       return h(
         'div',
         { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal' },
+        h('div', { className: 'sd-modal sd-modal-wide' },
           h('div', { className: 'sd-modal-head' }, h('strong', null, '新建作品'), h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
           h('div', { className: 'sd-modal-body' }, h('div', { className: 'sd-form' },
             h(Field, { label: '作品名 *' }, h(TextInput, { value: form.name, onChange: (v) => set('name', v), placeholder: '如：长夜将明' })),
@@ -1030,12 +3443,36 @@ window.__ModuleLoader__.load({
             h(Field, { label: '一句话简介' }, h(TextArea, { value: form.logline, rows: 2, onChange: (v) => set('logline', v) })),
             h(Field, { label: '目标章数' }, h(TextInput, { value: form.targetChapters, type: 'number', onChange: (v) => set('targetChapters', Number(v) || 0) })),
             h(Field, { label: '目标字数' }, h(TextInput, { value: form.targetWords, type: 'number', onChange: (v) => set('targetWords', Number(v) || 0) })),
-          )),
+            h('div', { className: 'sd-create-world' },
+              h('h3', { className: 'sd-h3' }, '🌍 世界设定（可选）'),
+              h('div', { className: 'sd-create-world-grid' },
+                h(Field, { label: '背景类型' }, h(Select, {
+                  value: form.worldKind,
+                  onChange: (v) => set('worldKind', v),
+                  options: CREATE_WORLD_KINDS.map(([value, label]) => ({ value, label })),
+                })),
+                h(Field, { label: '尺度' }, h(Select, {
+                  value: form.worldScale,
+                  onChange: (v) => set('worldScale', v),
+                  options: CREATE_WORLD_SCALES.map(([value, label]) => ({ value, label })),
+                })),
+                h(Field, { label: '时代' }, h(TextInput, { value: form.worldEra, onChange: (v) => set('worldEra', v), placeholder: '如：唐·天宝年间 / 架空蒸汽时代' }))),
+              h('label', { className: 'sd-cb sd-create-world-toggle' },
+                h('input', { type: 'checkbox', checked: form.generateWorld !== false, onChange: (e) => set('generateWorld', e.target.checked) }),
+                '创建后让 AI 生成世界地图（8–20 个地点 + 连接）'),
+              h('p', { className: 'sd-hint sd-create-world-hint' }, form.generateWorld !== false
+                ? '创建后会新建会话并发送 world-build 任务，产出世界设定与地点提案；作者可在「🌍 世界」页拖拽校准。'
+                : '只创建作品；之后可在「🌍 世界」页通过清单生成世界地图。'),
+              h('label', { className: 'sd-cb sd-create-world-toggle' },
+                h('input', { type: 'checkbox', checked: form.openPipeline === true, onChange: (e) => set('openPipeline', e.target.checked) }),
+                '创建后进入「整本书」：先生成蓝图与大纲'),
+              h('p', { className: 'sd-hint sd-create-world-hint' }, form.openPipeline === true
+                ? '创建成功后会切到「📚 整本书」页并打开生成向导（可先准备蓝图与大纲，验收后再生成）。'
+                : '不勾选则创建后停在总览页。')))),
           h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: onClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '创建中…' : '创建')),
         ),
       )
     }
-
 
     // ── 提案页（AI 结果对比 + 采纳）────────────────────────────
     const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', decision: '冲突决策', outlines: '章节大纲', custom: '自由' }
@@ -1074,8 +3511,9 @@ window.__ModuleLoader__.load({
       return out
     }
 
-    function ProposalTab({ bundle, projectId, onChanged, onAskAi, onAddCart }) {
+    function ProposalTab({ bundle, projectId, onChanged, onAskAi, onAddCart, onGoTab }) {
       const [busy, setBusy] = useState('')
+      const [notice, setNotice] = useState('')
       const [feedbackFor, setFeedbackFor] = useState('')
       const [feedbackText, setFeedbackText] = useState('')
       const [showDone, setShowDone] = useState(false)
@@ -1106,16 +3544,24 @@ window.__ModuleLoader__.load({
         }
         if (!window.confirm(`批量${action === 'accept' ? '采纳' : '驳回'} ${ids.length} 条提案？`)) return
         setBulkBusy(true)
+        setNotice(`正在${action === 'accept' ? '采纳' : '驳回'} ${ids.length} 条提案…`)
         try {
           const value = await api(action === 'accept' ? 'proposal.batchAccept' : 'proposal.batchReject', { projectId, ids })
           const failed = value?.failed ?? []
           const okCount = action === 'accept' ? (value?.accepted?.length ?? 0) : (value?.rejected?.length ?? 0)
+          const kinds = [...new Set(selectedPending.map((p) => p.kind))]
+          const kindSummary = kinds.map((kind) => `${PROPOSAL_KIND[kind] ?? kind} ${selectedPending.filter((p) => p.kind === kind).length}`).join(' · ')
+          setNotice(`${action === 'accept' ? '已采纳' : '已驳回'} ${okCount} 条${kindSummary ? `（${kindSummary}）` : ''}${failed.length > 0 ? `，失败 ${failed.length} 条` : ''}`)
           if (failed.length > 0) {
             window.alert(`成功 ${okCount} 条，失败 ${failed.length} 条：\n${failed.map((f) => `${f.id}：${f.error ?? '未知错误'}`).join('\n')}`)
           }
           setSelected([])
-          onChanged()
+          await onChanged()
+          if (action === 'accept' && (kinds.includes('world') || kinds.includes('locations'))) {
+            if (window.confirm('世界与地点已更新。现在去 🌍 世界页看看地图？')) onGoTab?.('world')
+          }
         } catch (error) {
+          setNotice('')
           window.alert(`批量${action === 'accept' ? '采纳' : '驳回'}失败：${error.message}`)
         } finally {
           setBulkBusy(false)
@@ -1124,9 +3570,14 @@ window.__ModuleLoader__.load({
       const act = async (p, action, optionId) => {
         if (!window.confirm(`${action === 'accept' ? '采纳' : '驳回'}提案「${p.title}」？`)) return
         setBusy(p.id)
+        setNotice(`正在${action === 'accept' ? '采纳' : '驳回'}「${p.title}」…`)
         try {
           await api(action === 'accept' ? 'proposal.accept' : 'proposal.reject', { projectId, proposalId: p.id, optionId })
-          onChanged()
+          setNotice(`${action === 'accept' ? '已采纳' : '已驳回'}「${p.title}」`)
+          await onChanged()
+          if (action === 'accept' && (p.kind === 'world' || p.kind === 'locations')) {
+            if (window.confirm('世界与地点已更新。现在去 🌍 世界页看看地图？')) onGoTab?.('world')
+          }
         } catch (error) {
           window.alert(error.message)
         } finally {
@@ -1250,6 +3701,7 @@ window.__ModuleLoader__.load({
             h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('reject') }, '批量驳回'),
           ),
         ) : null,
+        notice ? h('div', { className: 'sd-notice' }, notice) : null,
         pendingAll.length === 0 ? h(Empty, null, '没有待处理提案。可以加入清单「从头审阅」，或让对话里的 AI 生成后回到这里。') : pending.length === 0 ? h(Empty, null, '当前筛选下没有待采纳的提案。换个类型看看。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
           h('div', { className: 'sd-proposal-head' },
             h('label', { className: 'sd-cb sd-cb-only', title: '选择该提案' }, h('input', { type: 'checkbox', checked: selected.includes(p.id), onChange: () => toggle(p.id) })),
@@ -2017,24 +4469,23 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState([])
       const [severityFilter, setSeverityFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
-      const [fixing, setFixing] = useState('')
+      const [showDone, setShowDone] = useState(false)
       const all = bundle.reviews ?? []
+      const isDone = (review) => review.status === 'fixed' || review.status === 'wontfix'
       const severityRank = { blocker: 0, major: 1, minor: 2, suggestion: 3 }
-      const items = all
-        .filter((review) => severityFilter === 'all' || review.severity === severityFilter)
-        .sort((a, b) => {
-          const doneA = a.status === 'fixed' || a.status === 'wontfix' ? 1 : 0
-          const doneB = b.status === 'fixed' || b.status === 'wontfix' ? 1 : 0
-          if (doneA !== doneB) return doneA - doneB
-          return (severityRank[a.severity] ?? 9) - (severityRank[b.severity] ?? 9)
-        })
-      const selectedItems = all.filter((review) => selected.includes(review.id))
-      const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 96px'
+      const bySeverity = (a, b) => (severityRank[a.severity] ?? 9) - (severityRank[b.severity] ?? 9) || (Number(a.chapter) || 0) - (Number(b.chapter) || 0)
+      const pendingAll = all.filter((review) => !isDone(review))
+      const pending = pendingAll.filter((review) => severityFilter === 'all' || review.severity === severityFilter).sort(bySeverity)
+      const done = all.filter(isDone).sort((a, b) => (Number(b.chapter) || 0) - (Number(a.chapter) || 0))
+      const selectedRows = all.filter((review) => selected.includes(review.id))
+      const selectedPending = selectedRows.filter((review) => !isDone(review))
+      const selectedDone = selectedRows.filter((review) => isDone(review))
+      const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 148px'
       const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-      const allSelected = items.length > 0 && items.every((review) => selected.includes(review.id))
-      const toggleAll = () => {
-        if (allSelected) setSelected((prev) => prev.filter((id) => !items.some((review) => review.id === id)))
-        else setSelected((prev) => [...new Set([...prev, ...items.map((review) => review.id)])])
+      const allPendingSelected = pending.length > 0 && pending.every((review) => selected.includes(review.id))
+      const toggleAllPending = () => {
+        if (allPendingSelected) setSelected((prev) => prev.filter((id) => !pending.some((review) => review.id === id)))
+        else setSelected((prev) => [...new Set([...prev, ...pending.map((review) => review.id)])])
       }
       const remove = async (review) => {
         if (!window.confirm(`删除这条审稿意见？\n${review.issue || review.id}`)) return
@@ -2045,30 +4496,17 @@ window.__ModuleLoader__.load({
           window.alert(error.message)
         }
       }
-      const fixWithAi = async (review) => {
-        if (!review.chapter) {
-          window.alert('这条审稿没有章号，无法生成修改提案')
-          return
-        }
-        if (!window.confirm(`让 AI 按这条意见修改第 ${review.chapter} 章，并生成提案？\n\n${review.issue ?? ''}`)) return
-        setFixing(review.id)
-        try {
-          await sendToChat({ projectId, task: 'review-fix', reviewId: review.id, chapter: review.chapter })
-        } catch (error) {
-          window.alert(`发送到对话失败：${error.message}`)
-        } finally {
-          setFixing('')
-        }
-      }
-      const batch = async (status) => {
-        if (selectedItems.length === 0) {
+      const batchStatus = async (status, rows) => {
+        const list = (rows ?? []).filter((review) => review && review.id)
+        if (list.length === 0) {
           window.alert('请先勾选审稿意见')
           return
         }
-        if (!window.confirm(`把 ${selectedItems.length} 条审稿标记为「${status === 'fixed' ? '已修' : '忽略'}」？`)) return
+        const label = { fixed: '已修', wontfix: '忽略', open: '待处理' }[status] ?? status
+        if (!window.confirm(`把 ${list.length} 条审稿标记为「${label}」？`)) return
         setBulkBusy(true)
         try {
-          const value = await api('review.batchUpdate', { projectId, ids: selectedItems.map((review) => review.id), status })
+          const value = await api('review.batchUpdate', { projectId, ids: list.map((review) => review.id), status })
           const missing = value?.missing ?? []
           if (missing.length > 0) window.alert(`已更新 ${value?.updated ?? 0} 条，${missing.length} 条未找到：${missing.join('、')}`)
           setSelected([])
@@ -2079,48 +4517,348 @@ window.__ModuleLoader__.load({
           setBulkBusy(false)
         }
       }
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h(
-          'div',
-          { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 支持按严重度筛选、全选后批量标记。')),
+      // 审稿不直接发对话：先加入清单（清单是唯一 AI 入口），在清单里批量生成修订提案
+      const addToCart = (rows) => {
+        const list = (rows ?? []).filter((review) => review && review.id)
+        if (list.length === 0) {
+          window.alert('请先勾选审稿意见')
+          return
+        }
+        if (!onAddCart) return
+        list.forEach((review) => onAddCart({
+          kind: 'review',
+          id: review.id,
+          chapter: review.chapter,
+          title: (review.issue ?? '').slice(0, 50),
+          detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；'),
+        }))
+        setSelected([])
+      }
+      const renderRows = (rows) => h('div', { className: 'sd-table' },
+        h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } },
+          h('div', null),
+          meta.columns.map((c) => h('div', { key: c.k }, c.t)),
+          h('div', { className: 'sd-actions-col' }, '操作')),
+        rows.map((review) => h('div', { key: review.id, className: 'sd-row' + (isDone(review) ? ' sd-row-done' : ''), style: { gridTemplateColumns: grid } },
+          h('div', { className: 'sd-row-cb' }, h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) })),
+          meta.columns.map((c) => {
+            const text = c.format ? String(c.format(review[c.k], review)) : displayValue(c.k, review[c.k])
+            return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
+          }),
+          h('div', { className: 'sd-row-actions' },
+            !isDone(review) && onAddCart ? h(Btn, { small: true, kind: 'primary', onClick: () => addToCart([review]) }, '加入清单') : null,
+            isDone(review) ? h(Btn, { small: true, disabled: bulkBusy, onClick: () => batchStatus('open', [review]) }, '重新打开') : null,
+            h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
+            h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除'),
+          ))))
+      if (all.length === 0) {
+        return h('div', { className: 'sd-page' },
+          h('div', { className: 'sd-pagehead' },
+            h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc)),
+            h('div', { className: 'sd-pagehead-actions' },
+              h(Btn, { onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'),
+              h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+          h(Empty, null, '还没有审稿意见。AI 审稿或手动新增都会出现在这里。'),
+          editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+        )
+      }
+      return h('div', { className: 'sd-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 待处理勾选后加入清单（清单里批量生成修订提案）；已处理默认折叠归档，可重新打开。')),
           h('div', { className: 'sd-pagehead-actions' },
             h(Btn, { onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'),
-            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增')),
-        ),
-        all.length > 0 ? h('div', { className: 'sd-bulkbar' },
-          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
-          h('span', { className: 'sd-hint' }, `共 ${all.length} 条，当前显示 ${items.length} 条，已选 ${selectedItems.length} 条`),
+            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+        h('div', { className: 'sd-bulkbar' },
+          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allPendingSelected, onChange: toggleAllPending }), '全选待处理'),
+          h('span', { className: 'sd-hint' }, `待处理 ${pendingAll.length} 条，当前显示 ${pending.length} 条，已选 ${selectedPending.length} 条`),
           h('select', { className: 'sd-input sd-select-inline', value: severityFilter, onChange: (e) => setSeverityFilter(e.target.value) },
             h('option', { value: 'all' }, '全部严重度'),
             [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']].map(([value, label]) => h('option', { key: value, value }, label))),
           h('div', { className: 'sd-bulkbar-actions' },
-            h(Btn, { small: true, kind: 'primary', disabled: bulkBusy || selectedItems.length === 0, onClick: () => batch('fixed') }, bulkBusy ? '处理中…' : `标记已修（${selectedItems.length}）`),
-            h(Btn, { small: true, disabled: bulkBusy || selectedItems.length === 0, onClick: () => batch('wontfix') }, '忽略'),
-          ),
+            h(Btn, { small: true, kind: 'primary', disabled: selectedPending.length === 0 || !onAddCart, onClick: () => addToCart(selectedPending) }, `加入清单（${selectedPending.length}）`),
+            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('fixed', selectedPending) }, `标记已修（${selectedPending.length}）`),
+            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('wontfix', selectedPending) }, '忽略'))),
+        pending.length > 0
+          ? renderRows(pending)
+          : h('div', { className: 'sd-empty' }, pendingAll.length === 0 ? '待处理审稿已清空 🎉' : '当前严重度筛选下没有待处理审稿。'),
+        done.length > 0 ? h('div', { className: 'sd-section sd-mt' },
+          h('div', { className: 'sd-bulkbar' },
+            h('span', { className: 'sd-hint' }, `已处理（${done.length}）：已修 + 忽略，默认归档收起`),
+            h('div', { className: 'sd-bulkbar-actions' },
+              h(Btn, { small: true, disabled: bulkBusy || selectedDone.length === 0, onClick: () => batchStatus('open', selectedDone) }, `重新打开所选（${selectedDone.length}）`),
+              h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开'))),
+          showDone ? h('div', { className: 'sd-mini-list' }, done.map((review) => h('div', { key: review.id, className: 'sd-mini-row' },
+            h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) }),
+            h(Tag, { tone: 'muted' }, review.status === 'fixed' ? '已修' : '忽略'),
+            h('span', { className: 'sd-mini-title' }, `第${review.chapter}章 · ${review.dimension ?? ''} · ${(review.issue ?? '').slice(0, 70)}`),
+            h(Btn, { small: true, disabled: bulkBusy, onClick: () => batchStatus('open', [review]) }, '重新打开')))) : null,
         ) : null,
-        items.length === 0
-          ? h(Empty, null, all.length === 0 ? '还没有审稿意见。AI 审稿或手动新增都会出现在这里。' : '当前严重度筛选下没有审稿意见。')
-          : h('div', { className: 'sd-table' },
-              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } },
-                h('div', null, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll, title: '全选当前筛选' })),
-                meta.columns.map((c) => h('div', { key: c.k }, c.t)),
-                h('div', { className: 'sd-actions-col' }, '操作')),
-              items.map((review) => h('div', { key: review.id, className: 'sd-row', style: { gridTemplateColumns: grid } },
-                h('div', { className: 'sd-row-cb' }, h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) })),
-                meta.columns.map((c) => {
-                  const text = c.format ? String(c.format(review[c.k], review)) : displayValue(c.k, review[c.k])
-                  return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
-                }),
-                h('div', { className: 'sd-row-actions' },
-                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'review', id: review.id, chapter: review.chapter, title: (review.issue ?? '').slice(0, 50), detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；') }) }, '加入清单') : null,
-                  h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
-                  h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
-              )),
-            ),
         editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    // ══ v0.6 新增：⚡ 注意力页 ══════════════════════════════════
+    // X 轴按章号等距；宽度随章数增长（133 章 ≈ 2050px，容器横向滚动），高度固定 236px。
+    const ATT_CHART = { minWidth: 640, height: 236, top: 16, bottom: 30, left: 36, right: 16, step: 15 }
+
+    function attentionFocusCard(chapter) {
+      try {
+        const target = document.getElementById(`sd-att-card-${Number(chapter)}`)
+        if (target && typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      } catch {
+        /* 滚动失败不影响阅读 */
+      }
+    }
+
+    function AttentionChart({ rows }) {
+      const axisRows = rows.filter((row) => attentionHasScore(row) || attentionHasDesign(row))
+      if (axisRows.length === 0) {
+        return h(Empty, null, '还没有可画的分数：先在分工页冷读回填 score，或在「＋ 新增」里填目标分 designScore。')
+      }
+      const count = axisRows.length
+      const width = Math.max(ATT_CHART.minWidth, count * ATT_CHART.step + ATT_CHART.left + ATT_CHART.right)
+      const plotWidth = width - ATT_CHART.left - ATT_CHART.right
+      const plotHeight = ATT_CHART.height - ATT_CHART.top - ATT_CHART.bottom
+      const xAt = (index) => ATT_CHART.left + (count === 1 ? plotWidth / 2 : (plotWidth * index) / (count - 1))
+      const yAt = (score) => ATT_CHART.top + plotHeight * (1 - Math.max(0, Math.min(100, Number(score))) / 100)
+      const buildPath = (pick) => {
+        const parts = []
+        let prevIndex = null
+        axisRows.forEach((row, index) => {
+          const value = pick(row)
+          if (value === null) return
+          // 缺数据的章断开折线，不假装插值
+          const command = prevIndex === null || index !== prevIndex + 1 ? 'M' : 'L'
+          parts.push(`${command}${xAt(index).toFixed(1)},${yAt(value).toFixed(1)}`)
+          prevIndex = index
+        })
+        return parts.join(' ')
+      }
+      const scorePath = buildPath((row) => (attentionHasScore(row) ? Number(row.score) : null))
+      const designPath = buildPath((row) => (attentionHasDesign(row) ? Number(row.designScore) : null))
+      const labelStep = Math.max(1, Math.ceil(count / 14))
+      return h('div', { className: 'sd-att-chart' },
+        h('div', { className: 'sd-att-legend' },
+          ATTENTION_TYPES.map(([value, label]) => h('span', { key: value, className: 'sd-att-legend-item' },
+            h('span', { className: `sd-att-swatch ${ATTENTION_TYPE_CLASS[value]}` }), label)),
+          h('span', { className: 'sd-att-legend-item' }, h('span', { className: 'sd-att-legend-dash' }), '虚线 = 目标分'),
+          h('span', { className: 'sd-att-legend-item' }, h('span', { className: 'sd-att-legend-risk' }), '红圈 = 弃读点')),
+        h('div', { className: 'sd-att-chart-scroll' },
+          h('svg', {
+            className: 'sd-att-chart-svg',
+            width,
+            height: ATT_CHART.height,
+            viewBox: `0 0 ${width} ${ATT_CHART.height}`,
+            role: 'img',
+            'aria-label': '注意力分数曲线（X 轴章号，Y 轴 0–100）',
+          },
+          [0, 20, 40, 60, 80, 100].map((tick) => h(React.Fragment, { key: `tick-${tick}` },
+            h('line', { className: 'sd-att-grid', x1: ATT_CHART.left, x2: width - ATT_CHART.right, y1: yAt(tick), y2: yAt(tick) }),
+            h('text', { className: 'sd-att-axis-label', x: ATT_CHART.left - 8, y: yAt(tick) + 3, textAnchor: 'end' }, String(tick)))),
+          axisRows.map((row, index) => (index % labelStep === 0 || index === count - 1)
+            ? h('text', { key: `x-${index}`, className: 'sd-att-axis-label', x: xAt(index), y: ATT_CHART.height - 8, textAnchor: 'middle' }, String(Number(row.chapter)))
+            : null),
+          designPath ? h('path', { className: 'sd-att-design-line', d: designPath }) : null,
+          scorePath ? h('path', { className: 'sd-att-score-line', d: scorePath }) : null,
+          axisRows.map((row, index) => (attentionHasDesign(row)
+            ? h('circle', { key: `design-${index}`, className: 'sd-att-design-dot', cx: xAt(index), cy: yAt(row.designScore), r: 2.6 },
+                h('title', null, `第 ${Number(row.chapter)} 章 · 目标分 ${Number(row.designScore)}`))
+            : null)),
+          axisRows.map((row, index) => (attentionHasScore(row)
+            ? h('circle', {
+                key: `score-${index}`,
+                className: `sd-att-dot ${ATTENTION_TYPE_CLASS[row.type] ?? ''}${row.dropRisk ? ' sd-att-dot-risk' : ''}`,
+                cx: xAt(index),
+                cy: yAt(row.score),
+                r: row.dropRisk ? 5 : 4.2,
+                onClick: () => attentionFocusCard(row.chapter),
+              },
+              h('title', null, `第 ${Number(row.chapter)} 章 · ${ATTENTION_TYPE_LABEL[row.type] ?? '未分型'} · ${Number(row.score)} 分${row.dropRisk ? ` · 弃读点：${row.dropRisk}` : ''}`))
+            : null)),
+          ),
+        ),
+      )
+    }
+
+    function AttentionStatsBar({ stats }) {
+      return h(React.Fragment, null,
+        h('div', { className: 'sd-att-stats' },
+          h('div', { className: 'sd-att-stat' },
+            h('div', { className: 'sd-att-stat-label' }, '全书平均分'),
+            h('div', { className: `sd-att-stat-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
+            h('div', { className: 'sd-hint' }, `${stats.scored.length} 章有实测分`)),
+          h('div', { className: 'sd-att-stat' },
+            h('div', { className: 'sd-att-stat-label' }, '最低三章'),
+            stats.lowest.length === 0
+              ? h('div', { className: 'sd-hint' }, '还没有实测分')
+              : h('div', { className: 'sd-att-stat-list' }, stats.lowest.map((row) => h('div', { key: row.id ?? `low-${row.chapter}`, className: 'sd-att-lowrow' },
+                  h('span', null, `第 ${Number(row.chapter)} 章`),
+                  h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`))))),
+          h('div', { className: 'sd-att-stat' },
+            h('div', { className: 'sd-att-stat-label' }, '未标章数'),
+            h('div', { className: 'sd-att-stat-big' }, String(stats.unmarked.length)),
+            h('div', { className: 'sd-hint' }, '有正文但无注意力记录')),
+          h('div', { className: 'sd-att-stat' },
+            h('div', { className: `sd-att-stat-label` }, '疲劳 / 骤降预警'),
+            h('div', { className: `sd-att-stat-big${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
+            h('div', { className: 'sd-hint' }, '同类型连续 >3 章、相邻章降 ≥15'))),
+        stats.warnings.length > 0
+          ? h('div', { className: 'sd-att-warns' }, stats.warnings.map((warning, index) => h('div', { key: `warn-${index}`, className: 'sd-att-warn' }, `⚠ ${warning.text}`)))
+          : null,
+      )
+    }
+
+    function AttentionCard({ row, bundle, onEdit, onGoTab }) {
+      const chapter = Number(row.chapter)
+      const subs = attentionSubItems(bundle, chapter)
+      const score = attentionHasScore(row) ? Number(row.score) : null
+      const design = attentionHasDesign(row) ? Number(row.designScore) : null
+      const gap = score !== null && design !== null ? score - design : null
+      const chapterTitle = (bundle.chapters ?? []).find((item) => Number(item.id) === chapter)?.title
+      const verdictTone = ATTENTION_VERDICT_TONE[row.verdict] ?? ''
+      const state = attentionStatusOf(row)
+      const needsDesign = state.key === 'nodesign' || state.key === 'blank'
+      const aggRow = (key, title, meta) => h('div', { key, className: 'sd-att-agg-row' },
+        h('span', { className: 'sd-att-agg-title', title }, title),
+        meta ? h('span', { className: 'sd-att-agg-meta' }, meta) : null)
+      return h('article', { id: `sd-att-card-${chapter}`, className: 'sd-att-card' },
+        h('div', { className: 'sd-att-card-head' },
+          h('div', { className: 'sd-att-chapter' },
+            `第 ${chapter} 章`,
+            chapterTitle ? h('span', { className: 'sd-att-chapter-title' }, chapterTitle) : null),
+          h('span', { className: `sd-att-type ${ATTENTION_TYPE_CLASS[row.type] ?? ''}` },
+            h('span', { className: 'sd-att-swatch' }),
+            ATTENTION_TYPE_LABEL[row.type] ?? '未分型'),
+          h('span', { className: `sd-att-state sd-att-state-${state.key}`, title: '已闭环 = 设计 + 实测都有；待冷读 = 有设计没实测；缺设计 = 有实测没设计；空白 = 都没有' }, state.label),
+          needsDesign ? h('span', { className: 'sd-att-design-hint' }, '补设计：点页面顶部「＋ 加入清单：AI 补齐注意力机制」') : null,
+          score !== null
+            ? h('span', { className: `sd-att-score${attentionScoreTone(score)}` }, String(score), h('span', { className: 'sd-att-score-unit' }, '/100'))
+            : h('span', { className: 'sd-att-score sd-att-tone-missing' }, '未测'),
+          design !== null ? h('span', { className: 'sd-att-design', title: '设计时定下的目标分' }, `目标 ${design}`) : null,
+          gap !== null && Math.abs(gap) >= 20
+            ? h('span', { className: `sd-att-gap${gap < 0 ? ' sd-att-gap-bad' : ''}`, title: '目标分与实测分差 ≥20：设计可能没兑现，值得复读这一章' }, `Δ ${gap > 0 ? '+' : ''}${gap}`)
+            : null,
+          row.verdict ? h(Tag, { tone: verdictTone }, `下一章：${row.verdict}`) : null,
+          row.weakest ? h('span', { className: 'sd-att-meta' }, `最弱：${ATTENTION_WEAKEST_LABEL[row.weakest] ?? row.weakest}`) : null,
+          row.status ? h(Tag, { tone: 'muted' }, ATTENTION_STATUS_LABEL[row.status] ?? row.status) : null,
+          h('div', { className: 'sd-att-card-actions' }, h(Btn, { small: true, onClick: () => onEdit(row) }, '编辑'))),
+        row.dropRisk ? h('div', { className: 'sd-att-drop' }, h('strong', null, '弃读点'), h('span', null, row.dropRisk)) : null,
+        h('div', { className: 'sd-att-beats' }, ATTENTION_BEATS.map(([key, label, placeholder]) => h('div', { key, className: 'sd-att-beat' },
+          h('div', { className: 'sd-att-beat-label' }, label),
+          h('div', { className: `sd-att-beat-text${String(row[key] ?? '').trim() ? '' : ' sd-att-beat-empty'}` }, String(row[key] ?? '').trim() || placeholder)))),
+        String(row.emotion ?? '').trim() ? h('div', { className: 'sd-att-emotion' }, h('strong', null, '情绪'), h('span', null, row.emotion)) : null,
+        String(row.question ?? '').trim() ? h('div', { className: 'sd-att-question' }, h('strong', null, '读者最想知道'), h('span', null, row.question)) : null,
+        String(row.detail ?? '').trim()
+          ? h('details', { className: 'sd-att-detail' },
+              h('summary', null, '详细说明'),
+              h('div', { className: 'sd-att-detail-body' }, row.detail))
+          : null,
+        h('div', { className: 'sd-att-aggs' },
+          h('details', { className: 'sd-att-agg' },
+            h('summary', null, `🧩 本章伏笔 · 埋 ${subs.plants.length} / 收 ${subs.payoffs.length}`),
+            h('div', { className: 'sd-att-agg-body' },
+              subs.plants.map((item, index) => aggRow(`plant-${index}`, `埋：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '未回收')),
+              subs.payoffs.map((item, index) => aggRow(`payoff-${index}`, `收：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '计划回收')),
+              subs.plants.length + subs.payoffs.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有埋设或回收伏笔') : null,
+              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('foreshadow') }, '去伏笔页维护')) : null)),
+          h('details', { className: 'sd-att-agg' },
+            h('summary', null, `⚔️ 本章冲突 · 引爆 ${subs.conflicts.length}`),
+            h('div', { className: 'sd-att-agg-body' },
+              subs.conflicts.map((item, index) => aggRow(`conflict-${index}`, item.title ?? '未命名', CONFLICT_STATUS[item.status] ?? item.status ?? '—')),
+              subs.conflicts.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有计划引爆 / 解决的冲突') : null,
+              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('conflicts') }, '去冲突页维护')) : null)),
+          h('details', { className: 'sd-att-agg' },
+            h('summary', null, `✨ 本章高光 · ${subs.highlights.length} 条`),
+            h('div', { className: 'sd-att-agg-body' },
+              subs.highlights.map((item, index) => aggRow(`highlight-${index}`, String(item.text ?? '未命名').slice(0, 120), displayValue('type', item.type))),
+              subs.highlights.length === 0 ? h('div', { className: 'sd-hint' }, '本章还没有记录高光') : null,
+              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('highlights') }, '去高光页维护')) : null))),
+      )
+    }
+
+    function AttentionUnmarkedCard({ chapter, onEdit }) {
+      return h('div', { id: `sd-att-card-${Number(chapter.id)}`, className: 'sd-att-unmarked' },
+        h('div', { className: 'sd-att-unmarked-main' },
+          h('span', { className: 'sd-att-unmarked-ch' }, `第 ${Number(chapter.id)} 章`),
+          h('span', { className: 'sd-att-unmarked-title' }, chapter.title || '未命名'),
+          h('span', { className: 'sd-att-unmarked-tag' }, '未标注意力')),
+        h(Btn, { small: true, onClick: () => onEdit({ chapter: Number(chapter.id) }) }, '编辑'))
+    }
+
+    function AttentionTab({ bundle, projectId, onChanged, onGoTab, onAddCart }) {
+      const meta = KIND_META.attention
+      const [editing, setEditing] = useState(null)
+      const stats = attentionStats(bundle)
+      const rows = stats.rows
+      const ordered = rows.slice().reverse() // 最新章在前
+      const unmarked = stats.unmarked
+      const hasChapters = (bundle.chapters ?? []).length > 0
+      const emptyCopy = hasChapters
+        ? `还没有注意力记录：点上方「＋ 加入清单：AI 补齐注意力机制」，或写下一章方案时让 AI 自动带设计。${unmarked.length > 0 ? ` 当前还有 ${unmarked.length} 章有正文但未标注意力。` : ''}`
+        : '还没有注意力记录，也还没有章节：写大纲 / 下一章时会自动生成设计；冷读打分在分工页的独立审稿人卡片。'
+      return h('div', { className: 'sd-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title),
+            h('p', { className: 'sd-principle-inline' },
+              h('strong', null, PRINCIPLE_SLOGAN),
+              h('span', null, PRINCIPLE_REVIEW_HINT)),
+            h('p', { className: 'sd-desc' }, meta.desc),
+            h('p', { className: 'sd-att-guide' }, '设计（类型 / 四拍 / 读者问题 / 目标分）由注意力设计师产出：写大纲 / 下一章方案时自动带，老作品点「＋ 加入清单：AI 补齐注意力机制」补齐；0–100 实测分由分工页的独立审稿人冷读（清单是唯一 AI 入口）。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            onAddCart ? h(Btn, { onClick: () => onAddCart(ATTENTION_DESIGN_CART) }, '＋ 加入清单：AI 补齐注意力机制') : null,
+            onGoTab ? h(Btn, { onClick: () => onGoTab('agents') }, '去分工页冷读') : null,
+            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
+        h(AttentionStatsBar, { stats }),
+        h(AttentionChart, { rows }),
+        rows.length === 0
+          ? h(Empty, null, emptyCopy)
+          : h('section', { className: 'sd-att-cards' },
+              h('h3', { className: 'sd-h3' }, `章节诊断（${rows.length}）· 最新章在前`),
+              ordered.map((row) => h(AttentionCard, { key: row.id ?? `att-${row.chapter}`, row, bundle, onEdit: setEditing, onGoTab }))),
+        unmarked.length > 0
+          ? h('section', { className: 'sd-section sd-mt' },
+              h('h3', { className: 'sd-h3' }, `未标注意力的章节（${unmarked.length}）`),
+              h('p', { className: 'sd-hint' }, '这些章有正文但还没有 attention 记录：点「编辑」直接新建，章号已预填。'),
+              h('div', { className: 'sd-att-unmarked-grid' }, unmarked.slice().reverse().map((chapter) => h(AttentionUnmarkedCard, { key: chapter.id, chapter, onEdit: setEditing }))))
+          : null,
+        editing !== null ? h(EntityEditor, { kind: 'attention', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+      )
+    }
+
+    /** 总览页的注意力卡：平均分（大字）+ 最低三章 + 未标章数 + 预警数 + 补齐设计入口。 */
+    function AttentionOverviewCard({ bundle, onGoTab, onAddCart }) {
+      const stats = attentionStats(bundle)
+      const hasAny = stats.rows.length > 0
+      return h('section', { className: 'sd-section sd-mt' },
+        h('div', { className: 'sd-att-ov-head' },
+          h('h3', { className: 'sd-h3 sd-att-ov-title' }, '⚡ 注意力'),
+          h('div', { className: 'sd-att-ov-actions' },
+            onAddCart ? h(Btn, { small: true, onClick: () => onAddCart(ATTENTION_DESIGN_CART) }, '＋ 加入清单：AI 补齐注意力机制') : null,
+            hasAny && onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('attention') }, '查看完整曲线与诊断 ▸') : null)),
+        hasAny
+          ? h('div', { className: 'sd-att-ov' },
+              h('div', { className: 'sd-att-ov-bigwrap' },
+                h('div', { className: `sd-att-ov-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
+                h('div', { className: 'sd-att-ov-label' }, '全书平均分')),
+              h('div', { className: 'sd-att-ov-mini' },
+                h('div', { className: 'sd-att-ov-mini-label' }, '最低三章'),
+                stats.lowest.length === 0
+                  ? h('div', { className: 'sd-hint' }, '还没有实测分')
+                  : stats.lowest.map((row) => h('div', { key: row.id ?? `ov-low-${row.chapter}`, className: 'sd-att-ov-row' },
+                      h('span', null, `第 ${Number(row.chapter)} 章`),
+                      h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`)))),
+              h('div', { className: 'sd-att-ov-mini' },
+                h('div', { className: 'sd-att-ov-mini-label' }, '未标章数'),
+                h('div', { className: 'sd-att-ov-num' }, String(stats.unmarked.length)),
+                h('div', { className: 'sd-hint' }, '有正文但没标')),
+              h('div', { className: 'sd-att-ov-mini' },
+                h('div', { className: 'sd-att-ov-mini-label' }, '疲劳 / 骤降预警'),
+                h('div', { className: `sd-att-ov-num${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
+                stats.warnings.length > 0
+                  ? h('div', { className: 'sd-hint', title: stats.warnings.map((warning) => warning.text).join('\n') }, stats.warnings[0].text)
+                  : h('div', { className: 'sd-hint' }, '暂无')))
+          : h('p', { className: 'sd-desc' }, '还没有注意力记录：老作品点上方「＋ 加入清单：AI 补齐注意力机制」补齐，写下一章方案时 AI 也会自动带设计；冷读打分在分工页的独立审稿人卡片。有了分数，这里会显示平均分、最低三章、未标章数和疲劳 / 骤降预警。'),
       )
     }
 
@@ -2273,16 +5011,50 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
+    function CartDialog({ items, projectId, workspacePath = '', sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
       const [allowContinue, setAllowContinue] = useState(false)
-      const [target, setTarget] = useState(defaultTarget)
+      const [target, setTarget] = useState('')
+      const [targets, setTargets] = useState([])
+      const [currentSession, setCurrentSession] = useState('')
       const [multiAgent, setMultiAgent] = useState(true)
       const [preview, setPreview] = useState('')
       const [busy, setBusy] = useState(false)
+      // 清单里全是审稿项时，可整批「生成修订提案」（逐条出 chapter 提案，不直改正文）
+      const [reviewMode, setReviewMode] = useState('proposals')
+      const reviewOnly = items.length > 0 && items.every((item) => item.kind === 'review' && item.id)
+      const toProposals = reviewOnly && reviewMode === 'proposals'
+      const isNewTarget = !target || target === '__new__'
+      const buildPayload = () => ({
+        projectId,
+        ...(toProposals ? { task: 'review-to-proposals', items } : { items, allowContinue, multiAgent }),
+        ...(isNewTarget ? { newSession: true } : { sessionId: target }),
+      })
+      const targetLabel = (session) => sessionTitleOf(session?.sessionId, session?.title) || (session?.sessionId ? `会话 ${session.sessionId.slice(0, 8)}` : '')
+      const chosenTarget = targets.find((session) => session.sessionId === target)
+      const chosenLabel = chosenTarget ? targetLabel(chosenTarget) : ''
+      useEffect(() => {
+        let alive = true
+        api('chat.sessions').then((value) => {
+          if (!alive) return
+          const rows = (value?.items ?? [])
+            .filter((item) => !item.blank && !item.parentSessionId && !item.origin && (!workspacePath || item.cwd === workspacePath))
+            .sort((a, b) => (Date.parse(b.updatedAt ?? 0) || 0) - (Date.parse(a.updatedAt ?? 0) || 0))
+          const ids = new Set(rows.map((row) => row.sessionId))
+          const main = currentMainSessionId()
+          const saved = window.localStorage.getItem(`sd.cartSession.${projectId}`) || ''
+          const preferred = (main && ids.has(main) && main) || (saved && ids.has(saved) && saved) || rows[0]?.sessionId || ''
+          setTargets(rows)
+          setCurrentSession(main && ids.has(main) ? main : '')
+          setTarget((prev) => prev || (defaultTarget === 'new' ? '__new__' : preferred || '__new__'))
+        }).catch(() => {
+          if (alive) setTarget((prev) => prev || '__new__')
+        })
+        return () => { alive = false }
+      }, [projectId, workspacePath])
       const showPreview = async () => {
         setBusy(true)
         try {
-          const value = await api('chat.send', { projectId, items, allowContinue, multiAgent, newSession: target === 'new', dryRun: true })
+          const value = await api('chat.send', { ...buildPayload(), dryRun: true })
           setPreview(value.prompt)
         } catch (error) {
           window.alert(`生成预览失败：${error.message}`)
@@ -2308,17 +5080,25 @@ window.__ModuleLoader__.load({
                       h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
                     h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '清单补充（可选；会随清单发给 AI，和提案卡上的作者意见分开）…', onChange: (value) => onNote(item, value) })))),
             h('div', { className: 'sd-send-options' },
-              h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'current', onChange: () => setTarget('current') }), '发送到当前对话并执行'),
-              h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'new', onChange: () => setTarget('new') }), '在本工作区新开对话并执行'),
-              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
-              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: multiAgent, onChange: (e) => setMultiAgent(e.target.checked) }), '按分工派子 Agent（总编拆单 / 多角色执行）')),
+              h('label', { className: 'sd-target-row' }, h('span', { className: 'sd-hint' }, '发送到'),
+                h('select', { className: 'sd-input sd-select-inline sd-target-select', value: target || '__new__', onChange: (e) => setTarget(e.target.value) },
+                  targets.map((session) => h('option', { key: session.sessionId, value: session.sessionId },
+                    `${session.sessionId === currentSession ? '🌀 当前 · ' : ''}${targetLabel(session)} · ${relativeTime(session.updatedAt)}${session.running ? ' · 运行中' : ''}`)),
+                  h('option', { value: '__new__' }, '＋ 在本工作区新开对话'))),
+              h('p', { className: 'sd-hint' }, isNewTarget ? '会新开一个对话并在里面执行，不影响你正在用的对话。' : `会发到你选中的「${chosenLabel || '会话'}」，不会改到别的对话。`),
+              reviewOnly ? h('div', null,
+                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'proposals', onChange: () => setReviewMode('proposals') }), '这批审稿项：批量生成修订提案（逐条出一个 chapter 提案，正文不直接改）'),
+                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'generic', onChange: () => setReviewMode('generic') }), '按普通清单处理（交对话逐项处理）')) : null,
+              toProposals ? h('span', { className: 'sd-hint' }, '提案会进「提案」页等你验收；这条链路不做多 Agent 派单。') : h('div', null,
+                h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
+                h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: multiAgent, onChange: (e) => setMultiAgent(e.target.checked) }), '按分工派子 Agent（总编拆单 / 多角色执行）'))),
             h('div', { className: 'sd-form-actions' },
               h(Btn, { onClick: showPreview, disabled: busy || items.length === 0 }, busy ? '生成中…' : '预览发过去的 Prompt')),
             preview ? h('pre', { className: 'sd-ai-result' }, preview) : null,
           ),
           h('div', { className: 'sd-modal-foot' },
             h(Btn, { onClick: () => !sending && onClose() }, '取消'),
-            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target, multiAgent), disabled: sending || items.length === 0 }, sending ? '发送中…' : (target === 'new' ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到当前对话`)))),
+            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target, multiAgent, reviewOnly ? reviewMode : 'generic'), disabled: sending || items.length === 0 }, sending ? '发送中…' : (isNewTarget ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到「${chosenLabel || '会话'}」`)))),
       )
     }
 
@@ -2496,6 +5276,8 @@ window.__ModuleLoader__.load({
       const [cart, setCart] = useState([])
       const [cartOpen, setCartOpen] = useState(false)
       const [sendingCart, setSendingCart] = useState(false)
+      const [focusLocation, setFocusLocation] = useState(null)
+      const [pipelineWizard, setPipelineWizard] = useState(null)
       const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
       const saveCart = (next) => {
         setCart(next)
@@ -2512,11 +5294,23 @@ window.__ModuleLoader__.load({
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
-      const sendCart = async (allowContinue, target = 'current', multiAgent = true) => {
+      // 章节地图 → 世界页联动：切页 + 带 token 的 focusLocation，重复点同一地点也能重新高亮。
+      const focusWorldLocation = (name) => {
+        setFocusLocation({ name: String(name ?? ''), token: Date.now() })
+        setTab('world')
+      }
+      const sendCart = async (allowContinue, target = '__new__', multiAgent = true, reviewMode = 'generic') => {
         if (cart.length === 0) return
+        const reviewOnly = cart.every((item) => item.kind === 'review' && item.id)
+        const toProposals = reviewOnly && reviewMode === 'proposals'
+        const isNewTarget = !target || target === '__new__'
+        const targetPayload = isNewTarget ? { newSession: true } : { sessionId: target }
         setSendingCart(true)
         try {
-          await sendToChat({ projectId, items: cart, allowContinue, multiAgent, newSession: target === 'new' })
+          await sendToChat(toProposals
+            ? { projectId, task: 'review-to-proposals', items: cart, ...targetPayload }
+            : { projectId, items: cart, allowContinue, multiAgent, ...targetPayload })
+          if (!isNewTarget) window.localStorage.setItem(`sd.cartSession.${projectId}`, target)
           saveCart([])
           setCartOpen(false)
         } catch (error) {
@@ -2631,25 +5425,52 @@ window.__ModuleLoader__.load({
                   h(Btn, { onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
                 ),
               )
-            : h('div', { className: 'sd-body' },
-                h('nav', { className: 'sd-nav' }, TABS.map((t) => h('button', { key: t.id, type: 'button', className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`, onClick: () => setTab(t.id) }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label)))),
+            : h(React.Fragment, null,
+                h('div', { className: 'sd-principle-bar' },
+                  h('div', { className: 'sd-principle-main' },
+                    h('span', { className: 'sd-principle-slogan' }, PRINCIPLE_SLOGAN),
+                    h('span', { className: 'sd-principle-sub' }, PRINCIPLE_SUB)),
+                  h('span', { className: 'sd-principle-hint' }, PRINCIPLE_HINT)),
+                h('div', { className: 'sd-body' },
+                h(Nav, { tab, onPick: setTab }),
                 h('main', { className: 'sd-main' },
-                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, cartCount: cart.length, onOpenCart: () => setCartOpen(true) }) : null,
+                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, cartCount: cart.length, onOpenCart: () => setCartOpen(true), onGoTab: setTab }) : null,
+                  tab === 'attention' ? h(AttentionTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onAddCart: addCart }) : null,
                   tab === 'dashboard' ? h(DashboardTab, { bundle, projectId }) : null,
+                  tab === 'pipeline' ? h(PipelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onOpenWizard: () => setPipelineWizard({}) }) : null,
                   tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
-                  tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
+                  tab === 'map' ? h(ChapterMapTab, { bundle, projectId, onGoTab: setTab, onFocusLocation: focusWorldLocation }) : null,
+                  tab === 'world' ? h(WorldTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, focusLocation }) : null,
+                  tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab }) : null,
                   ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'agents'].includes(tab)
                     ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart })
                     : null,
                   tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
                   tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
-                  tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
+                  tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onGoTab: setTab, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'settings' ? h(SettingsTab, { bundle, projectId, onChanged: () => refresh(projectId), onProjectDeleted: () => { setProjectId(''); refresh('') } }) : null,
                 ),
               ),
-          creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
-          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: 'current', onClose: () => setCartOpen(false), onSend: sendCart }) : null,
+              ),
+          creating ? h(CreateProjectDialog, {
+            onClose: () => setCreating(false),
+            onCreated: (id, options) => {
+              setTab(options?.openPipeline ? 'pipeline' : 'overview')
+              refresh(id)
+              if (options?.openPipeline) setPipelineWizard({ prefill: options.prefill ?? null, projectId: id })
+            },
+          }) : null,
+          pipelineWizard && (!pipelineWizard.projectId || String(bundle?.project?.id ?? '') === String(pipelineWizard.projectId))
+            ? h(PipelineWizard, {
+                bundle,
+                projectId,
+                prefill: pipelineWizard.prefill ?? null,
+                onClose: () => setPipelineWizard(null),
+                onFinished: () => { setPipelineWizard(null); refresh(projectId) },
+              })
+            : null,
+          cartOpen ? h(CartDialog, { items: cart, projectId, workspacePath: bundle?.project?.workspacePath || '', sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: 'current', onClose: () => setCartOpen(false), onSend: sendCart }) : null,
           importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) }, onAddCart: addCart, onOpenCart: () => setCartOpen(true) }) : null,
         ),
       )
@@ -2719,6 +5540,7 @@ window.__ModuleLoader__.load({
 .sd-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden}
 .sd-row{display:grid;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
 .sd-row:last-child{border-bottom:0}
+.sd-row-done{opacity:.6}
 .sd-row-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
 .sd-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sd-row-actions{display:flex;gap:6px;justify-content:flex-end}
@@ -2808,12 +5630,16 @@ window.__ModuleLoader__.load({
 .sd-toggle-active{background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
 .sd-bulkbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
 .sd-bulkbar-actions{display:flex;gap:8px;margin-left:auto}
+.sd-notice{margin:8px 0;padding:7px 12px;border-radius:8px;font-size:12px;color:var(--dsw-alias-state-success-primary,#1e8449);border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 8%,transparent)}
 .sd-cb{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;white-space:nowrap}
 .sd-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
 .sd-cb-only{padding:0}
 .sd-row-cb{display:flex;align-items:center;justify-content:center}
 .sd-row-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
 .sd-select-inline{width:auto;min-width:110px}
+.sd-target-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
+.sd-target-select{min-width:260px;max-width:420px}
+@media (max-width:760px){.sd-target-select{width:100%;max-width:none}}
 .sd-export-select{width:auto;min-width:96px;padding:4px 6px;font-size:11px}
 .sd-inline-row{display:flex;gap:8px;align-items:center}
 .sd-inline-row .sd-input{flex:1}
@@ -2937,6 +5763,512 @@ window.__ModuleLoader__.load({
 .sd-picker-row:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
 .sd-picker-icon{width:16px;flex:0 0 16px}
 .sd-picker-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 零上下文首读：第 10 个角色「独立审稿人」高亮卡 */
+.sd-fresh{position:relative;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);border-left:4px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:12px;padding:14px 16px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent),transparent 68%),var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:9px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.sd-fresh-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sd-fresh-badge{display:inline-flex;align-items:center;gap:4px;padding:1px 9px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap;color:var(--dsw-alias-brand-primary,#247bbf);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 13%,transparent)}
+.sd-fresh-title{font-size:14px;letter-spacing:.2px}
+.sd-fresh-rank{margin-left:auto;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-fresh-desc{margin:0;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary,#555);max-width:860px}
+.sd-fresh-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-fresh-pick{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%}
+.sd-fresh-pick-label{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-fresh-select{width:auto;min-width:220px;max-width:360px}
+.sd-fresh-compact{flex-direction:row;align-items:center;gap:10px 12px;flex-wrap:wrap;padding:9px 14px;border-left-width:3px}
+.sd-fresh-compact-text{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;flex:1;min-width:0;font-size:12px}
+.sd-fresh-compact .sd-btn{margin-left:0}
+.sd-fresh-compact .sd-btn:first-of-type{margin-left:auto}
+/* v0.6：侧边栏分组 */
+.sd-nav-group{padding:12px 10px 3px;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--dsw-alias-label-tertiary,#999);line-height:1.4;user-select:none;cursor:default}
+.sd-nav > .sd-nav-group:first-of-type{padding-top:4px}
+.sd-nav-item + .sd-nav-group{margin-top:2px;border-top:1px solid var(--dsw-alias-border-l2,#ececec)}
+.sd-row-hi{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 6%,transparent)}
+.sd-weight{display:inline-block;min-width:20px;padding:0 5px;border-radius:999px;font-size:11px;line-height:17px;text-align:center;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#666)}
+.sd-weight-hi{color:var(--dsw-alias-brand-primary,#247bbf);font-weight:700;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 15%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent)}
+.sd-tag-success{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent)}
+.sd-tag-warn{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent)}
+.sd-tag-error{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
+/* 事实账本：按主体合并视图 */
+.sd-facts-wrap{display:flex;flex-direction:column;gap:10px}
+.sd-facts-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-facts-search{max-width:320px}
+.sd-facts-toolbar-actions{margin-left:auto;display:flex;gap:8px}
+.sd-facts-group{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-facts-group-conflict{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
+.sd-facts-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12.5px;text-align:left;color:var(--dsw-alias-label-primary,#111)}
+.sd-facts-head:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
+.sd-facts-caret{width:12px;flex:0 0 12px;opacity:.7}
+.sd-facts-subject{font-weight:600}
+.sd-facts-head-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap}
+.sd-facts-body{padding:6px 12px 10px;border-top:1px solid var(--dsw-alias-border-l2,#eee)}
+.sd-facts-attr{margin-top:8px}
+.sd-facts-attr-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
+.sd-facts-attr-name{font-weight:600}
+.sd-facts-rows{margin-top:2px;display:flex;flex-direction:column}
+.sd-facts-row{display:grid;grid-template-columns:1.3fr 80px 100px 1.5fr 110px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
+.sd-facts-row:last-child{border-bottom:0}
+.sd-facts-value{font-weight:500;overflow-wrap:anywhere}
+.sd-facts-chapter,.sd-facts-range{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px;white-space:nowrap}
+.sd-facts-note{color:var(--dsw-alias-label-tertiary,#888);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-facts-actions{display:flex;gap:6px;justify-content:flex-end}
+.sd-facts-group-actions{margin-top:8px}
+@media (max-width:900px){.sd-facts-row{grid-template-columns:1fr 70px 80px;}.sd-facts-note,.sd-facts-actions{grid-column:1 / -1;}.sd-facts-actions{justify-content:flex-start}}
+
+/* v0.6：⚡ 注意力页 */
+.sd-att-guide{margin:6px 0 0;padding:6px 10px;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:11.5px;line-height:1.65}
+.sd-att-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.sd-att-stat{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);min-width:0}
+.sd-att-stat-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-att-stat-big{margin-top:2px;font-size:26px;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums}
+.sd-att-stat-list{display:flex;flex-direction:column;gap:2px;margin-top:4px;font-size:12px}
+.sd-att-lowrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sd-att-lowscore{font-variant-numeric:tabular-nums;font-weight:600}
+.sd-att-warns{display:flex;flex-direction:column;gap:4px}
+.sd-att-warn{padding:6px 10px;border-radius:8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent);color:var(--dsw-alias-label-primary,#333);font-size:11.5px;line-height:1.55}
+.sd-att-tone-low{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-att-tone-mid{color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-att-tone-ok{color:var(--dsw-alias-label-primary,#222)}
+.sd-att-tone-top{color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-att-tone-missing{color:var(--dsw-alias-label-tertiary,#888);font-size:13px;font-weight:400}
+.sd-att-chart{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);padding:10px 12px}
+.sd-att-chart-scroll{overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
+.sd-att-chart-svg{display:block;max-width:none}
+.sd-att-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-att-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.sd-att-swatch{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--att-color,#8a8a8a);flex:0 0 auto}
+.sd-att-legend-dash{display:inline-block;width:18px;border-top:2px dashed var(--dsw-alias-label-secondary,#888)}
+.sd-att-legend-risk{display:inline-block;width:10px;height:10px;border-radius:50%;border:2px solid var(--dsw-alias-state-error-primary,#c0392b);box-sizing:border-box}
+.sd-att-grid{stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1;stroke-dasharray:2 4}
+.sd-att-axis-label{font-size:9.5px;fill:var(--dsw-alias-label-tertiary,#999);font-variant-numeric:tabular-nums}
+.sd-att-score-line{fill:none;stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;opacity:.85}
+.sd-att-design-line{fill:none;stroke:var(--dsw-alias-label-secondary,#888);stroke-width:1.3;stroke-dasharray:5 4;opacity:.75}
+.sd-att-dot{fill:var(--att-color,#247bbf);stroke:var(--dsw-alias-bg-base,#fff);stroke-width:1.2;cursor:pointer}
+.sd-att-dot:hover{stroke:var(--dsw-alias-label-primary,#222);stroke-width:2}
+.sd-att-dot-risk{stroke:var(--dsw-alias-state-error-primary,#c0392b);stroke-width:2.2}
+.sd-att-design-dot{fill:var(--dsw-alias-bg-base,#fff);stroke:var(--dsw-alias-label-secondary,#888);stroke-width:1;opacity:.8}
+.sd-att-c-event{--att-color:#247bbf}
+.sd-att-c-emotion{--att-color:#e0567b}
+.sd-att-c-language{--att-color:#8a6fd1}
+.sd-att-c-mystery{--att-color:#d68910}
+.sd-att-c-relationship{--att-color:#1e8449}
+.sd-att-type{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--att-color,#888) 45%,transparent);background:color-mix(in srgb,var(--att-color,#888) 12%,transparent);color:var(--dsw-alias-label-primary,#333);font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap}
+.sd-att-cards{display:flex;flex-direction:column;gap:10px}
+.sd-att-card{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:9px;scroll-margin-top:12px}
+.sd-att-card:target{border-color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-att-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sd-att-chapter{font-size:13.5px;font-weight:700;display:inline-flex;align-items:baseline;gap:8px}
+.sd-att-chapter-title{font-weight:400;font-size:12px;color:var(--dsw-alias-label-secondary,#666);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-att-score{font-size:20px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.sd-att-score-unit{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#999);margin-left:1px}
+.sd-att-design,.sd-att-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-att-gap{font-size:11px;font-weight:600;padding:0 6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);color:var(--dsw-alias-state-warn-primary,#d68910);font-variant-numeric:tabular-nums}
+.sd-att-gap-bad{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 40%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-att-card-actions{margin-left:auto;display:flex;gap:6px}
+.sd-att-drop{font-size:12px;line-height:1.6;padding:6px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 9%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 28%,transparent);display:flex;gap:8px;align-items:baseline}
+.sd-att-drop strong{color:var(--dsw-alias-state-error-primary,#c0392b);font-size:11px;white-space:nowrap}
+.sd-att-beats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
+.sd-att-beat{padding:8px 10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l2,#eee);min-width:0}
+.sd-att-beat-label{font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:3px}
+.sd-att-beat-text{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
+.sd-att-beat-empty{color:var(--dsw-alias-label-tertiary,#999)}
+.sd-att-emotion,.sd-att-question{display:flex;gap:8px;align-items:baseline;font-size:12px;line-height:1.65}
+.sd-att-emotion strong,.sd-att-question strong{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-att-detail{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
+.sd-att-detail summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
+.sd-att-detail-body{margin-top:6px;white-space:pre-wrap;font-size:12px;line-height:1.75;color:var(--dsw-alias-label-primary,#333);background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-radius:8px;padding:8px 10px;max-height:320px;overflow:auto}
+.sd-att-aggs{display:flex;flex-direction:column;gap:2px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
+.sd-att-agg>summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,#555);padding:3px 0;list-style:none;display:flex;align-items:center;gap:6px}
+.sd-att-agg>summary::-webkit-details-marker{display:none}
+.sd-att-agg>summary:before{content:"▸";font-size:10px;color:var(--dsw-alias-label-tertiary,#999)}
+.sd-att-agg[open]>summary:before{content:"▾"}
+.sd-att-agg-body{padding:4px 0 6px 18px;display:flex;flex-direction:column;gap:4px}
+.sd-att-agg-row{display:flex;gap:10px;align-items:baseline;font-size:12px;line-height:1.55}
+.sd-att-agg-title{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
+.sd-att-agg-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-att-agg-actions{margin-top:2px}
+.sd-att-unmarked-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px}
+.sd-att-unmarked{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fafafa);scroll-margin-top:12px}
+.sd-att-unmarked-main{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.sd-att-unmarked-ch{font-size:11px;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
+.sd-att-unmarked-title{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-att-unmarked-tag{font-size:10.5px;color:var(--dsw-alias-state-warn-primary,#d68910)}
+/* 设计 / 实测闭环状态徽章（任务 6） */
+.sd-att-state{display:inline-flex;align-items:center;gap:4px;padding:0 7px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap;border:1px solid transparent}
+.sd-att-state:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
+.sd-att-state-closed{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-att-state-waiting{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
+.sd-att-state-nodesign{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
+.sd-att-state-blank{color:var(--dsw-alias-label-tertiary,#888);border-color:var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4)}
+.sd-att-design-hint{font-size:10.5px;line-height:1.45;color:var(--dsw-alias-label-tertiary,#888);max-width:100%}
+.sd-att-ov-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.sd-att-ov-head{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
+.sd-att-ov-title{margin:0}
+.sd-att-ov{display:grid;grid-template-columns:auto repeat(3,minmax(0,1fr));gap:16px;align-items:start;margin-top:6px}
+.sd-att-ov-bigwrap{display:flex;flex-direction:column;gap:2px;padding-right:16px;border-right:1px solid var(--dsw-alias-border-l2,#eee)}
+.sd-att-ov-big{font-size:38px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+.sd-att-ov-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-att-ov-mini{display:flex;flex-direction:column;gap:3px;min-width:0;font-size:12px}
+.sd-att-ov-mini-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-att-ov-num{font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
+.sd-att-ov-row{display:flex;justify-content:space-between;gap:8px}
+/* v0.6：人物详情弹窗 */
+.sd-modal-head .sd-char-name{flex:0 0 auto;font-size:14px}
+.sd-char-actions{display:flex;align-items:center;gap:6px;margin-left:auto}
+.sd-char-body{display:flex;flex-direction:column;gap:12px}
+.sd-char-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
+.sd-char-section:first-child{border-top:0;padding-top:0}
+.sd-char-section-title{margin:0 0 8px;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
+.sd-char-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 14px}
+.sd-char-field{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sd-char-field-wide{margin-top:8px}
+.sd-char-field-label{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-char-field-value{font-size:12.5px;line-height:1.65;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
+.sd-char-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.sd-char-chips{display:flex;flex-wrap:wrap;gap:6px}
+.sd-char-chip{font-size:11px;line-height:20px;padding:0 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#555);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.sd-char-row{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
+.sd-char-row:last-child{border-bottom:0}
+.sd-char-row-main{flex:1;min-width:0;color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-char-row-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-char-fact-group{margin-top:6px}
+.sd-char-fact-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
+.sd-char-fact-row{display:flex;align-items:baseline;gap:10px;padding:3px 0 3px 12px;font-size:12px;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee)}
+.sd-char-fact-row:last-child{border-bottom:0}
+.sd-char-fact-value{flex:1;min-width:0;overflow-wrap:anywhere}
+.sd-char-fact-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+
+/* v0.6：人物重要性配色 / 卡片视图 / 人物详情卡 */
+.sd-char-role-protagonist{--char-role-color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-char-role-antagonist{--char-role-color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-char-role-supporting{--char-role-color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-char-role-minor{--char-role-color:var(--dsw-alias-label-secondary,#666)}
+.sd-char-role-other{--char-role-color:var(--dsw-alias-label-tertiary,#999)}
+.sd-charcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.sd-char-card{position:relative;display:flex;flex-direction:column;gap:8px;align-items:stretch;text-align:left;padding:14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-top:3px solid var(--char-role-color,#8a8a8a);border-radius:13px;background:linear-gradient(160deg,color-mix(in srgb,var(--char-role-color,#8a8a8a) 13%,transparent),transparent 58%),var(--dsw-alias-bg-layer-1,#fcfcfc);box-shadow:0 1px 2px rgba(0,0,0,.05);color:var(--dsw-alias-label-primary,#111);font:inherit;cursor:pointer;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease;min-width:0}
+.sd-char-card:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,.16);border-color:color-mix(in srgb,var(--char-role-color,#8a8a8a) 55%,var(--dsw-alias-border-l2,#e2e2e2))}
+.sd-char-card:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#247bbf);outline-offset:2px}
+.sd-char-card-head{display:flex;align-items:center;gap:10px;min-width:0}
+.sd-char-card-avatar{width:44px;height:44px;flex:0 0 auto;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:var(--char-role-color,#8a8a8a);background:radial-gradient(circle at 30% 25%,color-mix(in srgb,var(--char-role-color,#8a8a8a) 34%,transparent),color-mix(in srgb,var(--char-role-color,#8a8a8a) 10%,transparent));border:1.5px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 60%,transparent)}
+.sd-char-card-ident{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+.sd-char-card-name{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-char-card-role{font-size:11px;color:var(--char-role-color,#8a8a8a);font-weight:600}
+.sd-char-card-att{font-size:12px;font-weight:700;color:var(--dsw-alias-brand-primary,#247bbf);white-space:nowrap}
+.sd-char-card-att-empty{color:var(--dsw-alias-label-tertiary,#999);font-weight:400}
+.sd-char-card-tags{display:flex;flex-wrap:wrap;gap:4px}
+.sd-char-card-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-secondary,#666);border-top:1px dashed var(--dsw-alias-border-l2,#eee);padding-top:7px}
+.sd-char-card-rel{display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:11px;min-width:0}
+.sd-char-card-rel-label{color:var(--dsw-alias-label-tertiary,#888);font-size:10.5px;margin-right:2px}
+.sd-char-detail{overflow:hidden}
+.sd-char-detail-head{display:flex;align-items:center;gap:14px;padding:16px 18px 14px;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);box-shadow:inset 0 1px 0 rgba(255,255,255,.05);background:linear-gradient(150deg,color-mix(in srgb,var(--char-role-color,#8a8a8a) 16%,transparent),transparent 62%),var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-char-avatar-lg{width:72px;height:72px;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;color:var(--char-role-color,#8a8a8a);background:radial-gradient(circle at 30% 25%,color-mix(in srgb,var(--char-role-color,#8a8a8a) 38%,transparent),color-mix(in srgb,var(--char-role-color,#8a8a8a) 10%,transparent));border:2px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 65%,transparent);box-shadow:0 0 22px color-mix(in srgb,var(--char-role-color,#8a8a8a) 20%,transparent)}
+.sd-char-detail-ident{flex:1;min-width:180px;display:flex;flex-direction:column;gap:6px}
+.sd-char-detail-name{font-size:20px;font-weight:700;letter-spacing:.02em}
+.sd-char-detail-badges{display:flex;flex-wrap:wrap;gap:4px}
+.sd-char-detail-meta{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-char-detail-meta-item{white-space:nowrap}
+.sd-char-role-badge{display:inline-block;padding:0 8px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;color:var(--char-role-color,#8a8a8a);border:1px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 50%,transparent);background:color-mix(in srgb,var(--char-role-color,#8a8a8a) 12%,transparent)}
+.sd-char-detail-actions{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
+.sd-char-numbers{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--dsw-alias-border-l2,#e8e8e8);border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5)}
+.sd-char-number{padding:10px 8px;text-align:center;background:var(--dsw-alias-bg-base,#fff);min-width:0}
+.sd-char-number-value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111);line-height:1.2}
+.sd-char-number-unit{font-size:10.5px;font-weight:400;color:var(--dsw-alias-label-tertiary,#999);margin-left:1px}
+.sd-char-number-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-char-detail-cols{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:16px;align-items:start}
+.sd-char-col{display:flex;flex-direction:column;gap:10px;min-width:0}
+.sd-char-basic-field{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f6f6)}
+@media (max-width:760px){.sd-char-numbers{grid-template-columns:repeat(2,minmax(0,1fr))}.sd-char-detail-cols{grid-template-columns:1fr}.sd-char-detail-name{font-size:17px}.sd-char-detail-actions{margin-left:0}}
+
+/* v0.6：冲突按参与方 / 伏笔按回收段（与事实账本同一套合并视图样式） */
+.sd-conf-wrap,.sd-fore-wrap{display:flex;flex-direction:column;gap:10px}
+.sd-conf-toolbar,.sd-fore-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-conf-search,.sd-fore-search{max-width:340px}
+.sd-conf-toolbar-actions,.sd-fore-toolbar-actions{margin-left:auto;display:flex;gap:8px}
+.sd-conf-group,.sd-fore-group{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-conf-head,.sd-fore-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12.5px;text-align:left;color:var(--dsw-alias-label-primary,#111)}
+.sd-conf-head:hover,.sd-fore-head:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
+.sd-conf-caret,.sd-fore-caret{width:12px;flex:0 0 12px;opacity:.7}
+.sd-conf-parties,.sd-fore-arc{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-conf-head-hint,.sd-fore-head-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap}
+.sd-conf-body,.sd-fore-body{padding:6px 12px 10px;border-top:1px solid var(--dsw-alias-border-l2,#eee);display:flex;flex-direction:column;gap:6px}
+.sd-conf-row,.sd-fore-row{padding:7px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee)}
+.sd-conf-row:last-child,.sd-fore-row:last-child{border-bottom:0}
+.sd-conf-row-head,.sd-fore-row-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sd-conf-title,.sd-fore-title{font-size:12.5px}
+.sd-conf-actions,.sd-fore-actions{margin-left:auto;display:flex;gap:6px}
+.sd-conf-line{display:flex;gap:8px;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555);margin-top:3px}
+.sd-conf-line>span:first-child{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-conf-line-note{color:var(--dsw-alias-label-tertiary,#888)}
+.sd-fore-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-fore-text{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-fore-note{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* v0.6：时间线全景 */
+.sd-pano-wrap{display:flex;flex-direction:column;gap:10px}
+.sd-pano-toolbar{display:flex;align-items:center;gap:12px 16px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-pano-count{margin-left:auto;white-space:nowrap}
+.sd-pano-cards{display:flex;flex-direction:column;gap:10px}
+.sd-pano-card{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:8px}
+.sd-pano-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-pano-title{border:0;background:transparent;padding:0;font:inherit;font-size:13px;font-weight:700;color:var(--dsw-alias-label-primary,#111);cursor:pointer;text-align:left}
+.sd-pano-title:hover{color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-pano-att{margin-left:auto;font-size:10.5px;line-height:18px;padding:0 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent);color:var(--dsw-alias-brand-primary,#247bbf);white-space:nowrap}
+.sd-pano-att-empty{border-color:var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-tertiary,#888)}
+.sd-pano-sec{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:6px}
+.sd-pano-sec-label{font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:2px}
+.sd-pano-row{display:flex;align-items:baseline;gap:10px;padding:2px 0;font-size:12px;line-height:1.55}
+.sd-pano-row-main{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.sd-pano-row-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+
+/* v0.6：章节地图 🗺️ */
+.sd-map-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.sd-map-stat{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);min-width:0}
+.sd-map-stat-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-map-stat-big{margin-top:2px;font-size:24px;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums}
+.sd-map-stat-hint{margin-top:2px;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-map-stat-cover{grid-column:span 2}
+.sd-map-cover{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 12px;margin-top:4px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-map-legend{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-map-legend-title{font-weight:600;color:var(--dsw-alias-label-primary,#333)}
+.sd-map-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.sd-map-legend-sep{color:var(--dsw-alias-border-l1,#ccc)}
+.sd-map-swatch{display:inline-block;width:9px;height:9px;border-radius:3px;flex:0 0 auto;border:1px solid transparent}
+.sd-map-swatch-draft{background:color-mix(in srgb,var(--dsw-alias-label-tertiary,#999) 55%,transparent)}
+.sd-map-swatch-revised{background:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-map-swatch-final{background:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-map-swatch-planned{background:transparent;border:1px dashed var(--dsw-alias-label-secondary,#777)}
+.sd-map-swatch-att-low{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-map-swatch-att-mid{background:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-map-swatch-att-high{background:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-map-swatch-att-untested{background:var(--dsw-alias-label-secondary,#888)}
+.sd-map-swatch-att-none{background:transparent;border:1px solid var(--dsw-alias-border-l1,#ccc)}
+.sd-map-board{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;padding:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);overflow-x:auto}
+.sd-map-row{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:8px;min-width:640px}
+.sd-map-row-rev{direction:rtl}
+.sd-mapnode{position:relative;direction:ltr;display:flex;flex-direction:column;gap:3px;text-align:left;padding:8px 9px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-left:3px solid var(--dsw-alias-label-tertiary,#999);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#111);font:inherit;cursor:pointer;min-width:0;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease}
+.sd-mapnode:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.14);border-color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-mapnode:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#247bbf);outline-offset:2px}
+.sd-mapnode-status-draft{border-left-color:var(--dsw-alias-label-tertiary,#999)}
+.sd-mapnode-status-revised{border-left-color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-mapnode-status-final{border-left-color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-mapnode-status-planned{border-style:dashed;border-left-style:dashed;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2,#f4f4f4) 55%,transparent)}
+.sd-mapnode-top{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0}
+.sd-mapnode-chapter{font-size:18px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
+.sd-mapnode-att{font-size:10px;font-weight:700;line-height:16px;padding:0 5px;border-radius:999px;border:1px solid transparent;white-space:nowrap}
+.sd-mapnode-att-low{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent)}
+.sd-mapnode-att-mid{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
+.sd-mapnode-att-high{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-mapnode-att-untested{color:var(--dsw-alias-label-secondary,#666);border-color:var(--dsw-alias-border-l2,#ddd)}
+.sd-mapnode-att-none{color:var(--dsw-alias-label-tertiary,#aaa);border-color:var(--dsw-alias-border-l2,#e2e2e2);background:transparent}
+.sd-mapnode-title{font-size:11.5px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.sd-mapnode-meta{display:flex;align-items:center;justify-content:space-between;gap:4px;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-mapnode-words{font-variant-numeric:tabular-nums}
+.sd-mapnode-badges{display:flex;flex-wrap:wrap;gap:3px}
+.sd-mapnode-badge{font-size:9px;line-height:14px;padding:0 4px;border-radius:4px;background:var(--dsw-alias-bg-layer-2,#f0f0f0);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-mapnode-badge-event{color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-mapnode-badge-conflict{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-mapnode-badge-foreshadow{color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-mapnode-badge-highlight{color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-map-detail{overflow:hidden}
+.sd-modal-head .sd-map-detail-title{flex:0 1 auto;font-size:14px}
+.sd-map-detail-head{flex-wrap:wrap;gap:8px}
+.sd-map-detail-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.sd-map-detail-body{display:flex;flex-direction:column;gap:10px}
+.sd-map-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
+.sd-map-section:first-child{border-top:0;padding-top:0}
+.sd-map-section-title{margin:0 0 5px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
+.sd-map-text{font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
+.sd-map-detail-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-map-att{display:flex;flex-direction:column;gap:3px}
+.sd-map-att-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.sd-map-att-score{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
+.sd-map-att-score-low{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-map-att-score-mid{color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-map-att-score-high{color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-map-att-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-map-rowline{display:flex;align-items:baseline;gap:10px;padding:3px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
+.sd-map-rowline:last-child{border-bottom:0}
+.sd-map-rowline-main{flex:1;min-width:0;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
+.sd-map-rowline-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-map-empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#999)}
+
+/* v0.6：🌍 世界 / 地点 / 只读 HTML */
+.sd-world-guide{display:flex;align-items:center;gap:14px;justify-content:space-between;flex-wrap:wrap;padding:12px 14px;border:1px dashed color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);border-radius:11px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fafafa)}
+.sd-world-guide strong{font-size:13px}
+.sd-world-guide p{margin:2px 0 0;max-width:720px}
+.sd-world-guide-actions{display:flex;gap:8px;flex-wrap:wrap}
+.sd-world-settings-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap}
+.sd-world-settings-head .sd-h3{margin:0}
+.sd-world-settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0 14px;margin-top:8px}
+.sd-world-settings-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
+.sd-world-map-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap}
+.sd-world-map-head .sd-h3{margin:0}
+.sd-world-focus-banner{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;margin-top:8px;padding:7px 11px;border-radius:9px;font-size:11.5px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 9%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 30%,transparent);color:var(--dsw-alias-label-primary,#333)}
+.sd-world-focus-banner-warn{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 35%,transparent)}
+.sd-world-map-scroll{margin-top:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);overflow:hidden}
+.sd-world-svg{display:block;width:100%;height:min(70vh,640px);background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-world-map-bg{fill:color-mix(in srgb,var(--dsw-alias-bg-layer-2,#f5f5f5) 55%,transparent);stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1}
+.sd-world-map-empty{display:flex;align-items:center;justify-content:center;min-height:280px;padding:24px;text-align:center;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+.sd-world-edge-line{stroke:var(--dsw-alias-border-l1,#c9c9c9);stroke-width:1.6;fill:none}
+.sd-world-edge-hot .sd-world-edge-line{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.6}
+.sd-world-edge-dim .sd-world-edge-line{opacity:.28}
+.sd-world-edge-label{font-size:11px;fill:var(--dsw-alias-label-tertiary,#888);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;stroke-linejoin:round;text-anchor:middle;pointer-events:none}
+.sd-world-node{cursor:grab}
+.sd-world-node:active{cursor:grabbing}
+.sd-world-node circle{fill:var(--loc-color,#8fa8bd);stroke:var(--dsw-alias-bg-base,#fff);stroke-width:2;transition:stroke-width .12s ease,stroke .12s ease}
+.sd-world-node:hover circle{stroke:var(--dsw-alias-label-primary,#333)}
+.sd-world-node-label{font-size:12px;fill:var(--dsw-alias-label-primary,#222);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;text-anchor:middle;pointer-events:none}
+.sd-world-node-hot circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:3}
+.sd-world-node-adj circle{stroke:var(--dsw-alias-state-warn-primary,#d68910);stroke-width:2.4}
+.sd-world-node-focus circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:3.4}
+.sd-world-node-drag circle{stroke:var(--dsw-alias-state-error-primary,#c0392b);stroke-width:3}
+.sd-world-legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:8px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-world-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.sd-world-legend-swatch{width:9px;height:9px;border-radius:50%;background:var(--loc-color,#8fa8bd);display:inline-block;flex:0 0 auto}
+.sd-loc-type-capital{--loc-color:#c9a227}
+.sd-loc-type-city{--loc-color:#4a8fd4}
+.sd-loc-type-town{--loc-color:#3f9e9a}
+.sd-loc-type-village{--loc-color:#5aa469}
+.sd-loc-type-pass{--loc-color:#c9772f}
+.sd-loc-type-temple{--loc-color:#8a6fd1}
+.sd-loc-type-mountain{--loc-color:#8a7f6d}
+.sd-loc-type-river{--loc-color:#3a9fb8}
+.sd-loc-type-sea{--loc-color:#2f6f9e}
+.sd-loc-type-other{--loc-color:#8a8a8a}
+.sd-world-locations-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
+.sd-world-locations-head .sd-h3{margin:0}
+.sd-loc-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden}
+.sd-loc-row{display:grid;grid-template-columns:minmax(120px,1.4fr) 100px 96px 60px 90px 120px;gap:8px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
+.sd-loc-row:last-child{border-bottom:0}
+.sd-loc-row-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
+.sd-loc-row-focus{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent)}
+.sd-loc-name{border:0;background:transparent;padding:0;font:inherit;font-weight:600;color:var(--dsw-alias-label-primary,#111);cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-loc-name:hover{color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-loc-type,.sd-loc-coords,.sd-loc-connections,.sd-loc-first{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-loc-type{display:flex;align-items:center;gap:5px}
+.sd-loc-dot{width:9px;height:9px;border-radius:50%;background:var(--loc-color,#8fa8bd);display:inline-block;flex:0 0 auto}
+.sd-loc-actions{display:flex;gap:6px;justify-content:flex-end}
+.sd-loc-editor-body{display:flex;flex-direction:column;gap:10px}
+.sd-loc-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 14px}
+.sd-loc-conn-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
+.sd-loc-conn-head .sd-h3{margin:0}
+.sd-loc-conn-list{display:flex;flex-direction:column;gap:6px}
+.sd-loc-conn-row{display:grid;grid-template-columns:minmax(120px,1fr) 100px 84px 92px minmax(90px,1fr) 32px;gap:8px;align-items:center}
+.sd-loc-conn-row .sd-input{padding:5px 7px;font-size:11.5px;min-width:0}
+.sd-htmlview{display:flex;flex-direction:column;max-height:92vh}
+.sd-htmlview-body{flex:1;min-height:0;padding:10px 12px;display:flex}
+.sd-htmlview-frame{flex:1;width:100%;min-height:min(72vh,720px);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
+.sd-htmlview-foot{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sd-create-world{margin-top:14px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:12px}
+.sd-create-world .sd-h3{margin:0 0 8px}
+.sd-create-world-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px}
+.sd-create-world-toggle{margin-top:4px}
+.sd-create-world-hint{margin:6px 0 0}
+.sd-pano-loc{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-pano-location{display:inline-flex;align-items:center;gap:6px}
+.sd-pano-location-select{width:auto;min-width:130px}
+
+/* v0.6：一号原则 ⚡ ATTENTION IS ALL YOU NEED */
+.sd-principle-bar{display:flex;align-items:center;gap:14px;padding:5px 16px;min-height:34px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);background:linear-gradient(90deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 9%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fafafa);font-size:11.5px;line-height:1.4;flex:0 0 auto;overflow:hidden}
+.sd-principle-main{display:flex;align-items:baseline;gap:10px;min-width:0;flex:0 1 auto;overflow:hidden}
+.sd-principle-slogan{font-weight:700;color:var(--dsw-alias-brand-primary,#247bbf);letter-spacing:.02em;white-space:nowrap}
+.sd-principle-sub{color:var(--dsw-alias-label-secondary,#666);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-principle-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-principle-hero{display:grid;grid-template-columns:minmax(220px,1.1fr) minmax(320px,1.4fr);gap:14px 20px;align-items:center;padding:16px 18px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);border-left:4px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:14px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 14%,transparent),transparent 62%),var(--dsw-alias-bg-layer-1,#fcfcfc);box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.sd-principle-hero-main{display:flex;flex-direction:column;gap:4px;min-width:0}
+.sd-principle-hero-slogan{margin:0;font-size:22px;line-height:1.2;font-weight:800;letter-spacing:.02em;color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-principle-hero-sub{margin:0;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#333)}
+.sd-principle-hero-hint{margin:2px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666)}
+.sd-principle-hero-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.sd-principle-hero-stat{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-base,#fff);min-width:0}
+.sd-principle-hero-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-principle-hero-value{margin-top:2px;font-size:22px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
+.sd-principle-hero-value-empty{color:var(--dsw-alias-label-tertiary,#999)}
+.sd-principle-hero-unit{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#888);margin-left:1px}
+.sd-principle-hero-list{display:flex;flex-direction:column;gap:1px;margin-top:2px;font-size:11.5px;font-variant-numeric:tabular-nums}
+.sd-principle-hero-list-item{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-principle-hero-stat-hint{margin-top:3px;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-principle-hero-actions{grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap}
+.sd-principle-inline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:6px 0 0;padding:6px 10px;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:0 7px 7px 0;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent);font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555)}
+.sd-principle-inline strong{color:var(--dsw-alias-brand-primary,#247bbf);font-size:12px;letter-spacing:.02em;white-space:nowrap}
+.sd-principle-inline span{min-width:0}
+
+/* v0.6：📚 整本书流水线 */
+.sd-pipe-status-card{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent),transparent 60%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-pipe-status-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sd-pipe-status-chip{display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;font-size:10.5px;line-height:19px;font-weight:600;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-pipe-status-preparing,.sd-pipe-status-ready{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
+.sd-pipe-status-running,.sd-pipe-status-done{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-pipe-status-paused,.sd-pipe-status-stuck{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
+.sd-pipe-status-aborted{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent)}
+.sd-pipe-status-mode{font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
+.sd-pipe-status-target,.sd-pipe-status-session{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-pipe-status-session{margin-left:auto}
+.sd-pipe-status-meta{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-pipe-actions{display:flex;gap:8px;flex-wrap:wrap}
+.sd-pipe-progress{display:flex;flex-direction:column;gap:4px}
+.sd-pipe-progress-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-pipe-progress-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
+.sd-pipe-progress-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
+.sd-pipe-progress-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-pipe-banner{padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.6;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);background:var(--dsw-alias-bg-layer-1,#fafafa);color:var(--dsw-alias-label-primary,#333)}
+.sd-pipe-banner-done{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
+.sd-pipe-banner-warn{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent)}
+.sd-pipe-banner-danger{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 9%,transparent)}
+.sd-pipe-budget,.sd-pipe-stages,.sd-pipe-notes{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
+.sd-pipe-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.sd-pipe-section-head .sd-h3{margin:0 0 6px}
+.sd-pipe-budget-row{display:grid;grid-template-columns:52px minmax(120px,190px) minmax(0,1fr);gap:10px;align-items:center;font-size:11.5px;margin-top:6px}
+.sd-pipe-budget-label{color:var(--dsw-alias-label-secondary,#666)}
+.sd-pipe-budget-value{color:var(--dsw-alias-label-primary,#333);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sd-pipe-budget-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
+.sd-pipe-budget-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
+.sd-pipe-budget-fill.sd-pipe-budget-warn,.sd-pipe-budget-summary.sd-pipe-budget-warn{background:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-pipe-budget-fill.sd-pipe-budget-danger,.sd-pipe-budget-summary.sd-pipe-budget-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-pipe-budget-summary{margin-top:8px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);padding:4px 8px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#f4f4f4)}
+.sd-pipe-budget-summary.sd-pipe-budget-warn{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 14%,transparent)}
+.sd-pipe-budget-summary.sd-pipe-budget-danger{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 12%,transparent)}
+.sd-pipe-stage-list{display:flex;flex-direction:column;gap:2px}
+.sd-pipe-stage{display:grid;grid-template-columns:22px minmax(120px,1fr) auto auto;gap:8px;align-items:center;padding:5px 8px;border-radius:7px;font-size:12px}
+.sd-pipe-stage-current{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
+.sd-pipe-stage-icon{width:20px;text-align:center;color:var(--dsw-alias-label-tertiary,#999)}
+.sd-pipe-stage-done .sd-pipe-stage-icon{color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-pipe-stage-running .sd-pipe-stage-icon{color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-pipe-stage-failed .sd-pipe-stage-icon{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-pipe-stage-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#333)}
+.sd-pipe-stage-range{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
+.sd-pipe-empty{margin:4px 0 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-pipe-note-list{display:flex;flex-direction:column;gap:2px;max-height:240px;overflow:auto}
+.sd-pipe-note{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:11.5px;line-height:1.55}
+.sd-pipe-note:last-child{border-bottom:0}
+.sd-pipe-note-time{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
+.sd-pipe-note-text{min-width:0;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
+.sd-pipe-prepared-hint{margin:0;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-pipe-wizard-body{display:flex;flex-direction:column;gap:14px}
+.sd-pipe-wizard-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
+.sd-pipe-wizard-section:first-child{border-top:0;padding-top:0}
+.sd-pipe-wizard-section .sd-h3{margin:0 0 8px}
+.sd-pipe-wizard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 14px}
+.sd-pipe-wizard-hint{margin:6px 0 0}
+.sd-pipe-wizard-total{display:flex;gap:8px 14px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-pipe-wizard-warn{margin:8px 0 0;padding:6px 10px;border-radius:8px;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-primary,#333);border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
+.sd-pipe-wizard-state{display:flex;flex-direction:column;gap:2px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
+.sd-pipe-wizard-actions{flex-wrap:wrap;gap:8px}
+.sd-pipe-overview{display:flex;flex-direction:column;gap:6px}
+.sd-pipe-overview-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.sd-pipe-overview-head .sd-h3{margin:0}
+.sd-pipe-overview-head .sd-btn{margin-left:auto}
+.sd-pipe-overview-metrics{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
+@media (max-width:760px){.sd-pipe-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-pipe-budget-bar{grid-column:1/-1}.sd-pipe-stage{grid-template-columns:20px minmax(80px,1fr) auto}.sd-pipe-stage-range{display:none}.sd-pipe-actions .sd-btn{flex:1 1 auto}.sd-pipe-overview-head .sd-btn{margin-left:0}.sd-pipe-status-session{margin-left:0}}
+@media (max-width:900px){.sd-principle-bar .sd-principle-hint{display:none}.sd-principle-hero{grid-template-columns:1fr}.sd-principle-hero-actions{grid-column:auto}}
+@media (max-width:760px){.sd-principle-bar .sd-principle-sub{display:none}.sd-principle-hero{padding:12px 14px}.sd-principle-hero-slogan{font-size:18px}.sd-principle-hero-stats{grid-template-columns:1fr 1fr}.sd-principle-inline{gap:4px}}
+@media (max-width:900px){.sd-loc-row{grid-template-columns:minmax(100px,1.2fr) 90px 60px 120px}.sd-loc-row>:nth-child(3),.sd-loc-row>:nth-child(5){display:none}.sd-loc-conn-row{grid-template-columns:minmax(100px,1fr) 88px 70px 84px}.sd-loc-conn-row>:nth-child(5){display:none}.sd-world-svg{height:min(62vh,520px)}}
+@media (max-width:760px){.sd-loc-row{grid-template-columns:minmax(80px,1fr) 84px 110px}.sd-loc-row>:nth-child(3),.sd-loc-row>:nth-child(4),.sd-loc-row>:nth-child(5){display:none}.sd-loc-conn-row{grid-template-columns:1fr 1fr}.sd-loc-conn-row>:nth-child(5){display:block}.sd-world-settings-grid{grid-template-columns:1fr 1fr}.sd-world-svg{height:min(58vh,440px)}}
+@media (max-width:900px){.sd-map-row{grid-template-columns:repeat(6,minmax(0,1fr));min-width:0}.sd-map-stat-cover{grid-column:span 1}.sd-map-cover{grid-template-columns:1fr}}
+@media (max-width:760px){.sd-mapnode-chapter{font-size:16px}.sd-map-board{padding:8px}.sd-map-row{gap:6px}.sd-map-legend{gap:6px 10px}}
+@media (max-width:760px){.sd-char-row,.sd-char-fact-row,.sd-pano-row{flex-direction:column;gap:2px;align-items:flex-start}.sd-conf-actions,.sd-fore-actions{margin-left:0;width:100%;justify-content:flex-start}.sd-pano-att{margin-left:0}}
+@media (max-width: 900px){.sd-att-ov{grid-template-columns:1fr 1fr}.sd-att-ov-bigwrap{grid-column:1/-1;border-right:0;padding-right:0;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);padding-bottom:8px}}
+@media (max-width: 760px){.sd-att-ov{grid-template-columns:1fr}.sd-att-card-actions{margin-left:0}}
+@media (max-width: 760px){.sd-fresh-actions{flex-direction:column;align-items:stretch}.sd-fresh-pick{flex-direction:column;align-items:flex-start}.sd-fresh-select{width:100%;max-width:none}.sd-fresh-compact .sd-btn{margin-left:0;width:100%}}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
