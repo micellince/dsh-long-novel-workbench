@@ -873,7 +873,27 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     lines.push('', '执行方式：先由总编拆单，按任务相关性派给对应角色；可用 subagent 工具（有 Team 能力更好）让每个子 Agent 只做一个维度，各自把审稿/提案写回工作台，最后由责任编辑汇总、按严重度排序。不要只用一个 Agent 从头做到尾；如果宿主没有 subagent 工具，就按角色顺序逐个执行并在结果里标明角色。')
   }
   const tasks = new Set(items.map((item) => item.task).filter(Boolean))
-  if (tasks.has('full-review')) lines.push('', '任务：从头审阅整个项目。先用 novel_desk_bundle / novel_desk_context 读取项目，再逐章检查人物、时间线、事实、伏笔、大纲、文风与连续性；问题写审稿（novel_desk_review），需要补设定/改正文的提交提案（novel_desk_propose）。按 blocker → major → minor 排序。')
+  const activePreset = (bundle.presets ?? []).find((preset) => preset.id === bundle.project.activePresetId)
+    ?? (bundle.presets ?? []).find((preset) => preset.source === 'import')
+    ?? (bundle.presets ?? [])[0]
+    ?? {}
+  const styleRules = (activePreset.styleRules ?? []).slice(0, 10)
+  const taboo = (activePreset.taboo ?? []).slice(0, 8)
+  const reviewFocus = (activePreset.reviewFocus ?? []).slice(0, 10)
+  if (tasks.has('full-review') || items.some((item) => item.kind === 'review')) {
+    lines.push('', '分角色审阅规范（必须执行，不能只做冲突检查）：')
+    lines.push('1. 连续性审稿：对照事实账本检查年龄、地点、物品、称谓、伤势、门派；每条引用原文。')
+    lines.push('2. 人物审稿：对照人物卡检查动机、性格、关系、弧光；指出“知道不该知道的信息”“行为跳变”。')
+    lines.push('3. 时间线审稿：检查故事时间、事件顺序、因果链、行程可达性。')
+    lines.push('4. 伏笔审稿：检查埋设、回收、超期、道具是否随葬/消失。')
+    lines.push('5. 文笔审稿：逐章检查句式重复、现代词、对话腔调、视角漂移、节奏拖沓、抒情直白、章回收束；必须引用原文句子并给改写建议。')
+    lines.push('6. 责任编辑：汇总去重，按 blocker → major → minor 排序，产出修订单。')
+    if (styleRules.length > 0) lines.push('', '写作预设的风格规则（文笔审稿逐条对照）：', ...styleRules.map((rule) => `- ${rule}`))
+    if (taboo.length > 0) lines.push('预设禁忌（文笔审稿重点找）：', ...taboo.map((rule) => `- ${rule}`))
+    if (reviewFocus.length > 0) lines.push(`预设审稿重点：${reviewFocus.join('、')}`)
+    lines.push('', '每个角色至少写 3 条审稿；确实没问题的维度也要写一条“已检查，无问题”的审稿并说明依据。每条审稿必须带章号、维度、严重度、引用原文、可执行建议；用 novel_desk_review 写入。')
+  }
+  if (tasks.has('full-review')) lines.push('', '任务：从头审阅整个项目。先用 novel_desk_bundle / novel_desk_context 读取项目，再按上面的角色分工逐章检查；问题写审稿（novel_desk_review），需要补设定/改正文的提交提案（novel_desk_propose）。按 blocker → major → minor 排序。')
   if (tasks.has('import-review')) lines.push('', '任务：导入后审阅。先补齐缺失的人物/时间线/大纲（提案），再对照设定核查正文冲突（审稿）。')
   if (String(body.instruction ?? '').trim()) lines.push('', `补充要求：${String(body.instruction).trim()}`)
   if (items.length === 0) lines.push('', `任务：${TASK_LABEL[task] ?? task}`)
