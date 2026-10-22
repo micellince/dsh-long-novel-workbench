@@ -13,7 +13,6 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback, useRef } = React
 
     // ── 全局开关 ──────────────────────────────────────────────
-    let clientCtx = null
     const ui = { open: false, listeners: new Set() }
     function setOpen(value) {
       ui.open = value
@@ -31,13 +30,8 @@ window.__ModuleLoader__.load({
     // ── 工作台 → 对话 交接 ───────────────────────────────────
     async function sendToChat(payload) {
       const value = await api('chat.send', payload)
+      // 消息已经投递到当前对话；只收起工作台，不要再打开/切换会话视图
       setOpen(false)
-      try {
-        const workspace = clientCtx?.get?.('uiWorkspace')
-        if (workspace?.openSession && value?.sessionId) workspace.openSession({ kind: 'session', sessionId: value.sessionId })
-      } catch {
-        // 打不开会话也不影响消息已排队
-      }
       return value
     }
 
@@ -2711,7 +2705,6 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        clientCtx = ctx
         const style = document.createElement('style')
         style.dataset.plugin = 'dsh-story-desk'
         style.textContent = CSS

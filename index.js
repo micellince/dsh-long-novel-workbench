@@ -202,7 +202,10 @@ async function handleRpc(body, ctx) {
       const list = await controller.list({}, AbortSignal.timeout(15000))
       const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
       const sessions = (list.items ?? []).filter((item) => !item.origin && !item.parentSessionId && !item.blank)
-      const preferred = explicit || sessions.find((item) => item.running)
+      const running = sessions.filter((item) => item.running)
+      const preferred = explicit
+        || running.find((item) => rootPath && item.cwd === rootPath)
+        || running[0]
         || sessions.find((item) => rootPath && item.cwd === rootPath)
         || sessions[0]
       if (!preferred) throw new Error('没有可用的对话会话，请先在左侧打开或新建一个对话')
