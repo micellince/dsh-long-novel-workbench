@@ -6,6 +6,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
@@ -249,10 +251,49 @@ async function handleRpc(body, ctx) {
       const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
       const chat = await loadChatUsage(rootPath)
       const context = estimateContext(bundle)
+      const backupCount = await countBackupFiles(root, projectId)
+      const acceptedProposals = (bundle.proposals ?? []).filter((row) => row.status === 'accepted').length
+      const fixedReviews = (bundle.reviews ?? []).filter((row) => row.status === 'fixed').length
+      const chatSpanMs = chat.sessions.reduce((sum, session) => sum + Math.max(0, (session.lastAt || 0) - (session.createdAt || 0)), 0)
+      const days = new Map()
+      const dayOf = (time) => new Date(time).toISOString().slice(0, 10)
+      for (const row of records) {
+        const key = dayOf(row.at)
+        if (!days.has(key)) days.set(key, { date: key, workbenchTokens: 0, chatTokens: 0, aiCalls: 0, chatMessages: 0 })
+        const bucket = days.get(key)
+        bucket.workbenchTokens += Number(row.totalTokens) || 0
+        bucket.aiCalls += 1
+      }
+      for (const session of chat.sessions) {
+        for (const [key, value] of Object.entries(session.days ?? {})) {
+          if (!days.has(key)) days.set(key, { date: key, workbenchTokens: 0, chatTokens: 0, aiCalls: 0, chatMessages: 0 })
+          const bucket = days.get(key)
+          bucket.chatTokens += value.tokens ?? 0
+          bucket.chatMessages += value.messages ?? 0
+        }
+      }
+      const activity = [...days.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-14)
+      const activeDays = activity.filter((row) => row.workbenchTokens + row.chatTokens > 0).length
       return {
         projectId,
         rootPath,
         context,
+        metrics: {
+          words: bundle.stats.words,
+          chapters: bundle.chapters.length,
+          edits: backupCount,
+          reviews: (bundle.reviews ?? []).length,
+          fixedReviews,
+          openReviews: bundle.stats.openReviews,
+          acceptedProposals,
+          pendingProposals: bundle.stats.pendingProposals,
+          imports: imports.length,
+          aiCalls: records.length,
+          activeDays,
+          chatHours: Math.round((chatSpanMs / 3600000) * 10) / 10,
+          aiMinutes: Math.round(((sum(records).durationMs) / 60000) * 10) / 10,
+        },
+        activity,
         workbench: {
           total: sum(records),
           today: sum(records.filter((row) => new Date(row.at).getTime() >= startOfDay.getTime())),
@@ -586,6 +627,15 @@ async function persistImportReview(ctx, root, projectId, bundle) {
   return { proposalIds, counts, reviews: counts.conflicts, errors }
 }
 
+async function countBackupFiles(root, projectId) {
+  try {
+    const entries = await readdir(join(root, 'projects', projectId, '.backups'), { recursive: true, withFileTypes: true })
+    return entries.filter((entry) => entry.isFile()).length
+  } catch {
+    return 0
+  }
+}
+
 const TASK_LABEL = {
   'next-chapter-plan': '生成下一章方案',
   'review-chapter': '审阅一章',
@@ -633,6 +683,7 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
       if (item.chapter) parts.push(`第${item.chapter}章`)
       if (item.title) parts.push(item.title)
       if (item.detail) parts.push(`：${item.detail}`)
+      if (item.note) parts.push(`；作者补充：${item.note}`)
       parts.push(`（id=${item.id}）`)
       lines.push(parts.join(' '))
     })

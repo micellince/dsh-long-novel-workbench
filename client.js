@@ -316,6 +316,7 @@ window.__ModuleLoader__.load({
 
     const TABS = [
       { id: 'overview', label: '总览', icon: '📊' },
+      { id: 'dashboard', label: '仪表盘', icon: '📈' },
       { id: 'chapters', label: '章节', icon: '📄' },
       { id: 'timeline', label: '时间线', icon: '🕰️' },
       { id: 'facts', label: '事实账本', icon: '⚖️' },
@@ -521,11 +522,8 @@ window.__ModuleLoader__.load({
             h(Btn, { onClick: load, disabled: busy }, busy ? '刷新中…' : '刷新'))),
         error ? h('div', { className: 'sd-error sd-error-inline' }, `读取失败：${error}`) : null,
         data ? h('div', null,
-          h('div', { className: 'sd-align-cards' },
-            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '工作台 AI 消耗'), h('div', { className: 'sd-align-value' }, fmt(wb.total.totalTokens)), h('div', { className: 'sd-hint' }, `${wb.total.calls} 次调用 ｜ 今天 ${fmt(wb.today.totalTokens)}`)),
-            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '对话消耗'), h('div', { className: 'sd-align-value' }, fmt(chat.totalTokens)), h('div', { className: 'sd-hint' }, `${chat.sessions.length} 个最近会话`)),
-            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '当前上下文估算'), h('div', { className: 'sd-align-value' }, fmt(data.context.tokens)), h('div', { className: 'sd-hint' }, `${data.context.chars} 字符 ｜ 约 ${data.context.parts.length} 个区块`)),
-            h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '待处理'), h('div', { className: 'sd-align-value' }, `${bundle.stats.pendingProposals} / ${bundle.stats.openReviews}`), h('div', { className: 'sd-hint' }, '提案 / 审稿'))),
+          h(WriterStats, { data }),
+          h('div', { className: 'sd-hint', style: { marginTop: 6 } }, `当前上下文约 ${fmt(data.context.tokens)} token（${data.context.chars} 字符，${data.context.parts.length} 个区块）`),
           h('div', { className: 'sd-dash-grid' },
             h('div', { className: 'sd-section' },
               h('h3', { className: 'sd-h3' }, '上下文构成'),
@@ -817,10 +815,55 @@ window.__ModuleLoader__.load({
     }
 
     // ── 总览页 ────────────────────────────────────────────────
+    function WriterStats({ data }) {
+      if (!data) return h('div', { className: 'sd-hint' }, '正在统计写作数据…')
+      const m = data.metrics ?? {}
+      const wb = data.workbench ?? {}
+      const chat = data.chat ?? {}
+      const fmt = (n) => {
+        const value = Number(n) || 0
+        if (value >= 1000000) return (value / 1000000).toFixed(2) + 'M'
+        if (value >= 10000) return (value / 10000).toFixed(1) + ' 万'
+        return String(value)
+      }
+      const cards = [
+        ['总字数', fmt(m.words), '✍️'],
+        ['修改次数', String(m.edits ?? 0), '🩹'],
+        ['审稿', `${m.reviews ?? 0}`, `待处理 ${m.openReviews ?? 0}`],
+        ['提案采纳', String(m.acceptedProposals ?? 0), `待处理 ${m.pendingProposals ?? 0}`],
+        ['工作台 AI', fmt(wb.total?.totalTokens), `${m.aiCalls ?? 0} 次`],
+        ['对话 token', fmt(chat.totalTokens), `${chat.sessions?.length ?? 0} 个会话`],
+        ['AI 协作', `${m.chatHours ?? 0}h`, `生成 ${m.aiMinutes ?? 0} 分钟`],
+        ['活跃天数', String(m.activeDays ?? 0), '最近 14 天'],
+      ]
+      const activity = data.activity ?? []
+      const max = Math.max(1, ...activity.map((day) => (day.workbenchTokens ?? 0) + (day.chatTokens ?? 0)))
+      return h('div', { className: 'sd-writer-dash' },
+        h('div', { className: 'sd-cards sd-writer-cards' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' },
+          h('div', { className: 'sd-card-icon' }, icon),
+          h('div', { className: 'sd-card-value' }, String(value)),
+          h('div', { className: 'sd-card-label' }, label)))),
+        activity.length > 0 ? h('div', { className: 'sd-activity' },
+          h('div', { className: 'sd-hint' }, '最近 14 天 AI 协作量'),
+          h('div', { className: 'sd-activity-bars' }, activity.map((day) => {
+            const total = (day.workbenchTokens ?? 0) + (day.chatTokens ?? 0)
+            return h('div', { key: day.date, className: 'sd-activity-col', title: `${day.date}：工作台 ${day.workbenchTokens ?? 0} / 对话 ${day.chatTokens ?? 0} token` },
+              h('div', { className: 'sd-activity-bar', style: { height: `${Math.max(4, Math.round((total / max) * 100))}%` } }),
+              h('span', null, day.date.slice(5)))
+          }))) : null,
+      )
+    }
+
     function OverviewTab({ bundle, projectId, onChanged, onAddCart }) {
       const [form, setForm] = useState(() => ({ ...bundle.project }))
       const [busy, setBusy] = useState(false)
+      const [dash, setDash] = useState(null)
       useEffect(() => setForm({ ...bundle.project }), [bundle.project.id])
+      useEffect(() => {
+        let alive = true
+        api('usage.summary', { projectId }).then((value) => { if (alive) setDash(value) }).catch(() => {})
+        return () => { alive = false }
+      }, [projectId])
       const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
       const save = async () => {
         setBusy(true)
@@ -848,8 +891,9 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '📊 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。'))) ,
-        h('div', { className: 'sd-cards' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
+        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。'))),
+        h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
+        h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
         h('div', { className: 'sd-two-col' },
           h('section', { className: 'sd-section' },
             h('h3', { className: 'sd-h3' }, '作品设定'),
@@ -1157,7 +1201,7 @@ window.__ModuleLoader__.load({
             ),
           ) : null,
           h('div', { className: 'sd-proposal-actions' },
-            onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: p.summary ?? '' }) }, '加入清单') : null,
+            onAddCart ? h(Btn, { onClick: () => onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；') }) }, '加入清单') : null,
             h(Btn, { kind: 'primary', onClick: () => act(p, 'accept', p.kind === 'decision' ? (choices[p.id] ?? p.data?.options?.[0]?.id) : undefined), disabled: busy === p.id }, busy === p.id ? '处理中…' : (p.kind === 'decision' ? '采纳所选' : '采纳')),
             h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
             Array.isArray(p.feedback) && p.feedback.length > 0
@@ -1965,7 +2009,7 @@ window.__ModuleLoader__.load({
                   return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
                 }),
                 h('div', { className: 'sd-row-actions' },
-                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'review', id: review.id, chapter: review.chapter, title: (review.issue ?? '').slice(0, 50), detail: review.issue }) }, '加入清单') : null,
+                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'review', id: review.id, chapter: review.chapter, title: (review.issue ?? '').slice(0, 50), detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；') }) }, '加入清单') : null,
                   h(Btn, { small: true, kind: 'primary', disabled: fixing === review.id || review.status === 'fixed' || review.status === 'wontfix', onClick: () => fixWithAi(review) }, fixing === review.id ? '生成中…' : 'AI 修改'),
                   h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
                   h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
@@ -2078,7 +2122,7 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
-    function CartDialog({ items, projectId, sending, onRemove, onClose, onSend }) {
+    function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend }) {
       const [allowContinue, setAllowContinue] = useState(false)
       const [preview, setPreview] = useState('')
       const [busy, setBusy] = useState(false)
@@ -2103,10 +2147,12 @@ window.__ModuleLoader__.load({
             items.length === 0
               ? h(Empty, null, '清单是空的。去「审稿」「提案」「总览的一致性检查」点「加入清单」。')
               : h('div', { className: 'sd-cart-list' },
-                  items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-item' },
-                    h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节' }[item.kind] ?? item.kind),
-                    h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
-                    h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')))),
+                  items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-row' },
+                    h('div', { className: 'sd-cart-item' },
+                      h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节' }[item.kind] ?? item.kind),
+                      h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
+                      h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
+                    h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '给这一项补充你的处理意见（会随清单发给 AI）…', onChange: (value) => onNote(item, value) })))),
             h('label', { className: 'sd-cb', style: { marginTop: 10 } },
               h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }),
               '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
@@ -2295,6 +2341,7 @@ window.__ModuleLoader__.load({
         saveCart([...cart, item])
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
+      const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
       const sendCart = async (allowContinue) => {
         if (cart.length === 0) return
         setSendingCart(true)
@@ -2433,7 +2480,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
-          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
+          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
           importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
           ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
         ),
@@ -2699,6 +2746,15 @@ window.__ModuleLoader__.load({
 .sd-cart-item{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;padding:7px 9px;font-size:12px}
 .sd-cart-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sd-check-main{display:flex;flex-direction:column;gap:2px}
+
+.sd-cart-row{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:8px;padding:7px 9px}
+.sd-cart-row .sd-cart-item{border:0;padding:0}
+
+.sd-writer-cards{grid-template-columns:repeat(auto-fill,minmax(108px,1fr))}
+.sd-activity{margin-top:10px}
+.sd-activity-bars{display:flex;align-items:flex-end;gap:6px;height:64px;margin-top:6px}
+.sd-activity-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;font-size:10px;color:var(--dsw-alias-label-secondary,#666)}
+.sd-activity-bar{width:100%;max-width:22px;background:var(--dsw-alias-brand-primary,#247bbf);border-radius:3px 3px 0 0;min-height:4px}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
