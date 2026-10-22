@@ -6,7 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals } from './lib/store.js'
@@ -72,11 +72,26 @@ async function handleRpc(body, ctx) {
       return getBundle(root, id)
     }
     case 'project.create': {
-      const project = await createProject(root, body.input ?? {})
-      return ensureProjectWorkspace(ctx, project)
+      const input = body.input ?? {}
+      const project = await createProject(root, input)
+      return ensureProjectWorkspace(ctx, project, input.workspaceTitle)
     }
-    case 'project.update':
-      return updateProject(root, String(body.projectId ?? ''), body.patch ?? {})
+    case 'project.update': {
+      const projectId = String(body.projectId ?? '')
+      const patch = { ...(body.patch ?? {}) }
+      const previous = await getBundle(root, projectId).then((bundle) => bundle.project).catch(() => null)
+      const name = String(patch.name ?? '').trim()
+      if (name && previous && (!previous.workspaceTitle || previous.workspaceTitle === previous.name)) patch.workspaceTitle = name
+      const updated = await updateProject(root, projectId, patch)
+      if (name && updated.workspaceId) {
+        try {
+          const workspace = ctx.get('workspaceRegistry')?.get?.(updated.workspaceId)
+          const title = updated.workspaceTitle || name
+          if (workspace?.setTitle && workspace.title !== title) await workspace.setTitle(title)
+        } catch { /* 工作区改名失败不影响项目 */ }
+      }
+      return updated
+    }
     case 'project.delete':
       return deleteProject(root, String(body.projectId ?? ''))
     case 'chapter.save':
@@ -187,7 +202,7 @@ async function handleRpc(body, ctx) {
         split: body.split,
       })
       const project = (await getBundle(root, result.projectId)).project
-      const withWorkspace = await ensureProjectWorkspace(ctx, project)
+      const withWorkspace = await ensureProjectWorkspace(ctx, project, body.workspaceTitle)
       return { ...result, workspaceId: withWorkspace.workspaceId, workspacePath: withWorkspace.workspacePath }
     }
     case 'import.review': {
@@ -220,6 +235,28 @@ async function handleRpc(body, ctx) {
       await upsertEntity(root, projectId, 'reviews', { id: review.id, fixProposalId: proposal.id })
       return { proposalId: proposal.id, reviewId: review.id }
     }
+    case 'workspace.cleanup': {
+      const registry = ctx.get('workspaceRegistry')
+      if (!registry?.list || !registry?.delete) return { deleted: [] }
+      const projects = await listProjects(root)
+      const active = new Set()
+      for (const row of projects) {
+        try {
+          const bundle = await getBundle(root, row.id)
+          if (bundle.project.workspaceId) active.add(bundle.project.workspaceId)
+        } catch { /* ignore */ }
+      }
+      const deleted = []
+      for (const workspace of registry.list()) {
+        if (active.has(workspace.id)) continue
+        if (!String(workspace.path ?? '').startsWith(join(root, 'projects') + '/')) continue
+        if ((workspace.sessionIds ?? []).length > 0) continue
+        try {
+          if (await registry.delete(workspace.id)) deleted.push({ id: workspace.id, path: workspace.path })
+        } catch { /* ignore */ }
+      }
+      return { deleted }
+    }
     case 'chat.sessions': {
       const controller = ctx.get('sessionController')
       if (!controller?.list) throw new Error('宿主未提供会话服务')
@@ -232,12 +269,13 @@ async function handleRpc(body, ctx) {
       const controller = ctx.get('sessionController')
       if (!controller?.list || !controller?.prompt) throw new Error('宿主未提供会话服务，无法发送到对话')
       const imports = await listImportRecords(root, projectId)
-      const project = bundle.project.workspacePath ? bundle.project : await ensureProjectWorkspace(ctx, bundle.project)
+      const project = await ensureProjectWorkspace(ctx, bundle.project)
       bundle.project = project
       const workspacePath = project.workspacePath || project.rootPath || imports.at(-1)?.root || ''
       const prompt = String(body.prompt ?? '').trim() || buildHandoffPrompt(bundle, body, workspacePath)
       if (body.dryRun && !body.checkTarget) return { dryRun: true, prompt, rootPath: workspacePath, workspacePath }
       let preferred
+      let createdNewSession = false
       if (body.newSession) {
         if (!workspacePath) throw new Error('作品还没有工作区，无法新开对话。')
         if (typeof controller.create !== 'function') throw new Error('宿主不支持新建会话')
@@ -251,6 +289,7 @@ async function handleRpc(body, ctx) {
         if (!workspaceId) throw new Error(`工作区未注册，无法新开对话：${workspacePath}`)
         const created = await controller.create({ workspaceId })
         preferred = { sessionId: created.sessionId, cwd: workspacePath, running: false }
+        createdNewSession = true
       } else {
         const list = await controller.list({}, AbortSignal.timeout(15000))
         const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
@@ -260,7 +299,11 @@ async function handleRpc(body, ctx) {
           || sameWorkspace.find((item) => item.running)
           || sameWorkspace[0]
         if (!preferred) {
-          throw new Error(`作品工作区（${workspacePath || '未设置'}）里还没有对话。请用清单里的「在本工作区新开对话」发送，不会跨工作区自动发送。`)
+          if (!project.workspaceId) throw new Error('作品工作区未注册，无法发送。')
+          if (typeof controller.create !== 'function') throw new Error('宿主不支持新建会话')
+          const created = await controller.create({ workspaceId: project.workspaceId })
+          preferred = { sessionId: created.sessionId, cwd: workspacePath, running: false }
+          createdNewSession = true
         }
       }
       if (body.dryRun) return { dryRun: true, prompt, rootPath: workspacePath, workspacePath, sessionId: preferred.sessionId, cwd: preferred.cwd ?? '' }
@@ -271,7 +314,7 @@ async function handleRpc(body, ctx) {
         content: [{ type: 'text', text: prompt }],
         clientTimeZone: 'Asia/Shanghai',
       }, AbortSignal.timeout(20000))
-      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath: workspacePath, workspacePath, workspaceId: project.workspaceId, newSession: Boolean(body.newSession) }
+      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath: workspacePath, workspacePath, workspaceId: project.workspaceId, newSession: createdNewSession }
     }
     case 'usage.summary': {
       const projectId = String(body.projectId ?? '')
@@ -297,7 +340,7 @@ async function handleRpc(body, ctx) {
       }
       const byTaskRows = Object.entries(byTask).map(([task, rows]) => ({ task, ...sum(rows) })).sort((a, b) => b.totalTokens - a.totalTokens)
       const imports = await listImportRecords(root, projectId)
-      const project = bundle.project.workspacePath ? bundle.project : await ensureProjectWorkspace(ctx, bundle.project)
+      const project = await ensureProjectWorkspace(ctx, bundle.project)
       bundle.project = project
       const workspacePath = project.workspacePath || project.rootPath || imports.at(-1)?.root || ''
       const usagePaths = [workspacePath, project.legacyRootPath].filter(Boolean)
@@ -837,17 +880,43 @@ async function countBackupFiles(root, projectId) {
   }
 }
 
-/** 确保作品有独立的 DSH 工作区（数据目录）。 */
-async function ensureProjectWorkspace(ctx, project) {
+/** 确保作品有独立的 DSH 工作区：建在默认工作区目录下，名字用作品名/自定义名。 */
+async function ensureProjectWorkspace(ctx, project, titleOverride) {
   const root = defaultRoot()
   const registry = ctx.get('workspaceRegistry')
   if (!registry?.resolveByPath || !registry?.create) return project
-  const dir = join(root, 'projects', project.id)
-  let workspace = await registry.resolveByPath(dir)
-  if (!workspace) workspace = await registry.create(dir, project.name)
-  const patch = { workspaceId: workspace.id, workspacePath: workspace.path ?? dir }
-  if (!project.workspacePath && project.rootPath && project.rootPath !== dir) patch.legacyRootPath = project.rootPath
-  if (project.workspaceId === patch.workspaceId && project.workspacePath === patch.workspacePath && project.legacyRootPath === patch.legacyRootPath) return project
+  let baseDir = ''
+  try {
+    const workspaces = typeof registry.list === 'function' ? registry.list() : []
+    const defaultWorkspace = workspaces.find((workspace) => workspace.title === 'default-workspace' || basename(workspace.path ?? '') === 'default-workspace')
+    if (defaultWorkspace?.path) baseDir = defaultWorkspace.path
+  } catch { /* ignore */ }
+  if (!baseDir) baseDir = join(homedir(), 'dsh-workspaces')
+  await mkdir(baseDir, { recursive: true })
+  const desiredTitle = String(titleOverride || project.workspaceTitle || project.name || `作品-${project.id}`).trim() || `作品-${project.id}`
+  const safeName = desiredTitle.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/^\.+|\.+$/g, '').trim().slice(0, 60) || `作品-${project.id}`
+  let dir = join(baseDir, safeName)
+  let workspace = null
+  try { workspace = await registry.resolveByPath(dir) } catch { workspace = null }
+  if (!workspace) {
+    let exists = true
+    try { await stat(dir); } catch { exists = false; }
+    if (exists) dir = join(baseDir, `${safeName}-${project.id.slice(-4)}`)
+    await mkdir(dir, { recursive: true })
+    workspace = await registry.create(dir, desiredTitle)
+  } else if (typeof workspace.setTitle === 'function' && workspace.title !== desiredTitle) {
+    try { await workspace.setTitle(desiredTitle); } catch { /* ignore */ }
+  }
+  const patch = { workspaceId: workspace.id, workspacePath: workspace.path ?? dir, workspaceTitle: desiredTitle }
+  if (project.workspacePath && project.workspacePath !== patch.workspacePath && !project.legacyRootPath) patch.legacyRootPath = project.workspacePath
+  // 迁移后清理旧的空数据目录工作区，避免侧边栏出现两个同名工作区
+  if (project.workspaceId && project.workspaceId !== workspace.id && project.workspacePath?.startsWith(join(root, 'projects') + '/')) {
+    try {
+      const oldWorkspace = typeof registry.get === 'function' ? registry.get(project.workspaceId) : null
+      if (oldWorkspace && (oldWorkspace.sessionIds ?? []).length === 0 && typeof registry.delete === 'function') await registry.delete(project.workspaceId)
+    } catch { /* ignore */ }
+  }
+  if (project.workspaceId === patch.workspaceId && project.workspacePath === patch.workspacePath && project.workspaceTitle === patch.workspaceTitle && project.legacyRootPath === patch.legacyRootPath) return project
   return updateProject(root, project.id, patch)
 }
 

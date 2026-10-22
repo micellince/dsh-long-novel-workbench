@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
       const target = payload.newSession === true
       const value = await api('chat.send', { ...payload, newSession: target })
       setOpen(false)
-      if (target && value?.sessionId) {
+      if ((target || value?.newSession) && value?.sessionId) {
         try {
           clientCtx?.get?.('uiWorkspace')?.openSession(value.sessionId)
         } catch {
@@ -2327,7 +2327,9 @@ window.__ModuleLoader__.load({
       const [split, setSplit] = useState('auto')
       const [scan, setScan] = useState(null)
       const [name, setName] = useState('')
+      const [workspaceTitle, setWorkspaceTitle] = useState('')
       const [genre, setGenre] = useState('')
+      const [autoReview, setAutoReview] = useState(true)
       const [busy, setBusy] = useState('')
       const [error, setError] = useState('')
       const [report, setReport] = useState(null)
@@ -2346,10 +2348,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await api('import.scan', { path: dir, split })
           setScan(value)
-          if (!name.trim()) {
-            const base = (value.root || dir).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '导入作品'
-            setName(base)
-          }
+          if (!name.trim() && value.bookTitle) setName(value.bookTitle)
         } catch (err) {
           setScan(null)
           setError(err.message)
@@ -2369,13 +2368,17 @@ window.__ModuleLoader__.load({
           return
         }
         const c = scan.counts ?? {}
-        if (!window.confirm(`导入《${name.trim()}》？\n章节 ${c.chapters ?? 0} ｜ 人物 ${c.characters ?? 0} ｜ 大纲 ${c.outlines ?? 0} ｜ 事件 ${c.events ?? 0} ｜ 事实 ${c.facts ?? 0} ｜ 伏笔 ${c.foreshadow ?? 0} ｜ 预设 ${c.presets ?? 0}`)) return
+        if (!window.confirm(`导入《${name.trim()}》？\n工作区：${workspaceTitle.trim() || name.trim()}\n章节 ${c.chapters ?? 0} ｜ 人物 ${c.characters ?? 0} ｜ 大纲 ${c.outlines ?? 0} ｜ 事件 ${c.events ?? 0} ｜ 事实 ${c.facts ?? 0} ｜ 伏笔 ${c.foreshadow ?? 0} ｜ 预设 ${c.presets ?? 0}`)) return
         setBusy('run')
         try {
-          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), genre: genre.trim(), mode: 'new', split })
+          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), workspaceTitle: workspaceTitle.trim(), genre: genre.trim(), mode: 'new', split })
           if (!value?.projectId) throw new Error('导入没有返回作品 id')
-          setReport(value)
           onImported(value.projectId)
+          if (autoReview) {
+            await sendToChat({ projectId: value.projectId, task: 'import-review', newSession: true })
+            return
+          }
+          setReport(value)
         } catch (err) {
           window.alert(`导入失败：${err.message}`)
         } finally {
@@ -2449,7 +2452,9 @@ window.__ModuleLoader__.load({
         ) : null,
         h('div', { className: 'sd-form sd-form-2' },
           h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
+          h(Field, { label: '工作区名称（可选）', hint: '默认同作品名；会建在 DSH 默认工作区下' }, h(TextInput, { value: workspaceTitle, placeholder: '默认同作品名', onChange: setWorkspaceTitle })),
           h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
+        h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: autoReview, onChange: (e) => setAutoReview(e.target.checked) }), '导入完成后立即在新工作区开始审阅'),
       ) : null
 
       if (picking) return h(PathPickerDialog, {
@@ -2471,7 +2476,7 @@ window.__ModuleLoader__.load({
             report
               ? h(Btn, { onClick: onClose }, review ? '完成' : '稍后处理')
               : [h(Btn, { key: 'cancel', onClick: () => busy !== 'run' && onClose() }, '取消'),
-                 h(Btn, { key: 'run', kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : '导入并查看报告')]),
+                 h(Btn, { key: 'run', kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : (autoReview ? '导入并开始审阅' : '导入并查看报告'))]),
         ),
       )
     }
