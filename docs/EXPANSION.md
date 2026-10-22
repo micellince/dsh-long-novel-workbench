@@ -178,5 +178,5 @@
 - **MCP**：`novel_desk_expansion`（status/plan/outline-change/wait-outline/stage/finish/stuck）；finish 写 `report`（总字数/章数/平均注意力/新增内容/大纲变更）。
 - **界面**：整本书页子导航「生成整本书 / 扩写」；ExpansionPanel 九态（目标必填、方案表可编辑、大纲闸门、预算、报告）；章节页「扩写本章」入口；10s 轮询。
 - **测试**：`test/expansion.test.js` 19 条；`node --test` 151/151。
-- **确定性检查（已实现）**：`expansion-target-missing`（error）、`expansion-under-target`（warn，列出低于目标的章）、`expansion-outline-pending`（warn，大纲变更未确认）；大纲外内容/重复度/冷读下降仍依赖审阅 prompt 与后续 P3 增强。
-- **未完成**：真实会话端到端试跑、界面目视；大纲外内容自动识别与重复度检查（P3 增强）。
+- **确定性检查（已实现）**：`expansion-target-missing`（error）、`expansion-under-target`（warn）、`expansion-outline-pending`（warn）、`expansion-scene-unplanned`（新增场景超出方案且无已批准大纲变更）、`expansion-subplot-unapproved`（旁线未批准）、`expansion-beats-unpreserved`（提案标注主线节拍未保留）、`expansion-attention-drop`（scoreAfter < scoreBefore）、`expansion-added-scene-duplicated`（新增场景跨章重复）、`duplicate-passages`（≥24 字整句跨章重复）。
+- **未完成**：真实会话端到端试跑、界面目视；语义级“大纲外内容”识别（当前基于提案元信息 addedScenes/subplotIds/beatsPreserved，非 NLP）。

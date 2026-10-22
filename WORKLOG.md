@@ -219,3 +219,10 @@
 ### 扩写确定性检查
 
 - lib/checks.js 新增：`expansion-target-missing`（error）、`expansion-under-target`（warn，列出低于目标的章节）、`expansion-outline-pending`（warn，大纲变更未确认）；测试覆盖；总测试 152/152。
+
+
+### 扩写 P3：大纲外内容与重复度检查
+
+- lib/checks.js 新增：`expansion-scene-unplanned`（新增场景不在方案 additions 且无已批准大纲变更）、`expansion-subplot-unapproved`（旁线未批准）、`expansion-beats-unpreserved`（提案标注 beatsPreserved=false）、`expansion-attention-drop`（scoreAfter < scoreBefore）、`expansion-added-scene-duplicated`（新增场景跨章重复）、`duplicate-passages`（≥24 字整句跨章重复）。
+- goal prompt 元信息补 scoreBefore/scoreAfter，便于冷读下降检查。
+- 测试：新增 1 条综合检查用例；总测试 153/153。

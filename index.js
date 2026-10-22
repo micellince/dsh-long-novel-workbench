@@ -2080,7 +2080,7 @@ export function buildExpansionGoalPrompt(bundle, expansionInput = {}) {
     '## 执行方式（全自动，每批审一次修一次）',
     '1. 每批（卷或 N 章）按逐章目标与现有大纲节拍扩写；',
     '2. 该批写完立即审一次（连续性/人物/时间线/文笔 + 每章冷读），再修一次；',
-    `3. 扩写章节提案必须带 data.expansionRunId="${expansion.runId || ''}" 与 data.expansion={targetWords, delta, addedScenes, subplotIds, beatsPreserved}；工作台会自动采纳并保留原稿历史备份（旧稿可回滚），不要用 novel_desk_upsert 直接改正文；`,
+    `3. 扩写章节提案必须带 data.expansionRunId="${expansion.runId || ''}" 与 data.expansion={targetWords, delta, addedScenes, subplotIds, beatsPreserved, scoreBefore, scoreAfter}；工作台会自动采纳并保留原稿历史备份（旧稿可回滚），不要用 novel_desk_upsert 直接改正文；`,
     '4. 继续下一批，不要等作者；每批完成用 novel_desk_expansion(op="stage", status=..., note=...) 上报进度。' + (Number(expansion.options?.sampleChapters) > 0 ? `\n5. 样张：先扩前 ${Number(expansion.options.sampleChapters)} 章，在 notes 里汇报样张结果（字数/新增内容/冷读），然后继续全量；作者可随时暂停查看。` : ''),
     '',
     '## 大纲闸门（硬，不许自行改大纲）',

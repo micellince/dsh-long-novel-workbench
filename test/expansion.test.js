@@ -472,6 +472,46 @@ test('checks：扩写目标缺失 / 未达目标 / 大纲变更待确认', async
   assert.equal(outline.level, 'warn')
 })
 
+test('checks：扩写超出方案/未批准旁线/主线节拍/冷读下降/跨章重复', async (t) => {
+  const { root, project } = await makeProject(t, { chapters: 2 })
+  const repeatedSentence = '雪落无声剑光如练少年推门而入看见故人站在灯下手里握着一封没有署名的信。'
+  await store.saveChapter(root, project.id, { id: '0002', title: '第2章', content: `${repeatedSentence}${repeatedSentence}` })
+  await store.saveChapter(root, project.id, { id: '0001', title: '第1章', content: repeatedSentence })
+  await store.saveExpansion(root, project.id, {
+    status: 'done',
+    targetWords: 2000,
+    runId: 'exp-check',
+    chapterTargets: [{ chapter: 1, targetWords: 2000, additions: [] }],
+    approvedOutlineChanges: [],
+  })
+  await store.upsertEntity(root, project.id, 'proposals', {
+    id: 'prop-exp-1', kind: 'chapter', status: 'accepted', chapter: 1, title: '扩写第1章',
+    data: {
+      expansionRunId: 'exp-check',
+      expansion: {
+        addedScenes: ['雨夜追车'],
+        subplotIds: ['sub-not-approved'],
+        beatsPreserved: false,
+        scoreBefore: 72,
+        scoreAfter: 64,
+      },
+    },
+  })
+  const bundle = await store.getBundle(root, project.id)
+  const ids = new Set(runChecks(bundle).map((check) => check.id))
+  for (const id of ['expansion-scene-unplanned', 'expansion-subplot-unapproved', 'expansion-beats-unpreserved', 'expansion-attention-drop', 'duplicate-passages']) {
+    assert.ok(ids.has(id), `应报 ${id}`)
+  }
+
+  await store.saveExpansion(root, project.id, {
+    approvedOutlineChanges: [{ id: 'chg-1', title: '新增旁线', subplotId: 'sub-not-approved' }],
+    chapterTargets: [{ chapter: 1, targetWords: 2000, additions: ['雨夜追车'] }],
+  })
+  const after = new Set(runChecks(await store.getBundle(root, project.id)).map((check) => check.id))
+  assert.ok(!after.has('expansion-scene-unplanned'), '已确认的新增场景不应再报')
+  assert.ok(!after.has('expansion-subplot-unapproved'), '已批准的旁线不应再报')
+})
+
 // ── 8. estimate / 预算 ────────────────────────────────────
 
 test('estimateExpansion：目标越高/差距越大估算越大，含 token 与费用', async (t) => {
