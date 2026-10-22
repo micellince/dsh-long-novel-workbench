@@ -13,6 +13,7 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useCallback, useRef } = React
 
     // ── 全局开关 ──────────────────────────────────────────────
+    let clientCtx = null
     const ui = { open: false, listeners: new Set() }
     function setOpen(value) {
       ui.open = value
@@ -29,9 +30,16 @@ window.__ModuleLoader__.load({
 
     // ── 工作台 → 对话 交接 ───────────────────────────────────
     async function sendToChat(payload) {
-      const value = await api('chat.send', payload)
-      // 消息已经投递到当前对话；只收起工作台，不要再打开/切换会话视图
+      const target = payload.newSession ?? (window.localStorage.getItem('story-desk/send-target') === 'new')
+      const value = await api('chat.send', { ...payload, newSession: target })
       setOpen(false)
+      if (target && value?.sessionId) {
+        try {
+          clientCtx?.get?.('uiWorkspace')?.openSession({ kind: 'session', sessionId: value.sessionId })
+        } catch {
+          // 新会话已创建并收到消息；打不开视图也不丢
+        }
+      }
       return value
     }
 
@@ -2184,14 +2192,15 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
-    function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend }) {
+    function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
       const [allowContinue, setAllowContinue] = useState(false)
+      const [target, setTarget] = useState(defaultTarget)
       const [preview, setPreview] = useState('')
       const [busy, setBusy] = useState(false)
       const showPreview = async () => {
         setBusy(true)
         try {
-          const value = await api('chat.send', { projectId, items, allowContinue, dryRun: true })
+          const value = await api('chat.send', { projectId, items, allowContinue, newSession: target === 'new', dryRun: true })
           setPreview(value.prompt)
         } catch (error) {
           window.alert(`生成预览失败：${error.message}`)
@@ -2216,16 +2225,17 @@ window.__ModuleLoader__.load({
                       h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
                       h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
                     h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '清单补充（可选；会随清单发给 AI，和提案卡上的作者意见分开）…', onChange: (value) => onNote(item, value) })))),
-            h('label', { className: 'sd-cb', style: { marginTop: 10 } },
-              h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }),
-              '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
+            h('div', { className: 'sd-send-options' },
+              h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'current', onChange: () => setTarget('current') }), '发送到当前对话并执行'),
+              h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'send-target', checked: target === 'new', onChange: () => setTarget('new') }), '在本工作区新开对话并执行'),
+              h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）')),
             h('div', { className: 'sd-form-actions' },
               h(Btn, { onClick: showPreview, disabled: busy || items.length === 0 }, busy ? '生成中…' : '预览发过去的 Prompt')),
             preview ? h('pre', { className: 'sd-ai-result' }, preview) : null,
           ),
           h('div', { className: 'sd-modal-foot' },
             h(Btn, { onClick: () => !sending && onClose() }, '取消'),
-            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue), disabled: sending || items.length === 0 }, sending ? '发送中…' : `发送 ${items.length} 项到对话`))),
+            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target), disabled: sending || items.length === 0 }, sending ? '发送中…' : (target === 'new' ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到当前对话`)))),
       )
     }
 
@@ -2388,6 +2398,7 @@ window.__ModuleLoader__.load({
       const [ai, setAi] = useState(null)
       const [cart, setCart] = useState([])
       const [cartOpen, setCartOpen] = useState(false)
+      const [sendTarget, setSendTarget] = useState(() => window.localStorage.getItem('story-desk/send-target') || 'current')
       const [sendingCart, setSendingCart] = useState(false)
       const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
       const saveCart = (next) => {
@@ -2405,11 +2416,15 @@ window.__ModuleLoader__.load({
       }
       const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
       const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
-      const sendCart = async (allowContinue) => {
+      const changeSendTarget = (value) => {
+        setSendTarget(value)
+        try { window.localStorage.setItem('story-desk/send-target', value) } catch { /* ignore */ }
+      }
+      const sendCart = async (allowContinue, target = sendTarget) => {
         if (cart.length === 0) return
         setSendingCart(true)
         try {
-          await sendToChat({ projectId, items: cart, allowContinue })
+          await sendToChat({ projectId, items: cart, allowContinue, newSession: target === 'new' })
           saveCart([])
           setCartOpen(false)
         } catch (error) {
@@ -2501,6 +2516,9 @@ window.__ModuleLoader__.load({
             h('div', { className: 'sd-head-actions' },
               busy ? h('span', { className: 'sd-hint' }, '同步中…') : null,
               h(Btn, { small: true, onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
+              h('select', { className: 'sd-input sd-send-target', value: sendTarget, title: '发送到哪个对话', onChange: (e) => changeSendTarget(e.target.value) },
+                h('option', { value: 'current' }, '发到当前对话'),
+                h('option', { value: 'new' }, '新开对话')),
               h(Btn, { small: true, disabled: !bundle, onClick: () => setCartOpen(true) }, `🧺 清单${cart.length ? ` (${cart.length})` : ''}`),
               h(Btn, { kind: 'primary', disabled: !bundle, onClick: () => setAi({ task: 'next-chapter-plan', chapter: bundle ? (bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1) : 1 }) }, '🤖 发到对话'),
               bundle
@@ -2543,7 +2561,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
           creating ? h(CreateProjectDialog, { onClose: () => setCreating(false), onCreated: (id) => { setTab('overview'); refresh(id) } }) : null,
-          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
+          cartOpen ? h(CartDialog, { items: cart, projectId, sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: sendTarget, onClose: () => setCartOpen(false), onSend: sendCart }) : null,
           importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) } }) : null,
           ai && bundle ? h(AiDialog, { bundle, projectId, initialTask: ai.task, initialChapter: ai.chapter, onClose: () => setAi(null), onChanged: () => refresh(projectId) }) : null,
         ),
@@ -2820,6 +2838,9 @@ window.__ModuleLoader__.load({
 .sd-activity-bar{width:100%;max-width:22px;background:var(--dsw-alias-brand-primary,#247bbf);border-radius:3px 3px 0 0;min-height:4px}
 
 .sd-decision-ai{font-size:12.5px;line-height:1.7;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);padding:4px 0 4px 10px;background:var(--dsw-alias-bg-layer-1,#fafafa);border-radius:0 6px 6px 0}
+
+.sd-send-target{max-width:130px;font-size:12px}
+.sd-send-options{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
@@ -2827,6 +2848,7 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
+        clientCtx = ctx
         const style = document.createElement('style')
         style.dataset.plugin = 'dsh-story-desk'
         style.textContent = CSS

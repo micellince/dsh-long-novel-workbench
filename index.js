@@ -201,18 +201,26 @@ async function handleRpc(body, ctx) {
       const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
       const prompt = String(body.prompt ?? '').trim() || buildHandoffPrompt(bundle, body, rootPath)
       if (body.dryRun && !body.checkTarget) return { dryRun: true, prompt, rootPath }
-      const list = await controller.list({}, AbortSignal.timeout(15000))
-      const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
-      const sessions = (list.items ?? []).filter((item) => !item.origin && !item.parentSessionId && !item.blank)
-      if (!rootPath && !explicit) throw new Error('这个作品还没有关联工作区目录，无法确定发到哪个对话。请在「设置 → 工作区目录」里填上作品所在目录，或从对应工作区的对话里发送。')
-      const sameWorkspace = rootPath ? sessions.filter((item) => item.cwd === rootPath) : sessions
-      const preferred = explicit
-        || sameWorkspace.find((item) => item.running)
-        || sameWorkspace[0]
-      if (!preferred) {
-        throw new Error(rootPath
-          ? `当前项目工作区（${rootPath}）没有打开的对话。请先在左侧切到该工作区的对话再发送，不会跨工作区自动发送。`
-          : '没有可用的对话会话，请先在左侧打开一个对话')
+      let preferred
+      if (body.newSession) {
+        if (!rootPath) throw new Error('作品没有关联工作区目录，无法新开对话。请先在总览里填「工作区目录」。')
+        if (typeof controller.create !== 'function') throw new Error('宿主不支持新建会话')
+        const created = await controller.create({ cwd: rootPath })
+        preferred = { sessionId: created.sessionId, cwd: rootPath, running: false }
+      } else {
+        const list = await controller.list({}, AbortSignal.timeout(15000))
+        const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
+        const sessions = (list.items ?? []).filter((item) => !item.origin && !item.parentSessionId && !item.blank)
+        if (!rootPath && !explicit) throw new Error('这个作品还没有关联工作区目录，无法确定发到哪个对话。请在「设置 → 工作区目录」里填上作品所在目录，或从对应工作区的对话里发送。')
+        const sameWorkspace = rootPath ? sessions.filter((item) => item.cwd === rootPath) : sessions
+        preferred = explicit
+          || sameWorkspace.find((item) => item.running)
+          || sameWorkspace[0]
+        if (!preferred) {
+          throw new Error(rootPath
+            ? `当前项目工作区（${rootPath}）没有打开的对话。请先在左侧切到该工作区的对话再发送，不会跨工作区自动发送。`
+            : '没有可用的对话会话，请先在左侧打开一个对话')
+        }
       }
       if (body.dryRun) return { dryRun: true, prompt, rootPath, sessionId: preferred.sessionId, cwd: preferred.cwd ?? '' }
       await controller.prompt({
@@ -222,7 +230,7 @@ async function handleRpc(body, ctx) {
         content: [{ type: 'text', text: prompt }],
         clientTimeZone: 'Asia/Shanghai',
       }, AbortSignal.timeout(20000))
-      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath }
+      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath, newSession: Boolean(body.newSession) }
     }
     case 'usage.summary': {
       const projectId = String(body.projectId ?? '')
