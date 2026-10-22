@@ -32,7 +32,7 @@
 
 ![章节历史](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/05-chapter-history.png)
 
-**导入 Markdown：整个目录或单个文件，默认一个文件一章、H1 作标题、按章号排序**
+**导入作品包：章节 + 人物卡 + 大纲 + 时间线 + 事实 + 伏笔 + 预设，导入后一键 AI 审阅**
 
 ![导入 Markdown](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/06-import.png)
 

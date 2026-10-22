@@ -108,7 +108,7 @@ async function handleRpc(body, ctx) {
     case 'proposal.create':
       return createProposal(root, String(body.projectId ?? ''), body.proposal ?? {})
     case 'proposal.accept':
-      return acceptProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
+      return acceptProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''), { optionId: body.optionId })
     case 'proposal.reject':
       return rejectProposal(root, String(body.projectId ?? ''), String(body.proposalId ?? ''))
     case 'proposal.feedback':
@@ -158,6 +158,29 @@ async function handleRpc(body, ctx) {
       const bundle = await getBundle(root, projectId)
       if (bundle.chapters.length === 0) throw new Error('作品还没有章节，无法审阅')
       return persistImportReview(ctx, root, projectId, bundle)
+    }
+    case 'review.fix': {
+      const projectId = String(body.projectId ?? '')
+      const reviewId = String(body.reviewId ?? '')
+      const bundle = await getBundle(root, projectId)
+      const review = (bundle.reviews ?? []).find((row) => row.id === reviewId)
+      if (!review) throw new Error('审稿意见不存在')
+      const chapter = (bundle.chapters ?? []).find((row) => Number(row.id) === Number(review.chapter))
+      if (!chapter) throw new Error(`第 ${review.chapter} 章不存在，无法按审稿修改`)
+      const result = await runAi(ctx, { task: 'review-fix', bundle, chapter: chapter.id, review })
+      const json = result.json ?? {}
+      const proposal = await createProposal(root, projectId, {
+        kind: 'chapter',
+        chapter: chapter.id,
+        title: `（审稿修改）${chapter.title}`,
+        summary: json.summary ?? review.suggestion ?? '按审稿意见修改',
+        data: { title: json.title ?? chapter.title, summary: json.summary ?? '', content: json.content ?? '', chapter: chapter.id },
+        rationale: `按审稿意见修改：${review.issue ?? ''}`,
+        priority: severityPriority(review.severity),
+        reviewId: review.id,
+      })
+      await upsertEntity(root, projectId, 'reviews', { id: review.id, fixProposalId: proposal.id })
+      return { proposalId: proposal.id, reviewId: review.id }
     }
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
@@ -303,11 +326,52 @@ async function persistAiResult(root, projectId, result, request) {
   return { kind: 'proposal', proposalIds: ids }
 }
 
-/** 导入后的 AI 补全 + 冲突核查：缺什么补什么，冲突进审稿。 */
+const SEVERITY_PRIORITY = { blocker: 1, major: 2, minor: 3, suggestion: 4 }
+function severityPriority(severity) {
+  return SEVERITY_PRIORITY[severity] ?? 3
+}
+
+/** 同一 主体+属性 有多个取值 → 决策提案，让作者选一条路。 */
+async function createFactDecisionProposals(root, projectId, bundle) {
+  const groups = new Map()
+  for (const fact of bundle.facts ?? []) {
+    if (fact.superseded || !fact.subject || !fact.attribute) continue
+    const key = `${fact.subject}\u0000${fact.attribute}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(fact)
+  }
+  let created = 0
+  for (const facts of groups.values()) {
+    const values = [...new Map(facts.map((fact) => [String(fact.value), fact])).values()]
+    if (values.length < 2) continue
+    const title = `事实冲突：${facts[0].subject} · ${facts[0].attribute}`
+    if ((bundle.proposals ?? []).some((proposal) => proposal.status === 'pending' && proposal.title === title)) continue
+    await createProposal(root, projectId, {
+      kind: 'decision',
+      chapter: facts[0].chapter ?? null,
+      title,
+      summary: `「${facts[0].subject}」的「${facts[0].attribute}」有 ${values.length} 个取值，请选择以哪个为准。`,
+      data: {
+        conflictType: 'fact',
+        subject: facts[0].subject,
+        attribute: facts[0].attribute,
+        facts: facts.map((fact) => ({ id: fact.id, value: fact.value, chapter: fact.chapter })),
+        options: values.map((fact) => ({ id: `fact-${fact.id}`, label: `以「${fact.value}」为准（第${fact.chapter ?? '?'}章）`, factId: fact.id })),
+      },
+      priority: 1,
+      rationale: '事实账本内部冲突，需要作者裁定哪个取值是正史。',
+    })
+    created += 1
+  }
+  return created
+}
+
+/** 导入后的 AI 补全 + 冲突核查：缺什么补什么，冲突进审稿 + 决策提案。 */
 async function persistImportReview(ctx, root, projectId, bundle) {
   const proposalIds = []
-  const counts = { characters: 0, events: 0, outlines: 0, conflicts: 0 }
+  const counts = { characters: 0, events: 0, outlines: 0, conflicts: 0, decisions: 0 }
   const errors = []
+  const decisionTitles = new Set((bundle.proposals ?? []).filter((proposal) => proposal.kind === 'decision').map((proposal) => proposal.title))
 
   const fill = async (task, kind, title, key) => {
     try {
@@ -333,25 +397,86 @@ async function persistImportReview(ctx, root, projectId, bundle) {
   if (bundle.events.length === 0) await fill('import-fill-events', 'events', '时间线补全（AI）', 'events')
   if (bundle.outlines.length === 0) await fill('import-fill-outlines', 'outlines', '大纲补全（AI）', 'outlines')
 
-  try {
+  // 已经有审稿记录就不再重复跑冲突核查，避免重复点击产生重复意见
+  if ((bundle.reviews ?? []).length === 0) try {
     const result = await runAi(ctx, { task: 'import-conflicts', bundle })
     const conflicts = Array.isArray(result.json?.conflicts) ? result.json.conflicts : []
     for (const conflict of conflicts) {
-      await upsertEntity(root, projectId, 'reviews', {
+      const issue = conflict.issue ?? ''
+      const duplicate = (bundle.reviews ?? []).some((review) => Number(review.chapter) === Number(conflict.chapter) && review.issue === issue)
+      if (duplicate) continue
+      const savedReview = await upsertEntity(root, projectId, 'reviews', {
         chapter: conflict.chapter,
         dimension: conflict.dimension ?? '连续性',
         severity: conflict.severity ?? 'major',
-        issue: conflict.issue ?? '',
+        issue,
         suggestion: conflict.suggestion ?? '',
         status: 'open',
         source: 'ai',
         against: conflict.against ?? '',
       })
       counts.conflicts += 1
+      const decisionTitle = `冲突决策 · 第${conflict.chapter}章：${issue.slice(0, 36)}`
+      if (decisionTitles.has(decisionTitle)) continue
+      decisionTitles.add(decisionTitle)
+      const proposal = await createProposal(root, projectId, {
+        kind: 'decision',
+        chapter: conflict.chapter,
+        title: decisionTitle,
+        summary: issue.slice(0, 200),
+        data: {
+          conflictType: 'review',
+          reviewId: savedReview.id,
+          reviewIssue: issue,
+          suggestion: conflict.suggestion ?? '',
+          options: [
+            { id: 'text', label: '以正文为准（改设定/大纲）', mark: 'fixed' },
+            { id: 'setting', label: '以设定为准（改正文）', mark: 'fixed' },
+            { id: 'later', label: '先保留，之后人工决定', mark: 'open' },
+          ],
+        },
+        priority: severityPriority(conflict.severity),
+        rationale: conflict.suggestion ?? '',
+      })
+      proposalIds.push(proposal.id)
+      counts.decisions += 1
     }
   } catch (error) {
     errors.push(`import-conflicts: ${error.message}`)
   }
+
+  // 为已有的未处理审稿补决策提案（backfill，避免重复导入后没有提案）
+  for (const review of bundle.reviews ?? []) {
+    if (review.status === 'fixed' || review.status === 'wontfix') continue
+    const issue = review.issue ?? ''
+    if (!issue) continue
+    const decisionTitle = `冲突决策 · 第${review.chapter}章：${issue.slice(0, 36)}`
+    if (decisionTitles.has(decisionTitle)) continue
+    decisionTitles.add(decisionTitle)
+    const proposal = await createProposal(root, projectId, {
+      kind: 'decision',
+      chapter: review.chapter,
+      title: decisionTitle,
+      summary: issue.slice(0, 200),
+      data: {
+        conflictType: 'review',
+        reviewId: review.id,
+        reviewIssue: issue,
+        suggestion: review.suggestion ?? '',
+        options: [
+          { id: 'text', label: '以正文为准（改设定/大纲）', mark: 'fixed' },
+          { id: 'setting', label: '以设定为准（改正文）', mark: 'fixed' },
+          { id: 'later', label: '先保留，之后人工决定', mark: 'open' },
+        ],
+      },
+      priority: severityPriority(review.severity),
+      rationale: review.suggestion ?? '',
+    })
+    proposalIds.push(proposal.id)
+    counts.decisions += 1
+  }
+
+  counts.decisions += await createFactDecisionProposals(root, projectId, bundle)
 
   return { proposalIds, counts, reviews: counts.conflicts, errors }
 }

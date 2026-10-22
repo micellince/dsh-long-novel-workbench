@@ -309,7 +309,6 @@ window.__ModuleLoader__.load({
     const TABS = [
       { id: 'overview', label: '总览', icon: '📊' },
       { id: 'chapters', label: '章节', icon: '📄' },
-      { id: 'outlines', label: '大纲', icon: '🗂️' },
       { id: 'timeline', label: '时间线', icon: '🕰️' },
       { id: 'facts', label: '事实账本', icon: '⚖️' },
       { id: 'foreshadow', label: '伏笔', icon: '🧩' },
@@ -461,11 +460,14 @@ window.__ModuleLoader__.load({
     }
 
     // ── 章节页 ────────────────────────────────────────────────
-    function ChaptersTab({ bundle, projectId, onChanged }) {
+    function ChaptersTab({ bundle, projectId, onChanged, initialView = 'chapters' }) {
+      const [view, setView] = useState(initialView)
       const [editing, setEditing] = useState(null)
+      const [outlineEditing, setOutlineEditing] = useState(null)
       const chapters = bundle.chapters ?? []
+      const outlines = [...(bundle.outlines ?? [])].sort((a, b) => Number(a.chapter) - Number(b.chapter))
 
-      const remove = async (chapter) => {
+      const removeChapter = async (chapter) => {
         if (!window.confirm(`删除第 ${chapter.id} 章《${chapter.title}》？`)) return
         try {
           await api('chapter.delete', { projectId, chapterId: chapter.id })
@@ -474,37 +476,57 @@ window.__ModuleLoader__.load({
           window.alert(error.message)
         }
       }
+      const removeOutline = async (outline) => {
+        if (!window.confirm(`删除第 ${outline.chapter} 章大纲？`)) return
+        try {
+          await api('entity.delete', { projectId, kind: 'outlines', entityId: outline.id })
+          onChanged()
+        } catch (error) {
+          window.alert(error.message)
+        }
+      }
 
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h(
-          'div',
-          { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '📄 章节'), h('p', { className: 'sd-desc' }, `共 ${chapters.length} 章，${bundle.stats.words} 字。章节正文保存为 projects/<id>/chapters/NNNN.md。`)),
-          h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新建章节'),
-        ),
-        chapters.length === 0
-          ? h(Empty, null, '还没有章节。新建一章，或让 Agent 调用 novel_desk_upsert 前先建章节。')
-          : h(
-              'div',
-              { className: 'sd-chapter-list' },
-              chapters.map((chapter) =>
-                h(
-                  'div',
-                  { key: chapter.id, className: 'sd-chapter' },
-                  h('div', { className: 'sd-chapter-id' }, chapter.id),
-                  h(
-                    'div',
-                    { className: 'sd-chapter-main', onClick: () => setEditing(chapter) },
-                    h('div', { className: 'sd-chapter-title' }, chapter.title),
-                    h('div', { className: 'sd-chapter-meta' }, `${chapter.words} 字 ｜ ${STATUS_LABEL[chapter.status] || chapter.status}${chapter.storyTime ? ' ｜ ' + chapter.storyTime : ''}${chapter.summary ? ' ｜ ' + chapter.summary : ''}`),
-                  ),
-                  h('div', { className: 'sd-chapter-actions' }, h(Btn, { small: true, onClick: () => setEditing(chapter) }, '打开'), h(Btn, { small: true, kind: 'danger', onClick: () => remove(chapter) }, '删除')),
-                ),
-              ),
-            ),
+      return h('div', { className: 'sd-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, view === 'chapters' ? '📄 章节' : '🗂️ 章节大纲'),
+            h('p', { className: 'sd-desc' }, view === 'chapters'
+              ? `共 ${chapters.length} 章，${bundle.stats.words} 字。章节正文保存为 projects/<id>/chapters/NNNN.md。`
+              : `共 ${outlines.length} 章大纲。写下一章方案时 AI 会优先读这里。`)),
+          h('div', { className: 'sd-pagehead-actions' },
+            h('div', { className: 'sd-segmented' },
+              h('button', { type: 'button', className: view === 'chapters' ? 'sd-seg-active' : '', onClick: () => setView('chapters') }, '章节'),
+              h('button', { type: 'button', className: view === 'outlines' ? 'sd-seg-active' : '', onClick: () => setView('outlines') }, '大纲')),
+            view === 'chapters'
+              ? h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新建章节')
+              : h(Btn, { kind: 'primary', onClick: () => setOutlineEditing({}) }, '＋ 新增大纲'))),
+        view === 'chapters'
+          ? (chapters.length === 0
+              ? h(Empty, null, '还没有章节。新建一章，或让 Agent 调用 novel_desk_upsert 前先建章节。')
+              : h('div', { className: 'sd-chapter-list' },
+                  chapters.map((chapter) => h('div', { key: chapter.id, className: 'sd-chapter' },
+                    h('div', { className: 'sd-chapter-id' }, chapter.id),
+                    h('div', { className: 'sd-chapter-main', onClick: () => setEditing(chapter) },
+                      h('div', { className: 'sd-chapter-title' }, chapter.title),
+                      h('div', { className: 'sd-chapter-meta' }, `${chapter.words} 字 ｜ ${STATUS_LABEL[chapter.status] || chapter.status}${chapter.storyTime ? ' ｜ ' + chapter.storyTime : ''}${chapter.summary ? ' ｜ ' + chapter.summary : ''}`)),
+                    h('div', { className: 'sd-chapter-actions' },
+                      h(Btn, { small: true, onClick: () => setEditing(chapter) }, '打开'),
+                      h(Btn, { small: true, kind: 'danger', onClick: () => removeChapter(chapter) }, '删除'))))))
+          : (outlines.length === 0
+              ? h(Empty, null, '还没有章节大纲。可以手动新增，也可以在导入作品包时从 大纲.md 自动导入。')
+              : h('div', { className: 'sd-table' },
+                  h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '56px 1fr 1.4fr 80px 96px' } },
+                    h('div', null, '章'), h('div', null, '标题'), h('div', null, '摘要'), h('div', null, '状态'), h('div', { className: 'sd-actions-col' }, '操作')),
+                  outlines.map((outline) => h('div', { key: outline.id ?? outline.chapter, className: 'sd-row', style: { gridTemplateColumns: '56px 1fr 1.4fr 80px 96px' } },
+                    h('div', { className: 'sd-cell' }, String(outline.chapter)),
+                    h('div', { className: 'sd-cell', title: outline.title }, outline.title),
+                    h('div', { className: 'sd-cell', title: outline.summary }, outline.summary || '—'),
+                    h('div', { className: 'sd-cell' }, { planned: '计划', drafted: '已写', done: '完成' }[outline.status] ?? '计划'),
+                    h('div', { className: 'sd-row-actions' },
+                      h(Btn, { small: true, onClick: () => setOutlineEditing(outline) }, '编辑'),
+                      h(Btn, { small: true, kind: 'danger', onClick: () => removeOutline(outline) }, '删除')))))),
         editing !== null ? h(ChapterEditor, { chapter: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
+        outlineEditing !== null ? h(EntityEditor, { kind: 'outlines', item: outlineEditing, projectId, onClose: () => setOutlineEditing(null), onSaved: onChanged }) : null,
       )
     }
 
@@ -828,7 +850,7 @@ window.__ModuleLoader__.load({
 
 
     // ── 提案页（AI 结果对比 + 采纳）────────────────────────────
-    const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', custom: '自由' }
+    const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', decision: '冲突决策', outlines: '章节大纲', custom: '自由' }
 
     /** 去掉章节文件 frontmatter，只留正文：历史版本存的是完整文件，和编辑器里的正文对比时要先剥掉。 */
     function stripChapterFrontmatter(text) {
@@ -872,7 +894,9 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState([])
       const [kindFilter, setKindFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
-      const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending')
+      const [choices, setChoices] = useState({})
+      const priorityRank = (p) => Number(p.priority) || 3
+      const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending').sort((a, b) => priorityRank(a) - priorityRank(b))
       const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
       const pending = pendingAll.filter((p) => kindFilter === 'all' || p.kind === kindFilter)
       const selectedPending = pendingAll.filter((p) => selected.includes(p.id))
@@ -906,11 +930,11 @@ window.__ModuleLoader__.load({
           setBulkBusy(false)
         }
       }
-      const act = async (p, action) => {
+      const act = async (p, action, optionId) => {
         if (!window.confirm(`${action === 'accept' ? '采纳' : '驳回'}提案「${p.title}」？`)) return
         setBusy(p.id)
         try {
-          await api(action === 'accept' ? 'proposal.accept' : 'proposal.reject', { projectId, proposalId: p.id })
+          await api(action === 'accept' ? 'proposal.accept' : 'proposal.reject', { projectId, proposalId: p.id, optionId })
           onChanged()
         } catch (error) {
           window.alert(error.message)
@@ -940,6 +964,16 @@ window.__ModuleLoader__.load({
       }
       const renderBody = (p) => {
         const data = p.data ?? {}
+        if (p.kind === 'decision') {
+          const chosen = choices[p.id] ?? data.options?.[0]?.id
+          return h('div', { className: 'sd-proposal-body' },
+            h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
+            data.suggestion ? h('div', { className: 'sd-hint' }, `AI 建议：${data.suggestion}`) : null,
+            h('div', { className: 'sd-decision-options' },
+              (data.options ?? []).map((option) => h('label', { key: option.id, className: 'sd-decision-option' },
+                h('input', { type: 'radio', name: `decision-${p.id}`, checked: chosen === option.id, onChange: () => setChoices((prev) => ({ ...prev, [p.id]: option.id })) }),
+                h('span', null, option.label)))))
+        }
         if (p.kind === 'chapter') {
           const existing = (bundle.chapters ?? []).find((c) => String(Number(c.id)) === String(Number(p.chapter)))
           const diff = diffLines(existing?.content ?? '', data.content ?? '')
@@ -983,6 +1017,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'sd-proposal-head' },
             h('label', { className: 'sd-cb sd-cb-only', title: '选择该提案' }, h('input', { type: 'checkbox', checked: selected.includes(p.id), onChange: () => toggle(p.id) })),
             h(Tag, { tone: 'brand' }, PROPOSAL_KIND[p.kind] ?? p.kind),
+            p.priority && p.priority <= 2 ? h(Tag, { tone: 'muted' }, p.priority === 1 ? '阻断' : '严重') : null,
             h(Tag, { tone: 'muted' }, p.chapter ? `第 ${p.chapter} 章` : '全书'),
             h('strong', { className: 'sd-proposal-title' }, p.title),
             h('span', { className: 'sd-hint' }, p.source === 'agent' ? 'Agent 提交' : 'AI 生成'),
@@ -1002,7 +1037,7 @@ window.__ModuleLoader__.load({
             ),
           ) : null,
           h('div', { className: 'sd-proposal-actions' },
-            h(Btn, { kind: 'primary', onClick: () => act(p, 'accept'), disabled: busy === p.id }, busy === p.id ? '处理中…' : '采纳'),
+            h(Btn, { kind: 'primary', onClick: () => act(p, 'accept', p.kind === 'decision' ? (choices[p.id] ?? p.data?.options?.[0]?.id) : undefined), disabled: busy === p.id }, busy === p.id ? '处理中…' : (p.kind === 'decision' ? '采纳所选' : '采纳')),
             h(Btn, { onClick: () => { setFeedbackFor(p.id); setFeedbackText(''); setBusy('') }, disabled: busy === p.id }, '提修改意见'),
             Array.isArray(p.feedback) && p.feedback.length > 0
               ? h(Btn, { kind: 'primary', onClick: () => revise(p), disabled: busy === p.id }, busy === p.id ? '重写中…' : '让 AI 按意见重写')
@@ -1716,8 +1751,17 @@ window.__ModuleLoader__.load({
       const [selected, setSelected] = useState([])
       const [severityFilter, setSeverityFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
+      const [fixing, setFixing] = useState('')
       const all = bundle.reviews ?? []
-      const items = all.filter((review) => severityFilter === 'all' || review.severity === severityFilter)
+      const severityRank = { blocker: 0, major: 1, minor: 2, suggestion: 3 }
+      const items = all
+        .filter((review) => severityFilter === 'all' || review.severity === severityFilter)
+        .sort((a, b) => {
+          const doneA = a.status === 'fixed' || a.status === 'wontfix' ? 1 : 0
+          const doneB = b.status === 'fixed' || b.status === 'wontfix' ? 1 : 0
+          if (doneA !== doneB) return doneA - doneB
+          return (severityRank[a.severity] ?? 9) - (severityRank[b.severity] ?? 9)
+        })
       const selectedItems = all.filter((review) => selected.includes(review.id))
       const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 96px'
       const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -1733,6 +1777,23 @@ window.__ModuleLoader__.load({
           onChanged()
         } catch (error) {
           window.alert(error.message)
+        }
+      }
+      const fixWithAi = async (review) => {
+        if (!review.chapter) {
+          window.alert('这条审稿没有章号，无法生成修改提案')
+          return
+        }
+        if (!window.confirm(`让 AI 按这条意见修改第 ${review.chapter} 章，并生成提案？\n\n${review.issue ?? ''}`)) return
+        setFixing(review.id)
+        try {
+          const value = await api('review.fix', { projectId, reviewId: review.id })
+          window.alert(`已生成修改提案${value?.proposalId ? '（' + value.proposalId + '）' : ''}，去「提案」页对比采纳。`)
+          onChanged()
+        } catch (error) {
+          window.alert(`生成提案失败：${error.message}`)
+        } finally {
+          setFixing('')
         }
       }
       const batch = async (status) => {
@@ -1788,6 +1849,7 @@ window.__ModuleLoader__.load({
                   return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
                 }),
                 h('div', { className: 'sd-row-actions' },
+                  h(Btn, { small: true, kind: 'primary', disabled: fixing === review.id || review.status === 'fixed' || review.status === 'wontfix', onClick: () => fixWithAi(review) }, fixing === review.id ? '生成中…' : 'AI 修改'),
                   h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
                   h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除')),
               )),
@@ -2416,6 +2478,15 @@ window.__ModuleLoader__.load({
 .sd-import-count strong{display:block;font-size:19px;line-height:1.3;font-variant-numeric:tabular-nums}
 .sd-import-count span{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
 .sd-import-review{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+
+.sd-segmented{display:inline-flex;border:1px solid var(--dsw-alias-border-l1,#d8d8d8);border-radius:8px;overflow:hidden}
+.sd-segmented button{border:0;background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;padding:5px 12px;cursor:pointer}
+.sd-segmented button.sd-seg-active{background:var(--dsw-alias-brand-primary,#247bbf);color:#fff}
+
+.sd-decision-issue{font-size:12.5px;line-height:1.7;background:var(--dsw-alias-bg-layer-2,#f4f4f4);border-radius:7px;padding:8px 10px}
+.sd-decision-options{display:flex;flex-direction:column;gap:6px;margin-top:2px}
+.sd-decision-option{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;cursor:pointer;font-size:12px}
+.sd-decision-option:hover{border-color:var(--dsw-alias-brand-primary,#247bbf)}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
