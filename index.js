@@ -70,8 +70,10 @@ async function handleRpc(body, ctx) {
       if (!id) throw new Error('缺少 projectId')
       return getBundle(root, id)
     }
-    case 'project.create':
-      return createProject(root, body.input ?? {})
+    case 'project.create': {
+      const project = await createProject(root, body.input ?? {})
+      return ensureProjectWorkspace(ctx, project)
+    }
     case 'project.update':
       return updateProject(root, String(body.projectId ?? ''), body.patch ?? {})
     case 'project.delete':
@@ -151,8 +153,8 @@ async function handleRpc(body, ctx) {
       if (!dirPath) throw new Error('缺少 path')
       return scanImport(root, dirPath, { split: body.split })
     }
-    case 'import.run':
-      return runImport(root, {
+    case 'import.run': {
+      const result = await runImport(root, {
         path: body.path,
         projectName: body.projectName,
         genre: body.genre,
@@ -160,6 +162,10 @@ async function handleRpc(body, ctx) {
         projectId: body.projectId,
         split: body.split,
       })
+      const project = (await getBundle(root, result.projectId)).project
+      const withWorkspace = await ensureProjectWorkspace(ctx, project)
+      return { ...result, workspaceId: withWorkspace.workspaceId, workspacePath: withWorkspace.workspacePath }
+    }
     case 'import.review': {
       const projectId = String(body.projectId ?? '')
       if (!projectId) throw new Error('缺少 projectId')
@@ -202,39 +208,38 @@ async function handleRpc(body, ctx) {
       const controller = ctx.get('sessionController')
       if (!controller?.list || !controller?.prompt) throw new Error('宿主未提供会话服务，无法发送到对话')
       const imports = await listImportRecords(root, projectId)
-      const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
-      const prompt = String(body.prompt ?? '').trim() || buildHandoffPrompt(bundle, body, rootPath)
-      if (body.dryRun && !body.checkTarget) return { dryRun: true, prompt, rootPath }
+      const project = bundle.project.workspacePath ? bundle.project : await ensureProjectWorkspace(ctx, bundle.project)
+      bundle.project = project
+      const workspacePath = project.workspacePath || project.rootPath || imports.at(-1)?.root || ''
+      const prompt = String(body.prompt ?? '').trim() || buildHandoffPrompt(bundle, body, workspacePath)
+      if (body.dryRun && !body.checkTarget) return { dryRun: true, prompt, rootPath: workspacePath, workspacePath }
       let preferred
       if (body.newSession) {
-        if (!rootPath) throw new Error('作品没有关联工作区目录，无法新开对话。请先在总览里填「工作区目录」。')
+        if (!workspacePath) throw new Error('作品还没有工作区，无法新开对话。')
         if (typeof controller.create !== 'function') throw new Error('宿主不支持新建会话')
-        const workspaceRegistry = ctx.get('workspaceRegistry')
-        let workspace = typeof workspaceRegistry?.resolveByPath === 'function'
-          ? await workspaceRegistry.resolveByPath(rootPath)
-          : undefined
-        if (!workspace && typeof workspaceRegistry?.create === 'function') {
-          workspace = await workspaceRegistry.create(rootPath)
+        let workspaceId = project.workspaceId
+        if (!workspaceId) {
+          const workspaceRegistry = ctx.get('workspaceRegistry')
+          let workspace = typeof workspaceRegistry?.resolveByPath === 'function' ? await workspaceRegistry.resolveByPath(workspacePath) : undefined
+          if (!workspace && typeof workspaceRegistry?.create === 'function') workspace = await workspaceRegistry.create(workspacePath, project.name)
+          workspaceId = workspace?.id
         }
-        if (!workspace) throw new Error(`工作区未注册，无法新开对话：${rootPath}`)
-        const created = await controller.create({ workspaceId: workspace.id })
-        preferred = { sessionId: created.sessionId, cwd: workspace.path ?? rootPath, running: false }
+        if (!workspaceId) throw new Error(`工作区未注册，无法新开对话：${workspacePath}`)
+        const created = await controller.create({ workspaceId })
+        preferred = { sessionId: created.sessionId, cwd: workspacePath, running: false }
       } else {
         const list = await controller.list({}, AbortSignal.timeout(15000))
         const explicit = body.sessionId ? (list.items ?? []).find((item) => item.sessionId === body.sessionId) : null
         const sessions = (list.items ?? []).filter((item) => !item.origin && !item.parentSessionId && !item.blank)
-        if (!rootPath && !explicit) throw new Error('这个作品还没有关联工作区目录，无法确定发到哪个对话。请在「设置 → 工作区目录」里填上作品所在目录，或从对应工作区的对话里发送。')
-        const sameWorkspace = rootPath ? sessions.filter((item) => item.cwd === rootPath) : sessions
+        const sameWorkspace = workspacePath ? sessions.filter((item) => item.cwd === workspacePath) : sessions
         preferred = explicit
           || sameWorkspace.find((item) => item.running)
           || sameWorkspace[0]
         if (!preferred) {
-          throw new Error(rootPath
-            ? `当前项目工作区（${rootPath}）没有打开的对话。请先在左侧切到该工作区的对话再发送，不会跨工作区自动发送。`
-            : '没有可用的对话会话，请先在左侧打开一个对话')
+          throw new Error(`作品工作区（${workspacePath || '未设置'}）里还没有对话。请用清单里的「在本工作区新开对话」发送，不会跨工作区自动发送。`)
         }
       }
-      if (body.dryRun) return { dryRun: true, prompt, rootPath, sessionId: preferred.sessionId, cwd: preferred.cwd ?? '' }
+      if (body.dryRun) return { dryRun: true, prompt, rootPath: workspacePath, workspacePath, sessionId: preferred.sessionId, cwd: preferred.cwd ?? '' }
       await controller.prompt({
         requestId: randomUUID(),
         sessionId: preferred.sessionId,
@@ -242,7 +247,7 @@ async function handleRpc(body, ctx) {
         content: [{ type: 'text', text: prompt }],
         clientTimeZone: 'Asia/Shanghai',
       }, AbortSignal.timeout(20000))
-      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath, newSession: Boolean(body.newSession) }
+      return { sessionId: preferred.sessionId, accepted: true, prompt, rootPath: workspacePath, workspacePath, workspaceId: project.workspaceId, newSession: Boolean(body.newSession) }
     }
     case 'usage.summary': {
       const projectId = String(body.projectId ?? '')
@@ -268,17 +273,20 @@ async function handleRpc(body, ctx) {
       }
       const byTaskRows = Object.entries(byTask).map(([task, rows]) => ({ task, ...sum(rows) })).sort((a, b) => b.totalTokens - a.totalTokens)
       const imports = await listImportRecords(root, projectId)
-      const rootPath = bundle.project.rootPath || imports.at(-1)?.root || ''
+      const project = bundle.project.workspacePath ? bundle.project : await ensureProjectWorkspace(ctx, bundle.project)
+      bundle.project = project
+      const workspacePath = project.workspacePath || project.rootPath || imports.at(-1)?.root || ''
+      const usagePaths = [workspacePath, project.legacyRootPath].filter(Boolean)
       let rootSessions = []
       let subagentSessions = []
       let subagentCount = 0
       let sessionRootMap = new Map()
       try {
         const sessionController = ctx.get('sessionController')
-        if (sessionController?.list && rootPath) {
+        if (sessionController?.list && usagePaths.length > 0) {
           const listed = await sessionController.list({}, AbortSignal.timeout(15000))
           const allItems = listed.items ?? []
-          const roots = allItems.filter((item) => item.cwd === rootPath && !item.origin && !item.parentSessionId && !item.blank)
+          const roots = allItems.filter((item) => usagePaths.includes(item.cwd) && !item.origin && !item.parentSessionId && !item.blank)
           const byParent = new Map()
           for (const item of allItems) {
             if (!item.parentSessionId) continue
@@ -305,7 +313,7 @@ async function handleRpc(body, ctx) {
           const selected = [...roots, ...allItems.filter((item) => descendantIds.has(item.sessionId))]
           const groups = new Map()
           for (const item of selected) {
-            const cwd = item.cwd || rootPath
+            const cwd = item.cwd || workspacePath
             if (!groups.has(cwd)) groups.set(cwd, [])
             groups.get(cwd).push(item.sessionId)
           }
@@ -323,7 +331,7 @@ async function handleRpc(body, ctx) {
         subagentCount = 0
       }
       if (rootSessions.length === 0) {
-        const fallback = await loadChatUsage(rootPath)
+        const fallback = await loadChatUsage(workspacePath)
         rootSessions = fallback.sessions
       }
       const allChatSessions = [...rootSessions, ...subagentSessions]
@@ -391,7 +399,8 @@ async function handleRpc(body, ctx) {
       const subagentCostCNY = subagentRows.reduce((sum, row) => sum + (row.costCNY ?? 0), 0)
       const totalChatTokens = allChatSessions.reduce((sum, session) => sum + (session.totalTokens || 0), 0)
       const chat = {
-        cwd: rootPath,
+        cwd: workspacePath,
+        legacyCwd: project.legacyRootPath ?? '',
         sessions: chatSessions,
         subagents: { count: subagentCount, sessions: subagentRows, totalTokens: subagentTokens, costUSD: Math.round(subagentCostUSD * 10000) / 10000, costCNY: Math.round(subagentCostCNY * 10000) / 10000 },
         totalTokens: totalChatTokens,
@@ -422,7 +431,9 @@ async function handleRpc(body, ctx) {
       const activeDays = activity.filter((row) => row.workbenchTokens + row.chatTokens > 0).length
       return {
         projectId,
-        rootPath,
+        rootPath: workspacePath,
+        workspaceId: project.workspaceId ?? null,
+        workspacePath,
         context,
         metrics: {
           words: bundle.stats.words,
@@ -800,6 +811,20 @@ async function countBackupFiles(root, projectId) {
   } catch {
     return 0
   }
+}
+
+/** 确保作品有独立的 DSH 工作区（数据目录）。 */
+async function ensureProjectWorkspace(ctx, project) {
+  const root = defaultRoot()
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry?.resolveByPath || !registry?.create) return project
+  const dir = join(root, 'projects', project.id)
+  let workspace = await registry.resolveByPath(dir)
+  if (!workspace) workspace = await registry.create(dir, project.name)
+  const patch = { workspaceId: workspace.id, workspacePath: workspace.path ?? dir }
+  if (!project.workspacePath && project.rootPath && project.rootPath !== dir) patch.legacyRootPath = project.rootPath
+  if (project.workspaceId === patch.workspaceId && project.workspacePath === patch.workspacePath && project.legacyRootPath === patch.legacyRootPath) return project
+  return updateProject(root, project.id, patch)
 }
 
 const TASK_LABEL = {
