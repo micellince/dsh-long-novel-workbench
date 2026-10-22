@@ -2358,6 +2358,7 @@ window.__ModuleLoader__.load({
         h('p', { className: 'sd-desc' }, report.detected?.characters && report.detected?.outlines
           ? '已从作品包里识别并导入人物卡、大纲、追踪与写作规范。'
           : '没有找到完整的人物卡/大纲/追踪文件，AI 可以按正文补全。'),
+        report.workspacePath ? h('div', { className: 'sd-hint' }, `独立工作区：${report.workspacePath}（首次使用请点「新开对话」）`) : null,
         review
           ? h('div', { className: 'sd-import-review' },
               h('h3', { className: 'sd-h3' }, '审阅完成'),
