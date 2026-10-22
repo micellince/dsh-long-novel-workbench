@@ -6,8 +6,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readdir, stat } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
@@ -148,6 +149,29 @@ async function handleRpc(body, ctx) {
     }
     case 'preset.apply':
       return applyPreset(root, String(body.projectId ?? ''), String(body.presetId ?? ''))
+    case 'import.browse': {
+      const raw = String(body.path ?? '').trim()
+      let target = raw ? resolve(raw) : homedir()
+      let info
+      try {
+        info = await stat(target)
+      } catch {
+        target = homedir()
+        info = await stat(target)
+      }
+      const dir = info.isDirectory() ? target : dirname(target)
+      const entries = []
+      for (const entry of await readdir(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) {
+          entries.push({ name: entry.name, path: full, dir: true })
+        } else if (entry.isFile() && /\.(md|markdown|txt|epub|pdf|mobi|azw3?|azw)$/i.test(entry.name)) {
+          entries.push({ name: entry.name, path: full, dir: false })
+        }
+      }
+      entries.sort((a, b) => (a.dir === b.dir ? a.name.localeCompare(b.name, 'zh-Hans-CN', { numeric: true }) : a.dir ? -1 : 1))
+      return { path: dir, parent: dirname(dir), entries: entries.slice(0, 500) }
+    }
     case 'import.scan': {
       const dirPath = String(body.path ?? '').trim()
       if (!dirPath) throw new Error('缺少 path')

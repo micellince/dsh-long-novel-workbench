@@ -2227,6 +2227,52 @@ window.__ModuleLoader__.load({
     }
 
     // ══ v0.4 新增：导入 Markdown ══════════════════════════════
+    function PathPickerDialog({ initialPath, onPick, onClose }) {
+      const [path, setPath] = useState(initialPath || '')
+      const [data, setData] = useState(null)
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const load = useCallback(async (target) => {
+        setBusy(true)
+        try {
+          const value = await api('import.browse', { path: target })
+          setData(value)
+          setPath(value.path)
+          setError('')
+        } catch (err) {
+          setError(err.message)
+        } finally {
+          setBusy(false)
+        }
+      }, [])
+      useEffect(() => { load(initialPath) }, [initialPath, load])
+      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
+        h('div', { className: 'sd-modal sd-modal-wide' },
+          h('div', { className: 'sd-modal-head' },
+            h('strong', null, '📁 选择文件或目录'),
+            h('span', { className: 'sd-hint' }, '支持 .md .txt .epub .pdf .mobi'),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
+          h('div', { className: 'sd-modal-body' },
+            h('div', { className: 'sd-inline-row' },
+              h(TextInput, { value: path, onChange: setPath }),
+              h(Btn, { onClick: () => load(path), disabled: busy }, busy ? '读取中…' : '转到'),
+              h(Btn, { onClick: () => data && load(data.parent), disabled: !data?.parent }, '上一级')),
+            error ? h('div', { className: 'sd-error sd-error-inline' }, error) : null,
+            h('div', { className: 'sd-picker-list' },
+              (data?.entries ?? []).map((entry) => h('button', {
+                key: entry.path,
+                type: 'button',
+                className: `sd-picker-row${entry.dir ? ' sd-picker-dir' : ''}`,
+                onClick: () => (entry.dir ? load(entry.path) : onPick(entry.path)),
+              }, h('span', { className: 'sd-picker-icon' }, entry.dir ? '📁' : '📄'), h('span', { className: 'sd-picker-name' }, entry.name)))),
+            (data?.entries ?? []).length === 0 && !busy ? h('p', { className: 'sd-hint' }, '这个目录里没有可导入的文件。') : null,
+          ),
+          h('div', { className: 'sd-modal-foot' },
+            h(Btn, { onClick: onClose }, '取消'),
+            h(Btn, { kind: 'primary', disabled: !data?.path, onClick: () => onPick(data.path) }, '用这个目录'))),
+      )
+    }
+
     function CartDialog({ items, projectId, sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
       const [allowContinue, setAllowContinue] = useState(false)
       const [target, setTarget] = useState(defaultTarget)
@@ -2287,6 +2333,7 @@ window.__ModuleLoader__.load({
       const [report, setReport] = useState(null)
       const [reviewing, setReviewing] = useState(false)
       const [review, setReview] = useState(null)
+      const [picking, setPicking] = useState(false)
 
       const doScan = async () => {
         const dir = path.trim()
@@ -2379,6 +2426,7 @@ window.__ModuleLoader__.load({
         h(Field, { label: '本机路径 *', hint: '作品根目录，或整本书文件（.md/.txt/.epub/.pdf/.mobi）' },
           h('div', { className: 'sd-inline-row' },
             h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说 或 /书/全本.epub', onChange: setPath }),
+            h(Btn, { onClick: () => setPicking(true) }, '浏览…'),
             h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
         h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
           h(Select, { value: split, options: [
@@ -2403,6 +2451,12 @@ window.__ModuleLoader__.load({
           h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
           h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
       ) : null
+
+      if (picking) return h(PathPickerDialog, {
+        initialPath: path.trim(),
+        onClose: () => setPicking(false),
+        onPick: (selected) => { setPath(selected); setPicking(false); setScan(null) },
+      })
 
       return h(
         'div',
@@ -2872,6 +2926,12 @@ window.__ModuleLoader__.load({
 
 .sd-cart-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);margin-top:10px}
 .sd-cart-banner>div{display:flex;flex-direction:column;gap:2px;font-size:12px}
+
+.sd-picker-list{display:flex;flex-direction:column;gap:2px;max-height:360px;overflow:auto;margin-top:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:8px;padding:4px}
+.sd-picker-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;padding:6px 8px;border-radius:6px;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.sd-picker-row:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
+.sd-picker-icon{width:16px;flex:0 0 16px}
+.sd-picker-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
