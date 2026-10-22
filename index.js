@@ -832,14 +832,11 @@ function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
       if (item.detail) parts.push(`：${item.detail}`)
       const isDecision = item.proposalKind === 'decision'
       if (item.approved) parts.push('；作者已同意采纳')
-      if (isDecision) {
-        if (item.aiSuggestion) parts.push(`；AI 建议：${item.aiSuggestion}`)
-        if (item.choice) parts.push(`；作者选择：${item.choice}`)
-        if (item.note) parts.push(`；作者意见：${item.note}`)
-        else if (!item.choice) parts.push('；作者意见：（未填写，按 AI 建议）')
-      } else if (item.note) {
-        parts.push(`；作者补充：${item.note}`)
-      }
+      if (isDecision && item.aiSuggestion) parts.push(`；AI 建议：${item.aiSuggestion}`)
+      if (isDecision && item.choice) parts.push(`；作者选择：${item.choice}`)
+      if (item.authorOpinion) parts.push(`；作者意见：${item.authorOpinion}`)
+      if (item.note) parts.push(`；清单补充：${item.note}`)
+      if (isDecision && !item.choice && !item.authorOpinion) parts.push('；作者意见：（未填写，按 AI 建议）')
       parts.push(`（id=${item.id}）`)
       lines.push(parts.join(' '))
     })

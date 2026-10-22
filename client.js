@@ -1071,6 +1071,8 @@ window.__ModuleLoader__.load({
       const [kindFilter, setKindFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
       const [choices, setChoices] = useState({})
+      const [authorOpinions, setAuthorOpinions] = useState({})
+      const [decisionModes, setDecisionModes] = useState({})
       const priorityRank = (p) => Number(p.priority) || 3
       const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending').sort((a, b) => priorityRank(a) - priorityRank(b))
       const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
@@ -1152,14 +1154,23 @@ window.__ModuleLoader__.load({
                   h('input', { type: 'radio', name: `decision-${p.id}`, checked: chosen === option.id, onChange: () => setChoices((prev) => ({ ...prev, [p.id]: option.id })) }),
                   h('span', null, option.label),
                   option.id === data.recommendedOptionId ? h(Tag, { tone: 'brand' }, 'AI 推荐') : null))),
-              h('div', { className: 'sd-hint' }, '选好值后加入清单；发到对话会按你的选择落成具体修改提案。'))
+              h(Field, { label: '作者补充意见（可选）' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '例如：选第 1 回，但把第 5 回的表述改成回忆…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) })),
+              h('div', { className: 'sd-hint' }, '选好值后加入清单；发到对话会按你的选择和补充意见落成具体修改提案。'))
           }
+          const mode = decisionModes[p.id] ?? 'ai'
           return h('div', { className: 'sd-proposal-body' },
             h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
-            aiSuggestion
-              ? h('div', { className: 'sd-decision-ai' }, h('strong', null, 'AI 建议：'), aiSuggestion)
-              : h('div', { className: 'sd-hint' }, '这条决策没有 AI 建议，加入清单时写你的处理意见。'),
-            h('div', { className: 'sd-hint' }, '处理方式：加入清单 → 发到对话。清单意见留空 = 同意 AI 建议；写了你的意见 = 按作者意见。'))
+            h('div', { className: 'sd-decision-options' },
+              h('label', { className: 'sd-decision-option' },
+                h('input', { type: 'radio', name: `mode-${p.id}`, checked: mode === 'ai', onChange: () => setDecisionModes((prev) => ({ ...prev, [p.id]: 'ai' })) }),
+                h('span', null, aiSuggestion ? `同意 AI 建议：${aiSuggestion}` : '同意 AI 建议')),
+              h('label', { className: 'sd-decision-option' },
+                h('input', { type: 'radio', name: `mode-${p.id}`, checked: mode === 'author', onChange: () => setDecisionModes((prev) => ({ ...prev, [p.id]: 'author' })) }),
+                h('span', null, '按作者意见处理'))),
+            mode === 'author'
+              ? h(Field, { label: '作者意见 *' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '写清楚你希望怎么处理…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) }))
+              : null,
+            h('div', { className: 'sd-hint' }, '加入清单后，这条意见会随清单一起发给对话。'))
         }
         if (p.kind === 'chapter') {
           const existing = (bundle.chapters ?? []).find((c) => String(Number(c.id)) === String(Number(p.chapter)))
@@ -1223,22 +1234,22 @@ window.__ModuleLoader__.load({
               h(Btn, { onClick: () => { setFeedbackFor(''); setFeedbackText('') } }, '取消'),
             ),
           ) : null,
+          p.kind !== 'decision' ? h(Field, { label: '作者意见（可选）' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '对这份提案的补充要求，会随清单一起发给对话…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) })) : null,
           p.kind === 'decision'
             ? h('div', { className: 'sd-proposal-actions' },
                 onAddCart ? h(Btn, { kind: 'primary', onClick: () => {
                   const valueOptions = (p.data?.options ?? []).filter((option) => option.factId || option.value)
-                  const chosenId = choices[p.id] ?? p.data?.recommendedOptionId ?? valueOptions[0]?.id
-                  const chosen = valueOptions.find((option) => option.id === chosenId)
-                  onAddCart({
-                    kind: 'proposal',
-                    id: p.id,
-                    chapter: p.chapter,
-                    title: p.title,
-                    proposalKind: 'decision',
-                    aiSuggestion: p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? '',
-                    choice: chosen?.label ?? '',
-                    detail: p.summary ?? '',
-                  })
+                  const aiSuggestion = p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? ''
+                  const authorOpinion = (authorOpinions[p.id] ?? '').trim()
+                  if (valueOptions.length > 0) {
+                    const chosenId = choices[p.id] ?? p.data?.recommendedOptionId ?? valueOptions[0]?.id
+                    const chosen = valueOptions.find((option) => option.id === chosenId)
+                    onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, proposalKind: 'decision', aiSuggestion, choice: chosen?.label ?? '', authorOpinion, detail: p.summary ?? '' })
+                    return
+                  }
+                  const mode = decisionModes[p.id] ?? 'ai'
+                  if (mode === 'author' && !authorOpinion) { window.alert('选了「按作者意见处理」，请先写作者意见'); return }
+                  onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, proposalKind: 'decision', aiSuggestion, choice: mode === 'ai' ? '同意 AI 建议' : '按作者意见处理', authorOpinion, detail: p.summary ?? '' })
                 } }, '加入清单') : null,
                 h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
               )
@@ -1250,6 +1261,7 @@ window.__ModuleLoader__.load({
                   title: p.title,
                   proposalKind: p.kind,
                   approved: true,
+                  authorOpinion: (authorOpinions[p.id] ?? '').trim(),
                   detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；'),
                 }) }, '同意并加入清单') : null,
                 h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
@@ -2203,7 +2215,7 @@ window.__ModuleLoader__.load({
                       item.approved ? h(Tag, { tone: 'muted' }, '已同意') : null,
                       h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
                       h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
-                    h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '给这一项补充你的处理意见（会随清单发给 AI）…', onChange: (value) => onNote(item, value) })))),
+                    h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '清单补充（可选；会随清单发给 AI，和提案卡上的作者意见分开）…', onChange: (value) => onNote(item, value) })))),
             h('label', { className: 'sd-cb', style: { marginTop: 10 } },
               h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }),
               '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
