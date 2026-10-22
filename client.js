@@ -2374,9 +2374,9 @@ window.__ModuleLoader__.load({
       ) : null
 
       const formBody = !report ? h('div', null,
-        h(Field, { label: '本机路径 *', hint: '作品根目录（含 正文/、wiki/ 等）或单个 .md 文件' },
+        h(Field, { label: '本机路径 *', hint: '作品根目录，或整本书文件（.md/.txt/.epub/.pdf/.mobi）' },
           h('div', { className: 'sd-inline-row' },
-            h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说', onChange: setPath }),
+            h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说 或 /书/全本.epub', onChange: setPath }),
             h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
         h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
           h(Select, { value: split, options: [
@@ -2407,8 +2407,8 @@ window.__ModuleLoader__.load({
         { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && busy !== 'run' && !reviewing && onClose() },
         h('div', { className: 'sd-modal sd-modal-wide' },
           h('div', { className: 'sd-modal-head' },
-            h('strong', null, report ? '✅ 导入完成' : '⬆ 导入作品包'),
-            h('span', { className: 'sd-hint' }, report ? '检查导入结果，然后开始 AI 审阅' : '自动识别 章节 / 人物卡 / 大纲 / 追踪 / 写作规范'),
+            h('strong', null, report ? '✅ 导入完成' : '⬆ 导入作品 / 作品包'),
+            h('span', { className: 'sd-hint' }, report ? '检查导入结果，然后开始 AI 审阅' : '支持目录或整本书：md / txt / epub / pdf / mobi'),
             h(IconBtn, { onClick: () => busy !== 'run' && !reviewing && onClose(), title: '关闭' }, '✕')),
           h('div', { className: 'sd-modal-body' }, report ? reportBody : formBody),
           h('div', { className: 'sd-modal-foot' },
