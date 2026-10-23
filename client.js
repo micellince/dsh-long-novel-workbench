@@ -5278,6 +5278,30 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const selectedRows = all.filter((review) => selected.includes(review.id))
       const selectedPending = selectedRows.filter((review) => !isDone(review))
       const selectedDone = selectedRows.filter((review) => isDone(review))
+      // 提案已采纳但审阅没归档的历史数据：进页面自动回填一次（幂等）
+      const acceptedReviewIds = new Set()
+      for (const proposal of bundle.proposals ?? []) {
+        if (proposal.status !== 'accepted') continue
+        const ids = [
+          ...(Array.isArray(proposal.data?.reviewIds) ? proposal.data.reviewIds : []),
+          ...(Array.isArray(proposal.reviewIds) ? proposal.reviewIds : []),
+        ]
+        for (const id of ids) acceptedReviewIds.add(String(id))
+      }
+      const linkedReviewCount = pendingAll.filter((review) => acceptedReviewIds.has(String(review.id))).length
+      const reconcileAttempted = useRef(false)
+      useEffect(() => {
+        if (linkedReviewCount === 0 || reconcileAttempted.current) return
+        reconcileAttempted.current = true
+        ;(async () => {
+          try {
+            const value = await api('review.reconcile', { projectId })
+            if (Number(value?.updated) > 0) onChanged?.()
+          } catch {
+            /* ignore：回填失败不阻断审阅页 */
+          }
+        })()
+      }, [linkedReviewCount, projectId])
       const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 148px'
       const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
       const allPendingSelected = pending.length > 0 && pending.every((review) => selected.includes(review.id))
@@ -5369,6 +5393,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         h('div', { className: 'sd-bulkbar' },
           h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allPendingSelected, onChange: toggleAllPending }), '全选待处理'),
           h('span', { className: 'sd-hint' }, `待处理 ${pendingAll.length} 条，当前显示 ${pending.length} 条，已选 ${selectedPending.length} 条`),
+          linkedReviewCount > 0 ? h('span', { className: 'sd-hint' }, `${linkedReviewCount} 条审阅对应的提案已采纳，正在自动归档…`) : null,
           h('select', { className: 'sd-input sd-select-inline', value: severityFilter, onChange: (e) => setSeverityFilter(e.target.value) },
             h('option', { value: 'all' }, '全部严重度'),
             [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']].map(([value, label]) => h('option', { key: value, value }, label))),

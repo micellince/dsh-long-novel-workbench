@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages, getExpansion, saveExpansion, resetExpansion } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, reconcileReviewsFromAcceptedProposals, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages, getExpansion, saveExpansion, resetExpansion } from './lib/store.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
@@ -182,6 +182,11 @@ async function handleRpc(body, ctx) {
       if (!projectId) throw new Error('缺少 projectId')
       if (!body.status) throw new Error('缺少 status')
       return batchUpdateReviews(root, projectId, Array.isArray(body.ids) ? body.ids : [], { status: String(body.status) })
+    }
+    case 'review.reconcile': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      return reconcileReviewsFromAcceptedProposals(root, projectId)
     }
     case 'preset.builtin':
       return builtinPresets()

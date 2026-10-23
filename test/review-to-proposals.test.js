@@ -60,6 +60,43 @@ test('review-to-proposals：没选中/选到不存在的审稿时报清楚错误
   assert.throws(() => buildHandoffPrompt(bundle, { task: 'review-to-proposals' }), /没有选择要处理的审稿意见/)
 })
 
+test('acceptProposal：带 reviewIds 的章节提案采纳后自动把对应审阅标记 fixed', async (t) => {
+  const { root, project, r1 } = await seed(t)
+  const proposal = await store.createProposal(root, project.id, {
+    kind: 'chapter',
+    chapter: 1,
+    title: '按审稿修订第一章',
+    data: { title: '第一章（修订）', content: '修订后的正文。', reviewIds: [r1.id] },
+  })
+  const result = await store.acceptProposal(root, project.id, proposal.id)
+  assert.equal(result.applied.reviews, 1, '采纳时应把关联审阅标记为已修')
+  const bundle = await store.getBundle(root, project.id)
+  const review = bundle.reviews.find((row) => row.id === r1.id)
+  assert.equal(review.status, 'fixed')
+  assert.equal(review.fixedByProposalId, proposal.id)
+})
+
+test('reconcileReviewsFromAcceptedProposals：历史「提案已采纳但审阅未归档」可幂等回填', async (t) => {
+  const { root, project, r1 } = await seed(t)
+  const proposal = await store.createProposal(root, project.id, {
+    kind: 'chapter',
+    chapter: 1,
+    title: '历史修订',
+    data: { title: '第一章（历史）', content: '历史正文。', reviewIds: [r1.id] },
+  })
+  await store.upsertEntity(root, project.id, 'proposals', {
+    ...proposal,
+    status: 'accepted',
+    acceptedAt: new Date().toISOString(),
+  })
+  const first = await store.reconcileReviewsFromAcceptedProposals(root, project.id)
+  assert.equal(first.updated, 1)
+  const bundle = await store.getBundle(root, project.id)
+  assert.equal(bundle.reviews.find((row) => row.id === r1.id).status, 'fixed')
+  const second = await store.reconcileReviewsFromAcceptedProposals(root, project.id)
+  assert.equal(second.updated, 0, '幂等：第二次不应再改')
+})
+
 test('review-to-proposals：从清单 items 里取审稿 id（清单是唯一 AI 入口）', async (t) => {
   const { bundle, r1, r2 } = await seed(t)
   const items = [
