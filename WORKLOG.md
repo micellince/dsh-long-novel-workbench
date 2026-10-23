@@ -265,3 +265,10 @@
 - 用碧血数据副本 + 当前后端直接调用 approveExpansionOutline（approvedOutlineIds=oc-01/oc-02）：status → running、approvedOutlineChanges=2、续跑 prompt 成功发出，证明新后端逻辑正常。
 - 线上文件仍停在 waiting-outline / approved=0，说明那次请求被旧宿主拒绝（只刷新页面没有重启 DSH）。
 - 前端补充错误提示：旧宿主报错时明确提示 Cmd+Q 完全退出并重开。
+
+
+### 修 bug：提案采纳后审阅不消失
+
+- 原因：review-to-proposals 的章节提案带 data.reviewIds，但 acceptProposal 只写正文/账本，未回写审阅状态。
+- 修复：acceptProposal 采纳后按 data.reviewIds 把审阅标记 fixed（fixedByProposalId）；新增 reconcileReviewsFromAcceptedProposals + review.reconcile RPC；审阅页打开时自动幂等回填历史数据（碧血 53 条）。
+- 测试：新增 2 条（采纳自动 fixed、历史回填且幂等）；总 166/166。

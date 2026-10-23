@@ -6,6 +6,14 @@
 版本号遵循 [语义化版本（SemVer）](https://semver.org/lang/zh-CN/)。
 数据格式保持向后兼容：旧版本产生的 `~/StoryDesk` 数据可以直接被新版本读取。
 
+## [Unreleased]
+
+### 修复
+
+- **提案全部采纳后审阅仍残留**：`review-to-proposals` 生成的章节提案带 `data.reviewIds`，但 `acceptProposal` 只写正文/账本，从未回写审阅状态。现在章节（及带 reviewIds 的）提案采纳后会自动把关联审阅标记为 `fixed`（记录 `fixedByProposalId`）；另新增 `reconcileReviewsFromAcceptedProposals` / `review.reconcile`，审阅页打开时对历史「提案已采纳但审阅未归档」数据自动幂等回填（例如碧血那 53 条）。
+
+---
+
 ## [0.5.1] - 2026-10-22
 
 ### 新增
