@@ -23,7 +23,7 @@ import { writeChapterWithGates, formatGateLine, formatFailures } from './lib/gat
 import * as prompts from './lib/prompts.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
 import * as bookdb from './lib/bookdb.js'
-import { buildIndex, splitTitle } from './lib/paras.js'
+import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
@@ -93,6 +93,8 @@ export const WRITE_OPS = [
   'import.run',
   'opinions.merge',
   'opinions.patch',
+  'opinions.accept',
+  'opinions.reject',
   'ledger.confirm',
 ]
 
@@ -1420,6 +1422,37 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const id = String(need(payload, 'id'))
       const dir = await s.projectDir(root, projectId)
       return bookdb.patchOpinion(dir, id, payload.patch ?? omit(payload, ['projectId', 'id']))
+    }
+    case 'opinions.accept': {
+      const projectId = String(need(payload, 'projectId'))
+      const id = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      const opinion = await bookdb.getOpinion(dir, id)
+      if (!opinion) throw invalid('意见不存在')
+      if (!String(opinion.after || '').trim()) {
+        return bookdb.patchOpinion(dir, id, { status: 'accepted' })
+      }
+      const doc = await s.readChapter(root, projectId, opinion.chapter)
+      const raw = String(doc.text ?? '')
+      const { title, body } = splitTitle(raw)
+      const paragraphs = splitParagraphs(body)
+      const at = Number(opinion.para)
+      if (!(at >= 0) || !paragraphs[at]) throw invalid('意见地址已失效，请重新定位后再采纳')
+      const index = buildIndex(raw, opinion.chapter)
+      if (opinion.paraHash && index.paras[at] && index.paras[at].hash !== opinion.paraHash) {
+        await bookdb.patchOpinion(dir, id, { status: 'stale', staleReason: '正文已改动，段落指纹不一致' })
+        throw invalid('正文已改动，这条意见地址失效，已标记为失效（stale）')
+      }
+      const nextBody = paragraphs.map((row, i) => (i === at ? String(opinion.after).trim() : row.text)).join('\n\n')
+      const nextText = title ? `${title}\n\n${nextBody}\n` : `${nextBody}\n`
+      await s.saveChapter(root, projectId, opinion.chapter, nextText, {}, { baseHash: doc.meta && doc.meta.contentHash, source: 'opinion-accept' })
+      return bookdb.patchOpinion(dir, id, { status: 'accepted' })
+    }
+    case 'opinions.reject': {
+      const projectId = String(need(payload, 'projectId'))
+      const id = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.patchOpinion(dir, id, { status: 'rejected' })
     }
     case 'ledger.confirm': {
       const projectId = String(need(payload, 'projectId'))
