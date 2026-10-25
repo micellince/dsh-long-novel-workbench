@@ -25,7 +25,7 @@ import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage
 import * as bookdb from './lib/bookdb.js'
 import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
 import { ROLES } from './lib/roles.js'
-import { checkLatest, updateHint } from './lib/update.js'
+import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
@@ -69,6 +69,8 @@ export const READ_OPS = [
   'storage.status',
   'roles.list',
   'update.check',
+  'update.install',
+  'update.rollback',
   'diagnostics',
   'chapter.index',
   'opinions.list',
@@ -1295,8 +1297,18 @@ export async function handleRpc(body, ctx = {}, options = {}) {
     }
     case 'update.check': {
       const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+      const dir = fileURLToPath(new URL('.', import.meta.url))
       const info = await checkLatest({ installed: String(pkg.version ?? ''), force: Boolean(payload.force) })
-      return { ...info, current: String(pkg.version ?? ''), hint: updateHint() }
+      return { ...info, current: String(pkg.version ?? ''), hint: updateHint(), mode: await installMode(dir), pluginDir: dir }
+    }
+    case 'update.install': {
+      const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+      const dir = fileURLToPath(new URL('.', import.meta.url))
+      return installLatest({ dir, installed: String(pkg.version ?? ''), force: Boolean(payload.force) })
+    }
+    case 'update.rollback': {
+      const dir = fileURLToPath(new URL('.', import.meta.url))
+      return rollback(dir)
     }
     case 'diagnostics': {
       const info = await bookdb.storageStatus('')

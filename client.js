@@ -829,34 +829,54 @@ window.__ModuleLoader__.load({
         options.map((opt) => h('option', { key: String(opt.value), value: String(opt.value) }, opt.label)),
       )
     }
-    // 插件更新检查卡：只读 npm，不自动安装
+    // 插件更新卡：检查 npm +（非 git 副本时）一键安装/回退；不静默升级
     function UpdateCard() {
-      const [state, setState] = useState({ loading: false, data: null, error: '' })
-      const check = async () => {
-        setState({ loading: true, data: state.data, error: '' })
+      const [state, setState] = useState({ loading: false, installing: false, data: null, error: '' })
+      const run = async (op, payload) => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
         try {
-          const data = await api('update.check', { force: true })
-          setState({ loading: false, data, error: '' })
+          const data = await api(op, payload).catch((error) => ({ ok: false, reason: friendlyError(error) }))
+          setState((prev) => ({ ...prev, loading: false, data: { ...(prev.data || {}), ...data }, error: '' }))
         } catch (error) {
-          setState({ loading: false, data: state.data, error: friendlyError(error) })
+          setState((prev) => ({ ...prev, loading: false, error: friendlyError(error) }))
         }
+        if (op === 'update.check') {
+          setState((prev) => ({ ...prev, loading: false }))
+        }
+      }
+      const check = () => { setState((prev) => ({ ...prev, loading: true, error: '' })); api('update.check', { force: true }).then((data) => setState({ loading: false, installing: false, data, error: '' }), (error) => setState((prev) => ({ ...prev, loading: false, error: friendlyError(error) }))) }
+      const install = async () => {
+        setState((prev) => ({ ...prev, loading: true, installing: true, error: '' }))
+        const data = await api('update.install', {}).catch((error) => ({ ok: false, reason: friendlyError(error) }))
+        setState((prev) => ({ ...prev, loading: false, installing: false, data: { ...(prev.data || {}), installResult: data }, error: '' }))
+      }
+      const rollbackNow = async () => {
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        const data = await api('update.rollback', {}).catch((error) => ({ ok: false, reason: friendlyError(error) }))
+        setState((prev) => ({ ...prev, loading: false, data: { ...(prev.data || {}), rollbackResult: data }, error: '' }))
       }
       const copy = () => {
         const text = String((state.data && state.data.hint) || '')
         try { navigator.clipboard.writeText(text) } catch { /* 无剪贴板权限 */ }
       }
       const data = state.data || {}
+      const result = data.installResult || data.rollbackResult
       return h('section', { className: 'nd-card' },
         h('div', { className: 'nd-card-head' }, h('h3', null, '🔄 插件更新')),
-        h('p', { className: 'nd-hint' }, `已装版本：${data.current || '—'}${data.latest ? ` ｜ npm 最新：${data.latest}` : ''}`),
+        h('p', { className: 'nd-hint' }, `已装版本：${data.current || '—'}${data.latest ? ` ｜ npm 最新：${data.latest}` : ''}${data.mode ? ` ｜ 安装形态：${data.mode === 'git' ? 'git 源码副本' : 'npm 包副本'}` : ''}`),
         data.error ? h(Msg, { tone: 'error' }, `检查失败：${data.error}`) : null,
-        data.latest && data.outdated ? h(Msg, { tone: 'warn' }, '有新版本可用：在 DSH 插件管理里更新本插件，更新后重载插件并刷新页面。') : null,
-        data.latest && !data.outdated ? h(Msg, { tone: 'ok' }, '已是最新版本。') : null,
-        state.error ? h(Msg, { tone: 'error' }, state.error) : null,
+        data.latest && data.outdated ? h(Msg, { tone: 'warn' }, '有新版本可用。') : null,
+        data.latest && !data.outdated ? h(Msg, { tone: 'ok' }, '已是最新版本（本地开发版可能比 npm 新）。') : null,
+        data.mode === 'git' ? h('p', { className: 'nd-hint' }, '当前是 git 源码副本：更新用 git pull，这里不会覆盖你的工作区。') : null,
+        result ? h(Msg, { tone: result.ok ? 'ok' : 'error' }, result.reason || (result.ok ? '完成' : '失败')) : null,
+        result && result.restartRequired ? h('p', { className: 'nd-hint' }, '需要：重载插件（Host）+ 刷新 DSH 页面（客户端）。') : null,
         data.hint ? h('pre', { className: 'nd-pre' }, data.hint) : null,
+        state.error ? h(Msg, { tone: 'error' }, state.error) : null,
         h('div', { className: 'nd-actions' },
-          h(Btn, { small: true, kind: 'primary', onClick: check, disabled: state.loading }, state.loading ? '检查中…' : '检查更新'),
+          h(Btn, { small: true, kind: 'primary', onClick: check, disabled: state.loading }, state.loading ? '处理中…' : '检查更新'),
+          data.outdated && data.mode === 'tarball' ? h(Btn, { small: true, kind: 'primary', onClick: install, disabled: state.installing }, state.installing ? '安装中…' : `一键更新到 ${data.latest}`) : null,
           data.hint ? h(Btn, { small: true, onClick: copy }, '复制更新方式') : null,
+          h(Btn, { small: true, onClick: rollbackNow, disabled: state.loading }, '回退上一版'),
         ),
       )
     }
