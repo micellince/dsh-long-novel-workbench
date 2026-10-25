@@ -267,8 +267,97 @@
 - 前端补充错误提示：旧宿主报错时明确提示 Cmd+Q 完全退出并重开。
 
 
+## 2026-10-24 · 注意力提分闭环（v0.5.2，未发布）
+
+**问题**：冷读只产「分数 + 2~4 条审阅」，改文链路出的是整章重写提案；没有四拍诊断、没有预期提分、也没有复测回填——"改了也加不了几分"。碧血实测：52 章均分 75、设计分均值 87，attention.json 52 条里没有一条复测记录；《鱼龙舞》133 章 attention 为空。
+
+**设计**：契约 `docs/ATTENTION-FIX.md`。用「段落级补丁」替代整章重写；四拍 + 弃读点落账；`scoreHistory` + `recheckPending` 串起「打分 → 出方案 → 采纳 → 复测」闭环。
+
+**改动**
+- `lib/attention-fix.js`（新，纯函数）：四拍/弃读点/确定性诊断/提分空间/候选章/闭环统计/span 定位/补丁应用/提交校验。
+- `lib/store.js`：`applyAttentionItems` 写 `scoreHistory`、`scoredAt/Hash`、清 `recheckPending`、记 `lastRecheck*`；`createProposal` 新 kind 硬校验；`acceptProposal` 分支（全量校验 → 倒序替换 → 自动备份 → `fixLog`/`recheckPending`/`fixPlan`）。
+- `index.js`：`attentionFixWorkorder` / `attentionRecheckWorkorder` / `attentionScoreboardText`；工具 `novel_desk_attention_fix`（workorder/recheck/scoreboard）；交接任务 `attention-fix` / `attention-recheck`；冷读 prompt 升级（必须 breakdown + dropPoints，读完直接产 3–12 条补丁）；context/plan 注入提分闭环与提分待办；TASK_LABEL 两项。
+- `index.js`（续）：工作单支持三种选法 `chapter=N` / `chapters=[...]` / `all=true`（`limit=0` 等价），不再写死「前 5 章」；>3 章自动转**批量工作单**（章节清单 + 每章诊断 + 逐章执行协议 + 正文文件路径，不内联正文）；复测单同样支持 `all`/`chapters`，>3 章转批量复测单。工具参数加 `chapters` / `all`，`limit` 支持 0=全部；`buildHandoffPrompt` 用 `handoffAttentionOptions(body)` 统一转发；context/plan/fresh-read 文案补「all=true / chapters=[...]」用法。
+- `index.js`（续）：聊天交接 prompt 不再把正文贴进对话——提分/复测工作单只给章节文件绝对路径 + 字数，零上下文首读（单章/全书）只给章节清单与路径，由 AI 自己 `read`；测试同步改为断言 prompt 不含正文。
+- `lib/checks.js`：4 条新规则（待复测 / 分数过期 / 改了没提分 / 设计落差不补）。
+- `client.js`：🎯 提分工作台（按提分空间降序 + 行勾选/表头全选 + 三个总按钮「生成全部提分方案 N 章 / 生成选中方案 K 章 / 复测全部待复测 N 章」+ 单章按钮）、四拍条、弃读点引文、fixLog、scoreHistory 徽章、待复测徽章、统计条第 5 格、总览第 4 格、`kind=attention-fix` 提案 before/after 对照（由 ui-attention 并行完成）。
+
+**验证**：`node --test` **279/279**（原 252 + attention-fix 14 + prompt 13）；`node --check` index.js/lib/*.js/client.js 全过；UI 用假 React 冒烟渲染 AttentionTab / 总览 / 提案页通过。
+
+**未做/待验证**：真机冷读一次看是否稳定每章 ≥3 条；工作台 UI 刷新真机验收；npm 未发布（与版本对齐/快照/revision 等未发布特性同属 0.5.2 这批）。
+
+---
+
 ### 修 bug：提案采纳后审阅不消失
 
 - 原因：review-to-proposals 的章节提案带 data.reviewIds，但 acceptProposal 只写正文/账本，未回写审阅状态。
 - 修复：acceptProposal 采纳后按 data.reviewIds 把审阅标记 fixed（fixedByProposalId）；新增 reconcileReviewsFromAcceptedProposals + review.reconcile RPC；审阅页打开时自动幂等回填历史数据（碧血 53 条）。
 - 测试：新增 2 条（采纳自动 fixed、历史回填且幂等）；总 166/166。
+
+---
+
+## 2026-10-24 · 复核发现的问题落成审稿（v0.5.2，未发布）
+
+**背景**：作者反馈「复核了以后，提案都是直接修改的，对于复核后新发现的问题，好像无法新增新的改动审阅」——复测（复核）读出问题后只能直接收 attention-fix 补丁或整章重写，审稿页没有入口。
+
+**改动**
+- `index.js`：新增 `reviewIssueKey` / `normalizeReviewSeverity` / `normalizeReviewOrigin` / `writeReviewBatch`；`novel_desk_review` 重写（多章、`scope='book'`→`chapter=0`、`origin` 四值、`quote`、中文严重度、同章同维度同题去重与重新打开、章号必须存在、`required=['reviews']`）。
+- `index.js`：新增 `attentionRecheckSubmissionLines`（复测提交格式 + 「## 复核发现的问题要落成审稿」），内联复测单与批量复测单共用；`review-to-proposals` 交接 prompt 二分：节奏/文笔/语言/句子/对话/首读 → 合并 `attention-fix` 段落补丁（3–12 条、≥2 target、合计 ≤40、`reviewIds` 覆盖），情节/人物/连续性 → 一条一个 chapter 提案；每条审稿必须被覆盖。
+- `index.js`：冷读 `novel_desk_review` 调用带 `origin="cold-read"`；工具 `novel_desk_attention_fix` 的 recheck 描述补「复核新问题写成审稿（origin=\"recheck\"，整书共性 chapter=0）」；context/plan 提分闭环段补同义提示。
+- `lib/checks.js`：新增 `attention-recheck-no-review:<n>`（复测低分/任一拍 <13，但本轮没有 `origin='recheck'` 的审稿，同章或 chapter=0 均算覆盖）。
+- `client.js`（ui-attention）：审稿页来源列/筛选、chapter=0 显示「全书」、表单加来源/引文；提案页 attention-fix 显示「处理 N 条审稿」；提分工作台「看复核审稿（N）」跳审稿页；购物车提示更新。
+
+**测试**：新增 `test/review-batch.test.js`（5 例：多章/全书级写入、去重与重新打开、参数与中文/非法值错误、工具 schema、checks 覆盖判断）；`test/review-to-proposals.test.js` 断言升级并新增节奏类合并段落补丁；`test/attention-fix-prompt.test.js` 复测单新增落审稿断言。全量 `node --test` **285/285** 通过（原 279 + 6），`node --check` index.js/lib/*.js/client.js 全过。
+
+**文档**：`docs/ATTENTION-FIX.md` 新增 §10「复核落审稿」并更新 §5/§6/§7/§8/§9；CHANGELOG [Unreleased]、README、HANDOVER、BACKLOG（B-111）、`docs/ATTENTION.md` 计数同步。
+
+
+---
+
+## 2026-10-24 · 提案去重：复测不再出现一章两张重复卡（v0.5.2，未发布）
+
+**背景**：作者反馈「复测好像经常出现一章两个重复的」。取证发现不是页面渲染重复，而是 AI 同章重复提交 `kind=attention`（工具重试 / 自我重打分），`createProposal` 无幂等，pending 并排两张；两遍都采纳还会写重复 `scoreHistory`。
+
+**改动**
+- `lib/store.js`：`createProposal` 加两道去重——`proposalPayloadKey`（kind + title + chapter + data + items 完全一致 → 复用旧 pending 卡）；`attentionProposalRole` 区分 measured / design，同章同角色 pending 原地覆盖（保留 id，更新内容）。不同章、已采纳/已驳回、design 与 measured 互不影响。
+- 数据清理：《碧血青霜缘》`proposals.json` 删掉 ch11（59a857117f）、ch14（79eb2ac7bd）、ch36（2aad816477）三组待采纳重复，保留最新一份；备份 `.backups/proposals-2026-10-24T06-34-37-659Z.json`。同一轮双采纳留下的 6 条空更新 `scoreHistory`（ch28/30/31/32/33，如 `77→77`、`86→86`，前后相差 <5 秒）也清掉，备份 `.backups/attention-2026-10-24T06-35-49-045Z.json`；已采纳历史提案保持原样。
+- `test/proposal.test.js`：新增 4 例（同 payload 幂等、同章重打分覆盖、design/measured 并存、已采纳不覆盖 + 不同章独立）。
+
+**测试**：全量 `node --test` **289/289** 通过（原 285 + 4）；`node --check lib/store.js` 通过。
+
+**文档**：CHANGELOG [Unreleased]「修复」、`docs/ATTENTION-FIX.md` §11、`docs/ATTENTION.md` 验收、HANDOVER 计数与说明、BACKLOG B-112。
+
+---
+
+## 2026-10-24 · 去 AI 化审阅硬隔离：禁止跨作品对比（v0.5.2，未发布）
+
+**问题**：作者说「让它去做去 AI 化审核，它去对比了《鱼龙舞》」。取证：`review.startDeai` 本身确实新建空会话，但 `buildAiStyleReviewPrompt` 只给汇总指标——不给本书章节清单、不给路径、也没有任何隔离禁令。项目工作区是 `default-workspace/碧血青霜缘`，父目录里并列着《鱼龙舞（妖刀记前传）》，`_work/` 里还留着旧的人类基线报告，AI 为了找原文自己翻文件，把另一本书当「人类对照」。实证：该工作区 `去AI化审阅报告.md` 第 4 行 `人类对照：《鱼龙舞（妖刀记前传）》133 回 / 1,116,993 字`。
+
+**改动**
+- `index.js`：新增 `DEAI_AUDIT_URL`（朱雀 `https://matrix.tencent.com/ai-detect/`，只给链接）；`deaiWorkspaceDir` / `prepareDeaiWorkspace`（清空重建隔离目录，逐章写纯正文副本）/ `ensureDeaiWorkspace`（注册为工作区）/ `startDeaiReview`（审计 → 建隔离工作区 → 建会话 → 投 prompt；`dryRun` 只回工作单）；`review.startDeai` 改走它，返回加 `workspacePath` / `chapterCount`。
+- `index.js`：`buildAiStyleReviewPrompt` 重写为「独立会话 · 零上下文 · 只审本书」——硬性边界 6 条、「章节文件清单（唯一允许读取的文件）」逐章给绝对路径与字数、保留 Markdown/指标/判定口径、输出要求 `origin="deai"` 且每条带该章逐字 `quote`、末尾提交前自查（含朱雀链接）。
+- `index.js`：审稿闸门——`REVIEW_ORIGINS` 加 `deai`；`writeReviewBatch` 预取各章正文与其他作品名（含去副标题/分段变体），内容命中其他作品名整批拒绝；`origin="deai"` 必须带 `quote` 且逐字存在于该章正文；`novel_desk_review` 的 enum/描述同步；新增工具 `novel_desk_deai_review`（`op=start|workorder`）。
+- `client.js`（ui-attention）：审稿来源加「去AI化」；去 AI 化卡加隔离说明、朱雀外链与隔离工作区路径展示。
+
+**测试**：`test/aistyle.test.js` 新增 1 例（边界/清单/隔离路径/origin/自查/朱雀）；`test/review-batch.test.js` origin enum 加 `deai`；新增 `test/deai-isolation.test.js` 5 例（隔离目录只含本书章节副本、dryRun 工作单不含其他作品、deai 审稿 quote 校验、跨作品名被拒、工具与 `op` 枚举）。全量 `node --test` **295/295** 通过（原 289 + 6）。
+
+**文档**：CHANGELOG（新增 + 修复）、README、`docs/REVISION-CONTRACT.md`、HANDOVER 计数、BACKLOG B-113。
+
+---
+
+## 2026-10-24 · 所有审阅硬隔离：一份隔离区、统一硬边界（v0.5.2，未发布）
+
+**问题**：去 AI 化审阅隔离完，作者立刻要求「所有审阅都必须硬隔离，不能产生任何污染，除非用户指定目录或文件，否则绝不允许其他书籍污染当前书籍」。此前只有去 AI 化一条链路是隔离的：零上下文首读、提分工作单、复测单直接给 `projects/<id>/chapters/` 绝对路径，全文重新审阅走 `startPipelineSession`（项目目录会话）、prompt 也没有隔离边界，AI 可以顺手读旁边的书或历史报告。
+
+**改动**
+- `index.js`：被替换的隔离核心——`REVIEW_ISOLATION_LINES`（4 条硬边界：只读清单内章节文件 / 绝对禁止跨作品对比 / 未指定不得打开清单外文件 / 只提交结果不改正文）、`reviewSandboxDir` + `export function prepareReviewSandbox(root, bundle, chapterNumbers=null)`（`<StoryDesk>/.review-workspaces/<作品名-id后6位>/<12位指纹>/chapters/`，指纹按章号+正文算、同批章幂等复用、不同章集合各占目录互不清文件，只写本书章节纯正文副本，返回 `{dir, chapterFiles, byId}`；每次准备后刷新目录 mtime，按 mtime 只留最近 8 份）、`reviewSandboxFor`（无 root 时退回项目目录，方便手工 bundle 单测）、`ensureReviewWorkspace` / `startIsolatedReviewSession`（注册 workspace + 新建独立会话 + `controller.prompt`，缺 registry/服务时给中文错误）。
+- `index.js`：`startFullBookReview()` 新增并替换 `review.startFull` 的 pipeline 会话——先 `prepareReviewSandbox` 复制全书副本，再在隔离区新建零上下文会话，返回 `{sessionId,prompt,focus,workspacePath,chapterCount}`；`buildFullBookReviewPrompt` 改成 `input.sandbox ?? reviewSandboxFor(...)`，插硬边界 + 「章节文件清单（唯一允许读取的文件）」。
+- `index.js`：零上下文首读（单章/全书）改走 `chapterFilePath(..., sandbox)` 并插 `REVIEW_ISOLATION_LINES`；`attentionFixWorkorder` / `attentionRecheckWorkorder` 按选中章建 sandbox，内联/批量工作单都只给隔离区路径；`review-to-proposals` 也给隔离区「涉及章节的正文文件（唯一允许读取的文件）」清单与执行要求；`buildAiStyleReviewPrompt` 复用同一套（`prepareDeaiWorkspace` 退化为 `prepareReviewSandbox` 的薄封装，旧 `.deai-workspaces` 废弃）。
+- `index.js`：新增 `REVIEW_ISOLATION_NOTICE_LINES` 并插进带账本上下文的审阅任务（`full-review` / `import-review` / `review-chapter` / `review-fix`），禁止跨作品、禁止读本书工作台以外的文件；写作任务（`continue-chapter` 等）不加。
+
+**测试**：新增 `test/review-isolation.test.js` 7 例（隔离区只含本书副本、全文审阅只给隔离区清单、零上下文首读单章/全书、提分/复测工作单、按审稿出提案、带上下文的审阅任务边界、`startFullBookReview` 的 workspace 就是隔离区且新会话开在该 workspace）。同步把 `test/deai-isolation.test.js`、`test/agents-fresh-read.test.js`、`test/attention-fix-prompt.test.js`、`test/attention.test.js`、`test/aistyle.test.js` 的路径断言改到 `.review-workspaces`；同一个临时 StoryDesk 下建一本《鱼龙舞》，所有审阅 prompt 断言不出现它。全量 `node --test` **302/302** 通过（原 295 + 7）。
+
+**文档**：CHANGELOG「新增」顶部、README「所有审阅都是硬隔离的」（替换原「去 AI 化审阅硬隔离」段）、`docs/REVISION-CONTRACT.md`（RPC 返回与隔离说明）、`docs/ATTENTION-FIX.md` §12、`docs/ATTENTION.md` §5 隔离说明与验收计数、HANDOVER 计数、BACKLOG B-114。
+
+---
+

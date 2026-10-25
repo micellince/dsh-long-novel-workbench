@@ -65,6 +65,8 @@ async function makeProject(t, { name = '扩写作品', chapters = 2, outlines = 
   useTempRoot(t, root)
   const project = await store.createProject(root, { name, genre: '武侠' })
   await store.updateProject(root, project.id, { workspaceId: 'ws-test', workspacePath: join(root, 'ws') })
+  // 生成前必须先选定当前写作预设（硬闸门）：测试里显式选一套。
+  await store.applyPreset(root, project.id, 'preset-standard')
   for (let index = 1; index <= chapters; index += 1) {
     await store.saveChapter(root, project.id, { id: String(index).padStart(4, '0'), title: `第${index}章`, content: `第 ${index} 章正文，原稿内容。` })
   }

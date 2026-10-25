@@ -36,7 +36,8 @@ test('review-to-proposals：只列选中的审稿，要求逐条出 chapter 提�
   assert.ok(prompt.includes('第1章'), '应带章号')
   assert.ok(!prompt.includes('太子即位传言'), '未选中的审稿不能混进来')
   assert.ok(prompt.includes('novel_desk_propose'), '必须要求走提案')
-  assert.ok(prompt.includes('reviewIds=[审稿 id]'), '提案里要带 reviewIds')
+  assert.ok(prompt.includes('reviewIds'), '提案里要带 reviewIds')
+  assert.ok(prompt.includes('审稿 id'), '提案要能回溯到审稿条目')
   assert.ok(prompt.includes('不要直接改正文'), '必须禁止直改正文')
   for (const polluted of ['工作台交接', '分角色审阅规范', '写作预设', '禁忌']) {
     assert.ok(!prompt.includes(polluted), `不能出现「${polluted}」，否则模型会去写审稿而不是提案`)
@@ -49,8 +50,8 @@ test('review-to-proposals：多条按清单顺序列出，条数正确', async (
 
   assert.ok(prompt.includes('下面 2 条'))
   assert.ok(prompt.indexOf('年龄矛盾') < prompt.indexOf('太子即位传言'), '应按传入顺序排列')
-  assert.match(prompt, /1\. 第1章.*blocker/)
-  assert.match(prompt, /2\. 第3章.*major/)
+  assert.match(prompt, /1\. \[整章修订\] 第1章.*blocker/)
+  assert.match(prompt, /2\. \[整章修订\] 第3章.*major/)
 })
 
 test('review-to-proposals：没选中/选到不存在的审稿时报清楚错误', async (t) => {
@@ -95,6 +96,20 @@ test('reconcileReviewsFromAcceptedProposals：历史「提案已采纳但审阅�
   assert.equal(bundle.reviews.find((row) => row.id === r1.id).status, 'fixed')
   const second = await store.reconcileReviewsFromAcceptedProposals(root, project.id)
   assert.equal(second.updated, 0, '幂等：第二次不应再改')
+})
+
+test('review-to-proposals：注意力/文笔/节奏类意见合并成 attention-fix 段落补丁', async (t) => {
+  const { root, project } = await seed(t)
+  const r3 = await store.upsertEntity(root, project.id, 'reviews', {
+    chapter: 1, dimension: '节奏', severity: 'major', issue: '中段连续三段解释', suggestion: '换成动作与对话', origin: 'recheck', quote: '正文一。',
+  })
+  const bundle = await store.getBundle(root, project.id)
+  const prompt = buildHandoffPrompt(bundle, { task: 'review-to-proposals', reviewIds: [r3.id] })
+  assert.ok(prompt.includes('[段落补丁]'), '节奏类应标成段落补丁')
+  assert.ok(prompt.includes('kind="attention-fix"'), '应要求合并成 attention-fix 提案')
+  assert.ok(prompt.includes('原文：正文一。'), '应带原文引文，方便逐字定位 before')
+  assert.ok(prompt.includes('至少 3 条'), '应写清补丁条数下限')
+  assert.ok(!prompt.includes('[整章修订]'), '单条节奏意见不应走整章重写')
 })
 
 test('review-to-proposals：从清单 items 里取审稿 id（清单是唯一 AI 入口）', async (t) => {

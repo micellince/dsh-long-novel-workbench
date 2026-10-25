@@ -162,6 +162,10 @@
 
 全书模式：沿用现有分批工作单，每个子 Agent 除首读意见外**返回该批每章 0–100 分 + 一句理由**；主会话汇总成一条 attention 提案（全章实测 items）+ 整条曲线 + 最低五章。
 
+> v0.5.2 起冷读 prompt 不再贴章节正文：单章只给该章正文文件的绝对路径 + 字数，全书只给章节清单（章号/标题/字数/路径），由 AI 自己 `read`（长章用 offset/limit），与全文改写/扩写一致。
+>
+> 同时**所有审阅都硬隔离**：这些路径一律指向隔离区 `<StoryDesk>/.review-workspaces/<作品名-id后6位>/<12位指纹>/chapters/`（只含本书章节正文副本，不带账本/历史报告/其他作品；指纹按章号+正文算，同一批章幂等复用，不同章集合各占目录互不清文件），prompt 顶部固定插 `REVIEW_ISOLATION_LINES`（只读清单内文件 / 禁止跨作品对比 / 未指定不得打开清单外文件 / 只提交结果不改正文）。提分工作单、复测单、全文重新审阅、按审稿出提案同一套；带账本上下文的审阅任务另有 `REVIEW_ISOLATION_NOTICE_LINES`。详见 `docs/ATTENTION-FIX.md` §12。
+
 ---
 
 ## 6. 第 11 角色：注意力设计师（weight = 10，最高）
@@ -240,7 +244,7 @@
 **P1（部分已进 P0）**
 - [x] 总览注意力卡；疲劳/骤降预警（总览卡 + 注意力页统计条已做）
 - [ ] 本章伏笔/冲突/高光在诊断卡里可编辑、可加入清单（现在卡片里是只读聚合 + 跳原页签的导航）
-- [x] 全书冷读回填每章分（prompt 已要求：内联给每章分、分批让子 Agent 每章一句理由后汇总一条 attention 提案）
+- [x] 全书冷读回填每章分（prompt 已要求：正文只给文件路径由 AI 自己 read；逐章给分，分批让子 Agent 每章一句理由后汇总一条 attention 提案）
 - [ ] `conflicts.escalateChapters`（"本章升级"字段，现在只按 `resolveChapter` 聚合）
 
 **P2**
@@ -268,3 +272,41 @@
 - 注意力分数的"宽容度"：prompt 禁止轻易 80+，但仍可能偏高——用 designScore 对照与历史分布校准；
 - 每章都标 attention 对 133 章的《鱼龙舞》是成本项：冷读全书必然走分批，P1 再做；
 - 100 分制的相邻章波动需要观察：若噪声大，改为 5 分档映射（0/20/40/60/80/100）。
+
+---
+
+## 12. 提分闭环（v0.5.2，未发布）
+
+> 完整实现契约见 [ATTENTION-FIX.md](./ATTENTION-FIX.md)；本节只记要点。
+
+**要解决的问题**：冷读只产「分数 + 2~4 条审阅意见」，随后 review-to-proposals 出的是整章重写提案——不落四拍诊断、没有预期提分、也没有复测回填，导致「改了也加不了几分」。分与改文两条链路是断的。
+
+**数据（attention.json，向后兼容新增）**
+
+- `breakdown: { hook, tension, payoff, cliff }`，各 0–25，合计与 `score` 差 ≤10；
+- `dropPoints: [{ quote, why }]` 1–3 条，`quote` 是正文原文；
+- `scoredAt` / `scoredHash`（正文 sha1 前 12 位，用于判断分数是否过期）；
+- `recheckPending` / `recheckRequestedAt` / `lastRecheckAt` / `lastRecheckDelta`；
+- `fixLog[]`（proposalId / at / target / expectedGain / weak / summary，留 12 条）、`lastFixAt`、`fixPlan{proposalId,expectedGainTotal,fixCount}`；
+- `scoreHistory[]`（at / from / to / delta / designScore / source: `cold-read`|`recheck`，留 10 条）。
+
+**提案 kind=`attention-fix`（段落补丁，不重写整章）**
+
+`data = { chapter, expectedGainTotal, items: [{ target, weak, expectedGain, before, after, why }] }`，`target` ∈ hook/tension/payoff/cliff/type/language。提交硬校验：章节存在；items ≥3；≥2 个不同 target；`before` 在该章正文逐字唯一命中、互不重叠、长度 4–600；`after` ≠ `before`；单条 `expectedGain` 1–15 整数；合计 ≤40。失败给中文原因。
+
+**采纳（acceptProposal）**：全量校验 → 倒序替换 → `saveChapter`（自动备份，保留原 title/status/summary/location/storyTime/characters）→ 写 `fixLog`、`recheckPending=true`、`lastFixAt`、`fixPlan`。
+
+**工作单选章（`op='workorder'`）**：三种选法 `chapter=N` 单章 / `chapters=[...]` 自选（按给定顺序）/ `all=true`（或 `limit=0`）全书，都不传时默认按提分空间取 3 章；>3 章自动转**批量工作单**（章节清单 + 每章诊断 + 逐章执行协议 + 正文文件绝对路径；正文一律不贴进 prompt，由 AI 自己 read）；≤3 章的详细工作单同样只给路径。UI 的提分工作台对应「生成全部提分方案 N 章 / 勾选后生成选中方案 K 章 / 单章生成方案」，不再写死前 5 章。
+
+**复测（`novel_desk_attention_fix(op='recheck')`）**：只列 `recheckPending` 的章（同样支持 `chapter` / `chapters` / `all`，>3 章转批量复测单），不透露旧分与旧四拍，要求零上下文重打分 + 四拍 + dropPoints；applyAttentionItems 在「本条带 score 且原记录有 score」时写 `scoreHistory`、清 `recheckPending`、写 `lastRecheckAt` / `lastRecheckDelta` / `scoredHash` / `scoredAt`。
+
+**代码索引**
+
+- `lib/attention-fix.js`：四拍/弃读点/提分空间/诊断/候选章/统计/span 定位/补丁应用/校验（纯函数）；
+- `lib/store.js`：applyAttentionItems 写历史与清 pending；createProposal 校验；acceptProposal 分支；
+- `index.js`：`attentionFixWorkorder` / `attentionRecheckWorkorder` / `attentionScoreboardText`（选章支持 chapter/chapters/all，含批量工作单）、工具 `novel_desk_attention_fix`（参数 `chapter` / `chapters` / `all` / `limit`，0=全部）、交接任务 `attention-fix` / `attention-recheck`、冷读 prompt 升级、context/plan 提分待办、TASK_LABEL；
+- `lib/checks.js`：`attention-recheck-pending` / `attention-score-stale` / `attention-fix-no-gain` / `attention-gap-no-plan`；
+- `client.js`：提分工作台（AttentionFixBoard）、四拍条、弃读点、fixLog、scoreHistory 徽章、待复测徽章、统计条第 5 格、总览第 4 格、attention-fix 提案 before/after 对照；
+- 测试：`test/attention-fix.test.js`（14 例）、`test/attention-fix-prompt.test.js`（13 例，含全书/自选/批量/工具参数）。
+
+**验收**：低分章每章 ≥3 条 attention-fix；`before` 不在正文 / 条数不足 / target 单一会被 propose 拒绝；采纳只改补丁段且备份可回滚；复测写 scoreHistory 并清 pending；多条 checks（含 `attention-recheck-no-review`：复测低分却没写复核审稿）会在对应场景出现；工作台「生成全部」一次排进全书（>3 章批量；正文只给路径、不贴 prompt）、勾选只处理选中章、工具 `all=true` / `chapters=[...]` 与界面等价；`node --test` 302/302 全绿（含审阅隔离 7 例）。复核落审稿：复测单要求 `novel_desk_review(origin="recheck")`，审稿页可筛选「复核」来源，`review-to-proposals` 把节奏类合并成 attention-fix 段落补丁（详见 `docs/ATTENTION-FIX.md` §10）。同一章重复提交的复测提案只会留一张待采纳卡（同章同角色原地覆盖，详见 §11）。

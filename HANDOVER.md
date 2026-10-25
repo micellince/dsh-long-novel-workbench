@@ -1,7 +1,7 @@
 # HANDOVER · 长篇中文小说工作台
 
-> 交接时间：2026-10-22 凌晨（Asia/Shanghai）
-> 当前版本：**v0.4.1 + 未发布改动**（作品包深度导入 / 大纲合并 / 冲突决策 / 工作台→对话桥接 + 购物车清单 + 仪表盘；本轮只本地测试，未发 npm）
+> 交接时间：2026-10-24（Asia/Shanghai）
+> 当前版本：**v0.5.2 未发布改动**（npm 已发布 0.5.1；工作树含这批未发布特性：版本对齐 / 整本快照回滚 / json 账本历史 / 全文改动 revision + 双闸门 / **注意力提分闭环** / **所有审阅硬隔离**）；本轮只本地测试，未发 npm
 > 工作区：`/Users/micellince/Documents/deepseek-harness/dsh-long-novel-workbench`
 > GitHub：https://github.com/micellince/dsh-long-novel-workbench
 > npm：https://www.npmjs.com/package/dsh-long-novel-workbench
@@ -23,7 +23,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 代码 | v0.5.1，tag `v0.5.1`；`npm test` 164 个用例全绿 |
+| 代码 | v0.5.2 未发布（`package.json` 0.5.2；tag `v0.5.1` 为上次发布）；`node --test` **302/302** 全绿 |
 | npm | **已发布 0.5.1**（tag `v0.5.1` 触发 Publish workflow） |
 | GitHub Release | **v0.5.1 已建**（附稳定版 tarball）；stable 链接：`releases/latest/download/dsh-long-novel-workbench.tgz` |
 | 本机安装 | desktop profile 用 `link:` 指向本工作区；改 Host 代码要重载，改 `client.js` 刷新页面 |
@@ -33,7 +33,7 @@
 | 浏览器截图 | **已换成 v0.4 真实截图**：总览 / 时间线泳道 / 预设 / 关系图 / 章节历史 / 导入（`docs/screenshots/`） |
 | 真实浏览器验收 | **已做**：临时 `accept` profile + 本地 link + 无头 Chrome 155（CDP），自动点检关系图/泳道/历史/自动保存/批量/导入/导出，0 exception、0 error。详见 `docs/releases/v0.4.0.md` 第三节 |
 
-> **2026-10-22 夜新增（未发布）**：分工表第 10 个角色「独立审稿人（零上下文首读）」——`special: 'fresh-read'`，只拿一章正文、不读账本/预设/大纲/人物卡；「分工」页顶部高亮卡可选**读一章 / 读全书**，一键新开会话（`chat.send` + `task=fresh-read` + `scope=chapter|book` + `newSession`）；全书 ≤ 10 万字符直接投递整本，超出（如《鱼龙舞》111.7 万字符）转分批工作单由子 Agent 读文件汇总；总览页有紧凑入口；首读意见以 `dimension=首读` 写回审稿页。老作品打开时自动补入该角色，不覆盖作者已有分工。测试 48 个用例全绿。
+> **2026-10-22 夜新增（未发布）**：分工表第 10 个角色「独立审稿人（零上下文首读）」——`special: 'fresh-read'`，只拿一章正文、不读账本/预设/大纲/人物卡；「分工」页顶部高亮卡可选**读一章 / 读全书**，一键新开会话（`chat.send` + `task=fresh-read` + `scope=chapter|book` + `newSession`）；全书 ≤ 10 万字符直接投递整本（v0.5.2 起改为只给章节文件路径、由 AI 自己 read，不再贴正文），超出（如《鱼龙舞》111.7 万字符）转分批工作单由子 Agent 读文件汇总；总览页有紧凑入口；首读意见以 `dimension=首读` 写回审稿页。老作品打开时自动补入该角色，不覆盖作者已有分工。测试 48 个用例全绿。
 >
 > **2026-10-22 扩写（未发布）**：`docs/EXPANSION.md` + expansion.json/9 RPC/两套 prompt/大纲闸门/自动采纳+原稿备份/`novel_desk_expansion`/整本书页「扩写」子模块与章节入口；测试 151/151；未真机试跑。
 >
@@ -42,6 +42,12 @@
 > **2026-10-22 深夜新增（未发布）**：注意力一号原则「ATTENTION IS ALL YOU NEED / 一切为读者服务」落地——工作台常驻原则条 + 总览 hero；context/plan/交接 prompt 注入原则并把注意力段置顶（最近曲线/疲劳/目标分/四拍 + 强制补强）；`plan` 提案硬校验 `data.attention`；章节采纳合并 attention / 缺设计返回 `attentionWarning`；旧 ai.js 补齐注意力与世界观；fresh-read 保持零污染。测试 114/114。
 >
 > **2026-10-22 更晚新增（未发布）**：世界模型 P1–P3——`world.json`（单例）/`locations.json` 账本，世界页 SVG 坐标地图（拖拽/连接编辑）、新建向导世界设定、`world-build`/`world-infer` 清单任务、6 条空间 checks、只读 HTML 视图 `/novel-desk/view/{world|timeline|map}`（面板 iframe + 打印）、章节地图联动世界地图、时间线地点筛选。`docs/WORLD-MODEL.md` 有完整契约与实现记录；`node --test` 105/105。
+>
+> **2026-10-24 新增（未发布）**：**注意力提分闭环**——冷读后不再只出审阅：新提案 kind `attention-fix` 产段落级补丁（≥3 条、≥2 个 target、`before` 逐字唯一、预期提分合计 ≤40），采纳只改补丁段并自动备份、自动进「待复测」；零上下文复测（不透露旧分）写 `scoreHistory` 与 Δ；四拍 `breakdown`、`dropPoints` 落账；新工具 `novel_desk_attention_fix`（workorder/recheck/scoreboard）与交接任务 `attention-fix`/`attention-recheck`；注意力页新增 🎯 提分工作台（按提分空间降序，支持「生成全部提分方案 N 章 / 勾选生成选中方案 K 章 / 复测全部待复测」，>3 章自动批量工作单，不再写死前 5 章）、章节卡四拍条/弃读点/补丁记录/`61 → 68 +7`、统计条与总览「提分闭环」；checks 新增 4 条；工作单/冷读 prompt 不再把正文贴进对话（只给章节文件路径，由 AI 自己 read）。另：复核（复测）后新发现的问题现在会落成**审稿条目**——复测单强制 `novel_desk_review(origin="recheck")`（每章 1~3 条、跨章共性问题 `chapter=0`），审稿页可按来源筛选、勾选/忽略/加入清单；`novel_desk_review` 支持一次多章、`origin`/`quote`/中文严重度、同题去重与重新打开；`review-to-proposals` 把注意力/节奏类合并成 `attention-fix` 段落补丁（`reviewIds` 覆盖），提案页显示「处理 N 条审稿」；提分工作台加「看复核审稿（N）」；checks 加 `attention-recheck-no-review`。契约 `docs/ATTENTION-FIX.md`（含 §10 复核落审稿、§11 提案去重），测试 289/289（新增 37 例）。另：复测时同一章重复提交注意力提案现在只会留一张待采纳卡（完全相同的复用、同章同角色重打分原地覆盖），历史已采纳重复保持原样。
+>
+> **2026-10-24 再增（未发布）**：**去 AI 化审阅硬隔离**——作者反馈「让它去做去 AI 化审核，它去对比了《鱼龙舞》」。根因：旧 `review.startDeai` 虽新建空会话，但 prompt 没有隔离禁令也没有本书章节清单，AI 自己翻工作区，父目录并列着其他作品、`_work/` 里还有旧人类基线报告。现在 `startDeaiReview()` 先把本书章节正文复制到 `<StoryDesk>/.deai-workspaces/<作品名-id>/chapters/`（只含本书副本），再在该目录新建独立会话；prompt 重写为「独立会话 · 零上下文 · 只审本书」，含硬性边界 6 条（禁止读上级目录/其他作品/`library.json`/`_work`、禁止跨作品对比与「人类对照/人写基线」）与「章节文件清单（唯一允许读取的文件）」；审稿侧 `origin` 新增 `deai`，`quote` 必须逐字存在于本章正文，内容命中其他作品名（含变体）整批拒绝。新增工具 `novel_desk_deai_review`（start/workorder）；prompt 与审稿页给出公开检测入口「朱雀 AI 检测」（`https://matrix.tencent.com/ai-detect/`，只给链接不上传）。测试 295/295。
+>
+> **2026-10-24 三增（未发布）**：**所有审阅硬隔离**——作者要求「所有审阅都必须硬隔离，不能产生任何污染，除非用户指定目录或文件，否则绝不允许其他书籍污染当前书籍」。隔离从去 AI 化推广到全部审阅链路：统一隔离区 `<StoryDesk>/.review-workspaces/<作品名-id后6位>/<12位指纹>/chapters/`（指纹按章号+正文算：同批章幂等复用，全书审阅与单章工作单各占目录、互不清文件；只写本书章节正文副本），零上下文首读（单章/全书）、提分工作单、复测单、全文重新审阅、按审稿出提案的 prompt 都只给隔离区文件路径；`review.startFull` 不再走 pipeline 会话，改 `startFullBookReview()` 在隔离区新建独立零上下文会话（返回 `workspacePath`/`chapterCount`）；带账本上下文的审阅任务（full-review/import-review/review-chapter/review-fix）插 `REVIEW_ISOLATION_NOTICE_LINES`。提交侧跨作品名/`origin=deai` 引文校验保留。测试 302/302（新增 `test/review-isolation.test.js` 7 例）。
 >
 > **2026-10-22 深夜新增（未发布）**：⚡ 注意力模块——`attention.json` 每章一个 0–100 总分 + 四拍 + 详细说明；新页签「⚡ 注意力」带 100 分制曲线与章节诊断卡，伏笔/冲突/高光按章号聚合（零迁移）；第 11 角色「注意力设计师」`weight=10`（总编 9、独立审稿人 8、其余 3），分工表加权重列；独立审稿人冷读加类型化评分（`novel_desk_propose(kind=attention)`）；8 条确定性 checks；侧边栏改为四组导航。`node --test` 74/74。
 

@@ -184,3 +184,79 @@ test('reopenProposal：已驳回/已修订的提案可以重新打开为待处�
   const reopenedOld = await store.reopenProposal(root, project.id, old.id)
   assert.equal(reopenedOld.status, 'pending', '已修订的原决策也应能重新打开')
 })
+
+// ── 待采纳提案去重：AI 重试/复测重打分不应并排出现两张卡 ─────────────
+
+test('createProposal：同章同内容的 pending 提案重复提交 → 复用旧卡，不新增', async (t) => {
+  const { root, project } = await newProject(t)
+  const payload = {
+    kind: 'attention',
+    chapter: 3,
+    title: '第 3 章冷读',
+    items: [{ chapter: 3, score: 66, breakdown: { hook: 16, tension: 13, payoff: 15, cliff: 9 } }],
+  }
+  const first = await store.createProposal(root, project.id, payload)
+  const second = await store.createProposal(root, project.id, payload)
+  assert.equal(second.id, first.id, '完全相同的重复提交应返回同一张提案卡')
+  const pending = (await store.getEntities(root, project.id, 'proposals')).filter((p) => p.status === 'pending')
+  assert.equal(pending.length, 1, '重复提交不应留下两张待采纳卡')
+})
+
+test('createProposal：同章 attention 重打分 → 原地覆盖旧 pending，保留 id', async (t) => {
+  const { root, project } = await newProject(t)
+  const first = await store.createProposal(root, project.id, {
+    kind: 'attention',
+    chapter: 11,
+    title: '第 11 章冷读 87',
+    rationale: '初评',
+    items: [{ chapter: 11, score: 87, breakdown: { hook: 20, tension: 23, payoff: 23, cliff: 21 } }],
+  })
+  const second = await store.createProposal(root, project.id, {
+    kind: 'attention',
+    chapter: 11,
+    title: '第 11 章复测 83',
+    rationale: '重打分说明：初评 87 偏高',
+    items: [{ chapter: 11, score: 83, breakdown: { hook: 18, tension: 22, payoff: 22, cliff: 21 } }],
+  })
+  assert.equal(second.id, first.id, '同章同角色的重打分应覆盖旧卡而不是新增')
+  const pending = (await store.getEntities(root, project.id, 'proposals')).filter((p) => p.status === 'pending')
+  assert.equal(pending.length, 1, '第 11 章只应有一张待采纳注意力卡')
+  assert.equal(pending[0].items[0].score, 83, '保留的是最新一次复测分数')
+  assert.match(pending[0].rationale, /重打分说明/, '覆盖后应带最新说明')
+})
+
+test('createProposal：同章 design 与 measured 两种注意力角色可以并存', async (t) => {
+  const { root, project } = await newProject(t)
+  await store.createProposal(root, project.id, {
+    kind: 'attention',
+    chapter: 5,
+    title: '第 5 章写作前设计',
+    items: [{ chapter: 5, designScore: 86, hook: '钩子', tension: '张力', payoff: '回报', cliff: '章末' }],
+  })
+  await store.createProposal(root, project.id, {
+    kind: 'attention',
+    chapter: 5,
+    title: '第 5 章实测',
+    items: [{ chapter: 5, score: 70, breakdown: { hook: 15, tension: 16, payoff: 18, cliff: 21 } }],
+  })
+  const pending = (await store.getEntities(root, project.id, 'proposals')).filter((p) => p.status === 'pending')
+  assert.equal(pending.length, 2, '设计稿与实测稿是两种角色，应各留一张')
+})
+
+test('createProposal：不同章的 attention 互不覆盖；非 pending 不被覆盖', async (t) => {
+  const { root, project } = await newProject(t)
+  const first = await store.createProposal(root, project.id, {
+    kind: 'attention', chapter: 7, title: '第 7 章', items: [{ chapter: 7, score: 60, breakdown: { hook: 10 } }],
+  })
+  await store.createProposal(root, project.id, {
+    kind: 'attention', chapter: 8, title: '第 8 章', items: [{ chapter: 8, score: 62, breakdown: { hook: 11 } }],
+  })
+  await store.acceptProposal(root, project.id, first.id)
+  const third = await store.createProposal(root, project.id, {
+    kind: 'attention', chapter: 7, title: '第 7 章重新打分', items: [{ chapter: 7, score: 64, breakdown: { hook: 12 } }],
+  })
+  assert.notEqual(third.id, first.id, '已采纳的卡片不应被覆盖，应生成新卡')
+  const pending = (await store.getEntities(root, project.id, 'proposals')).filter((p) => p.status === 'pending')
+  assert.equal(pending.length, 2, '第 7 章（新卡）与第 8 章各一张待采纳')
+})
+

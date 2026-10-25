@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import * as store from '../lib/store.js'
 import { defaultAgents, attentionGenreProfiles } from '../lib/defaults.js'
 import { runChecks } from '../lib/checks.js'
-import { apply, buildHandoffPrompt } from '../index.js'
+import { apply, buildHandoffPrompt, prepareReviewSandbox } from '../index.js'
 import { makeRoot } from './helpers.js'
 
 /** 把 process.env.STORY_DESK_ROOT 指向临时根（novel_desk_* 工具用 env 找根）。 */
@@ -70,9 +70,9 @@ test('新作品：attention 是一等账本，自动建空文件并进 bundle/st
   assert.equal(bundle.stats.attention, 0, 'getBundle.stats.attention 应是 0')
 })
 
-test('defaultAgents：11 条，weight 按契约（总编 9 / 独立审稿人 8 / 注意力设计师 10 / 其余 3）', () => {
+test('defaultAgents：12 条，weight 按契约（总编 9 / 独立审稿人 8 / 注意力设计师 10 / 去AI化审稿人 7 / 其余 3）', () => {
   const agents = defaultAgents()
-  assert.equal(agents.length, 11, '默认分工应有 11 条')
+  assert.equal(agents.length, 12, '默认分工应有 12 条')
   const byName = new Map(agents.map((agent) => [agent.name, agent]))
   assert.equal(byName.get('总编').weight, 9)
   assert.equal(byName.get('独立审稿人').weight, 8)
@@ -82,8 +82,12 @@ test('defaultAgents：11 条，weight 按契约（总编 9 / 独立审稿人 8 /
   assert.equal(designer.order, 11)
   assert.equal(designer.weight, 10, '注意力设计师权重最高')
   assert.equal(designer.special, 'attention-designer')
+  const deai = byName.get('去AI化审稿人')
+  assert.equal(deai.id, 'agent-12')
+  assert.equal(deai.special, 'deai-reviewer')
+  assert.equal(deai.weight, 7, '去 AI 化审稿人权重应为 7')
   for (const agent of agents) {
-    if (['总编', '独立审稿人', '注意力设计师'].includes(agent.name)) continue
+    if (['总编', '独立审稿人', '注意力设计师', '去AI化审稿人'].includes(agent.name)) continue
     assert.equal(agent.weight, 3, `${agent.name} 的默认权重应为 3`)
   }
 })
@@ -101,7 +105,7 @@ test('老作品迁移：补第 11 角色 + 按 id 补 weight，幂等且不改�
   await writeFile(join(root, 'projects', project.id, 'agents.json'), JSON.stringify(legacy, null, 2), 'utf8')
 
   const first = await store.getBundle(root, project.id)
-  assert.equal(first.agents.length, 11, '老作品应补到 11 条')
+  assert.equal(first.agents.length, 12, '老作品应补到 12 条')
   for (let i = 0; i < 10; i += 1) {
     const row = first.agents[i]
     assert.equal(row.order, (i + 1) * 10, `第 ${i + 1} 条 order 不应被重排`)
@@ -110,15 +114,20 @@ test('老作品迁移：补第 11 角色 + 按 id 补 weight，幂等且不改�
     assert.equal(row.note, `作者备注 ${i + 1}`, '作者备注应原样保留')
     assert.equal(row.weight, i === 0 ? 42 : defaults[i].weight, `第 ${i + 1} 条 weight 应补齐且不覆盖已有值`)
   }
-  const designer = first.agents.at(-1)
+  const designer = first.agents[10]
   assert.equal(designer.id, 'agent-11')
   assert.equal(designer.special, 'attention-designer')
   assert.equal(designer.order, 11)
   assert.equal(designer.weight, 10)
+  const deai = first.agents.at(-1)
+  assert.equal(deai.id, 'agent-12')
+  assert.equal(deai.special, 'deai-reviewer')
+  assert.equal(deai.order, 12)
+  assert.equal(deai.weight, 7)
 
   // 幂等：重复 getBundle 不再追加、不改写
   const second = await store.getBundle(root, project.id)
-  assert.equal(second.agents.length, 11, '重复迁移不应重复追加第 11 角色')
+  assert.equal(second.agents.length, 12, '重复迁移不应重复追加第 12 角色')
   assert.deepEqual(second.agents, first.agents, '重复迁移不应改写已有条目')
   assert.deepEqual(JSON.parse(await readFile(join(root, 'projects', project.id, 'agents.json'), 'utf8')), second.agents, '落盘应与读取一致')
 })
@@ -268,24 +277,27 @@ test('fresh-read 单章 prompt：含类型化 0-100 评分与 kind=attention，�
   const bundle = await store.getBundle(root, project.id)
   const prompt = buildHandoffPrompt(bundle, { task: 'fresh-read', chapter: 1 })
 
-  assert.equal(prompt.split('\n')[0], '零上下文首读：只读下面这一章正文。不要读工作台、不要查设定/大纲/人物卡。')
+  assert.equal(prompt.split('\n')[0], '零上下文首读：只读这一章正文（自己用 read 工具读章节文件，不要读工作台、不要查设定/大纲/人物卡）。')
   assert.match(prompt, /本作类型：武侠/, '应按 project.genre 写类型')
   assert.match(prompt, /0-100/, '应要求 0-100 总分')
   assert.match(prompt, /kind=attention/, '应要求用 kind=attention 提交')
   assert.match(prompt, /爽感兑现/, '应带武侠类型读者预期')
-  for (const part of ['chapter/score/verdict/weakest/dropRisk/detail', '会不会读下一章（会/犹豫/不会）', '一个弃读点（段落位置）']) {
+  for (const part of ['chapter/score/breakdown/dropPoints/verdict/weakest/dropRisk/detail', '会不会读下一章 verdict（会/犹豫/不会）', '一个弃读点（段落位置）', 'kind=attention-fix', '四拍分数 breakdown']) {
     assert.ok(prompt.includes(part), `评分要求应包含「${part}」`)
   }
   assert.ok(!prompt.includes('chapter/type/score'), '冷读只提交实测字段，不应包含 type')
   assert.match(prompt, /钩子\/张力\/回报\/章末牵引的设计归注意力设计师/, '应写明设计字段归注意力设计师')
   assert.match(prompt, /不要写这些字段/, '应明确禁止写设计字段')
-  assert.ok(prompt.endsWith(content), 'prompt 应以正文结束')
+  const dir = join(prepareReviewSandbox(root, bundle, [1]).dir, 'chapters')
+  assert.ok(prompt.includes(join(dir, '0001.md')), '应给正文文件路径')
+  assert.ok(!prompt.includes(content), '不应内联正文（让 AI 自己 read）')
+  assert.ok(prompt.endsWith(join(dir, '0001.md')), 'prompt 应以正文文件路径结束')
   for (const polluted of ['工作台交接', '进度：', 'attention.json', '账本里的详细说明', '账本问题', '待处理提案', '写作预设']) {
     assert.ok(!prompt.includes(polluted), `零上下文 prompt 不应出现污染「${polluted}」`)
   }
 })
 
-test('fresh-read 未知类型：用通用 5 条读者预期；全书内联模式要求逐章「第N章 78」', async (t) => {
+test('fresh-read 未知类型：用通用 5 条读者预期；全书模式要求逐章「第N章 78」', async (t) => {
   const root = await makeRoot(t)
   const project = await store.createProject(root, { name: '玄幻作品', genre: '玄幻' })
   await store.saveChapter(root, project.id, { id: '0001', title: '第一章', content: '一。' })
@@ -298,12 +310,13 @@ test('fresh-read 未知类型：用通用 5 条读者预期；全书内联模式
   assert.doesNotMatch(single, /爽感兑现/, '未知类型不应套用武侠预期')
 
   const book = buildHandoffPrompt(bundle, { task: 'fresh-read', scope: 'book' })
-  assert.match(book, /0-100/, '全书内联模式应要求 0-100 分')
-  assert.ok(book.includes('「第N章 78」'), '全书内联模式应规定「第N章 78」格式')
-  assert.match(book, /kind=attention/, '全书内联模式应要求提交 attention 提案')
-  assert.ok(book.includes('只写实测字段：chapter/score/verdict/weakest/dropRisk/detail'), '全书内联模式只提交实测字段')
-  assert.ok(!book.includes('chapter/type/score'), '全书内联模式不应要求提交 type')
-  assert.match(book, /设计归注意力设计师/, '全书内联模式应写明设计归设计师')
+  assert.match(book, /0-100/, '全书模式应要求 0-100 分')
+  assert.ok(book.includes('「第N章 78」'), '全书模式应规定「第N章 78」格式')
+  assert.match(book, /kind=attention/, '全书模式应要求提交 attention 提案')
+  assert.ok(book.includes('只写实测字段：chapter/score/breakdown/dropPoints/verdict/weakest/dropRisk/detail'), '全书模式只提交实测字段')
+  assert.ok(book.includes('kind=attention-fix'), '全书模式应在打分后直接产提分方案（段落补丁）')
+  assert.ok(!book.includes('chapter/type/score'), '全书模式不应要求提交 type')
+  assert.match(book, /设计归注意力设计师/, '全书模式应写明设计归设计师')
   assert.match(book, /12 行内全书综合意见/, '原有全书综合意见要求应保留')
 })
 
@@ -323,7 +336,8 @@ test('fresh-read 分批模式：子 Agent 返回每章分数+理由，主会话�
   assert.match(prompt, /0-100/)
   assert.match(prompt, /一句理由/)
   assert.match(prompt, /kind=attention/)
-  assert.ok(prompt.includes('只写实测字段：chapter/score/verdict/weakest/dropRisk/detail'), '分批模式只提交实测字段')
+  assert.ok(prompt.includes('只写实测字段：chapter/score/breakdown/dropPoints/verdict/weakest/dropRisk/detail'), '分批模式只提交实测字段')
+  assert.ok(prompt.includes('kind=attention-fix'), '分批模式应要求主会话汇总后产出提分方案')
   assert.match(prompt, /设计归注意力设计师/, '分批模式应写明设计归设计师')
   assert.ok(!prompt.includes(big), '分批工作单不应塞正文')
   assert.ok(prompt.length < 5000, `分批工作单应保持简短，实际 ${prompt.length} 字符`)

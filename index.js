@@ -5,19 +5,31 @@
  * 2) Agent 工具：读上下文、生成「工作单」、提交提案/审稿、按需直写。
  */
 
-import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, stat } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
-import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, reconcileReviewsFromAcceptedProposals, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages, getExpansion, saveExpansion, resetExpansion } from './lib/store.js'
+import { defaultRoot, ensureRoot, getLibrary, getBundle, createProject, updateProject, deleteProject, saveChapter, deleteChapter, upsertEntity, deleteEntity, exportBook, getEntities, listProjects, createProposal, acceptProposal, rejectProposal, addProposalFeedback, markProposalRevised, addPresetFromTemplate, applyPreset, listChapterHistory, readChapterHistoryVersion, restoreChapterVersion, batchAcceptProposals, batchRejectProposals, batchUpdateReviews, reconcileReviewsFromAcceptedProposals, appendUsageRecord, listUsageRecords, listImportRecords, reopenProposal, batchReopenProposals, getWorld, saveWorld, getPipeline, savePipeline, resetPipeline, buildPipelineStages, getExpansion, saveExpansion, resetExpansion, getRevision, saveRevision, resetRevision, listJsonHistory, readJsonHistoryVersion, restoreJsonHistory, ensureDraftCurrent, markLedgersAligned, markSnapshotRestored, markLedgerTouched, KIND_FILES, WORLD_FILE } from './lib/store.js'
+import { ALIGN_KINDS, computeVersionAlignment, formatVersionAlignment } from './lib/alignment.js'
+import { createSnapshot, getSnapshot, listSnapshots, diffSnapshot, restoreSnapshot, readSnapshotChapter, restoreSnapshotChapter, deleteSnapshot } from './lib/snapshots.js'
 import { scanImport, runImport } from './lib/importer.js'
 import { estimateContext, runAi } from './lib/ai.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
-import { builtinPresets, attentionGenreProfiles, defaultPipeline, defaultExpansion } from './lib/defaults.js'
+import { builtinPresets, attentionGenreProfiles, defaultPipeline, defaultExpansion, resolveActivePreset } from './lib/defaults.js'
+import { auditAiStyle, auditSummaryText, scanMarkdownArtifacts } from './lib/aistyle.js'
+import { planRevisionForBundle, evaluateFidelity, extractAnchors, revisionGatePolicy, describeRevisionTier, buildImpactFromBundle, validateRevisionContract, composeTiers, REVISION_STOP_MODES, findStopMode } from './lib/revision.js'
+import { ATTENTION_BEAT_LABEL, ATTENTION_BEAT_MAX, ATTENTION_BEAT_WEAK, ATTENTION_BEATS, ATTENTION_BEFORE_MAX, ATTENTION_BEFORE_MIN, ATTENTION_DESIGN_GAP, ATTENTION_FIX_MAX_ITEMS, ATTENTION_FIX_MAX_TOTAL, ATTENTION_FIX_MIN_ITEMS, ATTENTION_GAIN_MAX, ATTENTION_GOOD_SCORE, attentionBeatScore, attentionByChapter, attentionDeficits, attentionFixCandidates, attentionFixStats, attentionMinFixes, attentionScoreOf, attentionUnscoredChapters } from './lib/attention-fix.js'
+
+/** 会产出正文的 AI 任务：启动前必须已有当前写作预设。 */
+const WRITES_PROSE_TASKS = new Set(['continue-chapter', 'rewrite-chapter', 'expand-chapter', 'next-chapter-plan'])
 
 const ROUTE = '/novel-desk/api'
 const VIEW_ROUTE = '/novel-desk/view'
 const MAX_BODY = 8 * 1024 * 1024
+
+/** 公开 AI 检测入口（作者人工复核用；插件不调用、只给链接与口径）。 */
+export const DEAI_AUDIT_URL = 'https://matrix.tencent.com/ai-detect/'
 
 /** 生成链路一号原则：所有生成/工作单 prompt 的开头；零上下文冷读（fresh-read）绝不能用。 */
 export const ATTENTION_FIRST_PRINCIPLE = '创作第一原则：ATTENTION IS ALL YOU NEED——怎么吸引读者怎么来，一切为读者服务；事实自洽是底线，不是目标。每章必须先有核心注意力设计，再写正文。'
@@ -71,6 +83,22 @@ function guard(req, connection) {
   // 同源浏览器请求放行：插件自己的回环路由在部分宿主版本上不在 Cookie 门内。
   if (loopback && String(req.headers?.['sec-fetch-site'] ?? '') === 'same-origin') return undefined
   return rejection
+}
+
+/** 版本对齐的账本域参数：去重、只保留 ALIGN_KINDS 内的值；未给或过滤后为空 = 全部。 */
+function normalizeAlignKinds(raw) {
+  const list = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw]
+  const kinds = [...new Set(list.map((kind) => String(kind ?? '').trim()).filter((kind) => ALIGN_KINDS.includes(kind)))]
+  return kinds.length > 0 ? kinds : [...ALIGN_KINDS]
+}
+
+/** 账本文件名 → 账本 kind（ledger.restore 后记 touchedVersion 用；world.json 是单例）。 */
+function ledgerKindFromFile(file) {
+  const name = basename(String(file ?? '').trim())
+  if (!name) return null
+  if (name === WORLD_FILE) return 'world'
+  const hit = Object.entries(KIND_FILES).find(([, fileName]) => fileName === name)
+  return hit ? hit[0] : null
 }
 
 async function handleRpc(body, ctx) {
@@ -656,6 +684,122 @@ async function handleRpc(body, ctx) {
       return resetExpansion(root, String(body.projectId ?? ''))
     case 'expansion.usage':
       return { usage: await summarizeUsage(root, String(body.projectId ?? ''), ctx) }
+    case 'aistyle.audit': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      const bundle = await getBundle(root, projectId)
+      const audit = auditAiStyle(bundle.chapters ?? [], { thresholds: body.thresholds })
+      return { audit, summary: auditSummaryText(audit), prompt: buildAiStyleReviewPrompt(bundle, audit) }
+    }
+    case 'review.startDeai': {
+      const projectId = String(body.projectId ?? '')
+      const result = await startDeaiReview(root, projectId, ctx, {})
+      return result
+    }
+    case 'review.startFull':
+      return startFullBookReview(root, String(body.projectId ?? ''), { focus: body.focus }, ctx)
+    case 'revision.get': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      const bundle = await getBundle(root, projectId)
+      const revision = await getRevision(root, projectId)
+      const audit = auditAiStyle(bundle.chapters ?? [])
+      return { revision, audit, summary: auditSummaryText(audit) }
+    }
+    case 'revision.preview': {
+      const bundle = await getBundle(root, String(body.projectId ?? ''))
+      return previewRevision(bundle, body)
+    }
+    case 'revision.plan': {
+      const result = await planRevisionRun(root, String(body.projectId ?? ''), body)
+      return {
+        revision: result.revision,
+        prompt: result.prompt,
+        impact: result.impact,
+        batchCount: result.batchCount,
+      }
+    }
+    case 'revision.start':
+      return startRevisionRun(root, String(body.projectId ?? ''), ctx, body)
+    case 'revision.advance':
+      return { revision: await advanceRevision(root, String(body.projectId ?? ''), { batchIndex: body.batchIndex, status: body.status, note: body.note }) }
+    case 'revision.applyChapter':
+      return applyRevisionChapter(root, String(body.projectId ?? ''), { chapter: body.chapter, content: body.content })
+    case 'revision.pause': {
+      const revision = await getRevision(root, String(body.projectId ?? ''))
+      return { revision: await saveRevision(root, String(body.projectId ?? ''), { status: 'paused', notes: [...(revision.notes ?? []), { at: new Date().toISOString(), text: String(body.note ?? '作者暂停') }] }) }
+    }
+    case 'revision.resume': {
+      const projectId = String(body.projectId ?? '')
+      const bundle = await getBundle(root, projectId)
+      const revision = await getRevision(root, projectId)
+      if (revision.status !== 'paused') throw new Error('改动未在暂停状态')
+      const prompt = buildRevisionGoalPrompt(bundle, revision)
+      const session = await startPipelineSession(ctx, root, bundle, prompt)
+      return { revision: await saveRevision(root, projectId, { status: 'running', sessionId: session.sessionId }), sessionId: session.sessionId, prompt }
+    }
+    case 'revision.reset':
+      return { revision: await resetRevision(root, String(body.projectId ?? '')) }
+    case 'snapshot.list':
+      return listSnapshots(root, String(body.projectId ?? ''))
+    case 'snapshot.get':
+      return getSnapshot(root, String(body.projectId ?? ''), String(body.snapshotId ?? ''))
+    case 'snapshot.create':
+      return createSnapshot(root, String(body.projectId ?? ''), {
+        label: body.label,
+        trigger: body.trigger === undefined ? 'manual' : String(body.trigger),
+        note: body.note,
+      })
+    case 'snapshot.diff':
+      return diffSnapshot(root, String(body.projectId ?? ''), String(body.snapshotId ?? ''))
+    case 'snapshot.restore': {
+      const projectId = String(body.projectId ?? '')
+      const result = await restoreSnapshot(root, projectId, String(body.snapshotId ?? ''))
+      // 整本回滚后快照内是自洽的：bump 一条 snapshot-restore，并把全部账本标记为已对齐
+      await markSnapshotRestored(root, projectId, '整本回滚')
+      return result
+    }
+    case 'snapshot.restoreChapter': {
+      const projectId = String(body.projectId ?? '')
+      const result = await restoreSnapshotChapter(root, projectId, String(body.snapshotId ?? ''), String(body.chapterId ?? ''))
+      // 单章回滚只写正文文件：靠 mtime 补记一条 external-change，账本因此显示落后
+      await ensureDraftCurrent(root, projectId)
+      return result
+    }
+    case 'snapshot.chapter':
+      return readSnapshotChapter(root, String(body.projectId ?? ''), String(body.snapshotId ?? ''), String(body.chapterId ?? ''))
+    case 'snapshot.delete':
+      return deleteSnapshot(root, String(body.projectId ?? ''), String(body.snapshotId ?? ''))
+    case 'ledger.history':
+      return listJsonHistory(root, String(body.projectId ?? ''), String(body.file ?? ''))
+    case 'ledger.version':
+      return readJsonHistoryVersion(root, String(body.projectId ?? ''), String(body.file ?? ''), String(body.name ?? ''))
+    case 'ledger.restore': {
+      const projectId = String(body.projectId ?? '')
+      const result = await restoreJsonHistory(root, projectId, String(body.file ?? ''), String(body.name ?? ''))
+      // 外部改账本后把对应域记为 touchedVersion，对齐状态会显示「改过、未确认对齐」
+      const kind = ledgerKindFromFile(result.file ?? body.file)
+      if (kind) await markLedgerTouched(root, projectId, [kind])
+      return result
+    }
+    case 'alignment.report': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      // 先把正文文件的 mtime 变化记进稿本版本，再算对齐，避免拿旧版本对比
+      await ensureDraftCurrent(root, projectId)
+      const bundle = await getBundle(root, projectId)
+      return bundle.alignment?.version ?? computeVersionAlignment(bundle)
+    }
+    case 'alignment.mark': {
+      const projectId = String(body.projectId ?? '')
+      if (!projectId) throw new Error('缺少 projectId')
+      // 标记前先刷新稿本版本，否则会把落差的账本标成落后
+      await ensureDraftCurrent(root, projectId)
+      const kinds = normalizeAlignKinds(body.kinds)
+      await markLedgersAligned(root, projectId, kinds, { note: body.note })
+      const bundle = await getBundle(root, projectId)
+      return bundle.alignment?.version ?? computeVersionAlignment(bundle)
+    }
     case 'export':
       return exportBook(root, String(body.projectId ?? ''), body.format ?? 'md')
     case 'ai.run': {
@@ -664,6 +808,8 @@ async function handleRpc(body, ctx) {
       const bundle = await getBundle(root, projectId)
       const proposal = body.proposalId ? (bundle.proposals ?? []).find((p) => p.id === body.proposalId) : null
       if (body.proposalId && !proposal) throw new Error(`提案不存在：${body.proposalId}`)
+      const requestTask = proposal ? 'revise-proposal' : String(body.task ?? 'next-chapter-plan')
+      if (WRITES_PROSE_TASKS.has(requestTask)) assertActivePreset(bundle)
       const feedback = proposal
         ? (body.feedback ?? (proposal.feedback ?? []).map((f) => f.text).join('\n'))
         : body.instruction
@@ -1035,8 +1181,8 @@ async function ensureProjectWorkspace(ctx, project, titleOverride) {
   return updateProject(root, project.id, patch)
 }
 
-/** 全书首读：正文字符数不超过这个值就整本塞进 prompt，超过则改成分批工作单。 */
-const FRESH_READ_INLINE_LIMIT = 100000
+/** 全书首读：正文总字数超过这个值就建议用 subagent 分批读；不论多少，正文都只给文件路径，由 AI 自己 read。 */
+const FRESH_READ_BATCH_HINT = 40000
 
 /** 角色权重：缺省 3，用于派单排序与「（权重 N）」标注。 */
 function agentWeight(agent) {
@@ -1062,12 +1208,31 @@ function attentionGenreLine(genre) {
 /** 取本作类型：project.genre 优先，其次当前写作预设的 genre。 */
 function projectGenre(bundle) {
   const project = bundle.project ?? {}
-  const presets = bundle.presets ?? []
-  const activePreset = presets.find((preset) => preset.id === project.activePresetId)
-    ?? presets.find((preset) => preset.source === 'import')
-    ?? presets[0]
-    ?? {}
+  const activePreset = resolveActivePreset(bundle)
   return String(project.genre || activePreset.genre || '').trim()
+}
+
+/**
+ * 生成前硬闸门：必须由作者显式选定「当前写作预设」。
+ * 只认 project.activePresetId，不做任何回落——回落等于替作者做选择，
+ * 历史事故（整本按默认「克制」风格生成 31 万字）正是这一步缺失造成的。
+ */
+export function assertActivePreset(bundle = {}) {
+  const presets = Array.isArray(bundle?.presets) ? bundle.presets : []
+  const activeId = String(bundle?.project?.activePresetId ?? '').trim()
+  const active = activeId ? presets.find((preset) => String(preset?.id ?? '') === activeId) : null
+  if (!active) {
+    throw new Error(presets.length === 0
+      ? '还没有写作预设：请先在「预设」页新建一套、或从名家风格库加入，并设为当前预设，然后再开始生成。'
+      : '还没选定当前写作预设：请在「预设」页把一套预设设为当前。没有预设=没有文风规格，生成会退回默认风格。')
+  }
+  const hasSpec = String(active.tone ?? '').trim()
+    || (Array.isArray(active.styleRules) && active.styleRules.length > 0)
+    || (Array.isArray(active.styleCards) && active.styleCards.length > 0)
+  if (!hasSpec) {
+    throw new Error(`当前预设「${active.name ?? active.id}」是空的（无 tone、无风格规则、无指标卡）：请先补上文风规格再生成。`)
+  }
+  return active
 }
 
 /** 注意力分数：0-100 数字；空/非法值视为未标。 */
@@ -1105,11 +1270,379 @@ function attentionCurveLine(row) {
   return `第${Number(row.chapter)}章 ${score ?? '未标'}分/${row.type ?? '未分型'}（设计 ${design ?? '—'}，实测-设计 ${delta}）`
 }
 
-const TASK_LABEL = {
+/** 一次出多少章的详细工作单还算「短工作单」；超过就改成分批工作单（仍只给文件路径）。 */
+const ATTENTION_BATCH_INLINE_MAX = 3
+
+/** 四拍分一行：`钩子 12 / 张力 8 / 兑现 15 / 章末 6`（缺失用 —）。 */
+function attentionBeatLine(record) {
+  return ATTENTION_BEATS.map((beat) => {
+    const n = attentionBeatScore(record?.breakdown, beat)
+    return `${ATTENTION_BEAT_LABEL[beat]} ${n === null ? '—' : n}`
+  }).join(' / ')
+}
+
+/** 提分/复测工作单里的章正文：一律不贴正文，只给文件路径 + 字数，让 AI 自己 read（与全文改写/扩写一致）。 */
+function attentionFixChapterSource(chapter, bundle, rootPath = '', sandbox = null) {
+  const content = String(chapter?.content ?? '')
+  const file = chapterFilePath(bundle, Number(chapter?.id), rootPath, sandbox)
+  if (!content.trim()) return `（本章还没有正文）`
+  return `（正文不内联，${content.length} 字。正文文件：${file}
+用 read 工具自己读（长章用 offset/limit 分段读，或先按弃读点/grep 定位要改的段）；before 必须逐字照抄文件内容，不要凭记忆。）`
+}
+
+/** 单章提分行：候选里有就用候选，没有（未打分/已达标）就按记录现算一行。 */
+function attentionRowForChapter(bundle, chapterNumber) {
+  const hit = attentionFixCandidates(bundle).find((row) => row.chapter === chapterNumber)
+  if (hit) return hit
+  const record = attentionByChapter(bundle.attention).get(chapterNumber)
+  if (!record) return null
+  const score = attentionScoreOf(record.score)
+  const designScore = attentionScoreOf(record.designScore)
+  const average = attentionStats(bundle).average
+  const target = designScore ?? (average === null ? 80 : Math.min(95, Math.round(average + 8)))
+  const deficits = attentionDeficits(record)
+  const dropPointCount = Array.isArray(record.dropPoints) ? record.dropPoints.filter((point) => point && String(point.quote ?? '').trim()).length : 0
+  return {
+    chapter: chapterNumber,
+    record,
+    score,
+    designScore,
+    target,
+    potential: score === null ? null : Math.round(target - score),
+    weakest: String(record.weakest ?? '').trim(),
+    dropPointCount,
+    deficits,
+    minFixes: attentionMinFixes(deficits),
+    recheckPending: record.recheckPending === true,
+    pendingFixes: 0,
+    fixCount: Array.isArray(record.fixLog) ? record.fixLog.length : 0,
+    lastDelta: attentionScoreOf(record.lastRecheckDelta),
+    stale: false,
+  }
+}
+
+/** 章节号清单清洗：只留正整数、去重、保留给定顺序。 */
+function attentionChapterSelection(options) {
+  const raw = Array.isArray(options?.chapters) ? options.chapters : []
+  const seen = new Set()
+  const out = []
+  for (const value of raw) {
+    const chapterNumber = Number(value)
+    if (!Number.isInteger(chapterNumber) || chapterNumber <= 0 || seen.has(chapterNumber)) continue
+    seen.add(chapterNumber)
+    out.push(chapterNumber)
+  }
+  return out
+}
+
+/** options 是否要求「全部章节」：all=true / scope=all / limit=0。 */
+function attentionWantsAll(options) {
+  if (options?.all === true) return true
+  if (String(options?.scope ?? '') === 'all') return true
+  const limit = options?.limit
+  return limit !== undefined && limit !== null && String(limit).trim() !== '' && Number(limit) === 0
+}
+
+/**
+ * 章节正文文件的绝对路径（工作单只给路径，正文由 AI 自己 read）。
+ * 传了 sandbox 就只给隔离区副本的路径——审阅 prompt 永远看不到项目目录，也就看不到别的书。
+ */
+function chapterFilePath(bundle, chapterNumber, rootPath = '', sandbox = null) {
+  const hit = sandbox?.byId?.get(Number(chapterNumber))
+  if (hit?.path) return hit.path
+  const root = String(bundle?.root ?? rootPath ?? '')
+  const chapter = (bundle?.chapters ?? []).find((row) => Number(row.id) === Number(chapterNumber))
+  const id = String(chapter?.id ?? String(chapterNumber).padStart(4, '0'))
+  return join(root, 'projects', String(bundle?.project?.id ?? ''), 'chapters', `${id}.md`)
+}
+
+/** 提分方案的提交格式与硬性要求（单章详细单 / 批量单共用）。 */
+function attentionFixSubmissionLines() {
+  return [
+    '## 提交格式（每章一份）',
+    'novel_desk_propose(kind="attention-fix", chapter=N, title="第N章提分方案", summary="预期 +X 分：改了哪几段", items=[{"target":"hook|tension|payoff|cliff|type|language","weak":"这条补什么（一句话）","expectedGain":3,"before":"逐字复制原文 4-600 字","after":"改写后的同一段","why":"为什么这样改能提分"}])',
+    '硬性要求：',
+    `1. 每章 items 至少 ${ATTENTION_FIX_MIN_ITEMS} 条、最多 ${ATTENTION_FIX_MAX_ITEMS} 条，至少 2 个不同 target；expectedGain 是 1-${ATTENTION_GAIN_MAX} 的整数，单章合计不超过 ${ATTENTION_FIX_MAX_TOTAL}。`,
+    `2. before 必须逐字复制该章正文（${ATTENTION_BEFORE_MIN}-${ATTENTION_BEFORE_MAX} 字、不带省略号），且在正文里只出现一次；after 是替换后的同一段，长度可不同。`,
+    '3. 至少一条方案直接改最弱一拍；有弃读点的，必须有一条 before 抄弃读点原文。不要只改错别字、不要整章重写、不要改剧情走向与人物关系。',
+    '4. summary 写清「预期 +X 分、改了哪几段、对上哪条诊断」。不要直接 upsert 正文。',
+  ]
+}
+
+/** 注意力提分批量工作单（超过 3 章）：不内联正文，给章节清单 + 每章诊断 + 逐章执行协议。 */
+function attentionFixBatchText(bundle, rows, chapters, rootPath, project, scopeLabel, sandbox = null) {
+  const label = scopeLabel || `${rows.length} 章`
+  const lines = [
+    `【注意力提分方案 · 批量】项目《${project.name ?? ''}》 projectId=${project.id ?? ''} · ${label}`,
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '',
+    `目标：把这 ${rows.length} 章的「冷读实测分」拉上去。章节多，正文不内联（只给文件路径，用 read 工具自己读）；下面给每章的提分空间、四拍、弃读点与确定性诊断，逐章读正文 → 提交段落级 before/after 补丁方案（kind=attention-fix）。不要重写整章，不要直接改正文。`,
+    '',
+    '## 待处理章节（按提分空间降序）',
+  ]
+  rows.forEach((row, index) => {
+    const chapter = chapters.get(row.chapter) ?? {}
+    const words = String(chapter.content ?? '').length
+    const file = chapterFilePath(bundle, row.chapter, rootPath, sandbox)
+    const weak = ATTENTION_BEAT_LABEL[row.weakest] ?? (row.weakest || '冷读没标')
+    lines.push(`${index + 1}. 第${row.chapter}章《${chapter.title ?? ''}》｜实测 ${row.score ?? '—'} / 设计 ${row.designScore ?? '—'} / 目标 ${row.target} / 空间 +${row.potential ?? 0}｜四拍 ${attentionBeatLine(row.record)}｜最弱 ${weak}｜弃读点 ${row.dropPointCount} 条｜最少 ${row.minFixes} 条补丁｜${words} 字｜${file}`)
+    if (row.pendingFixes > 0) lines.push(`   ⚠ 已有 ${row.pendingFixes} 份提分方案等作者采纳：先看旧方案，别重复提，补旧方案没覆盖的拍。`)
+    if (row.recheckPending) lines.push('   ⚠ 本章刚改过、还没复测：先补四拍里仍然最弱的拍，别重复改上次那几段。')
+  })
+  lines.push('', '## 每章要改什么（确定性诊断，方案逐条对上）')
+  rows.forEach((row) => {
+    const chapter = chapters.get(row.chapter) ?? {}
+    lines.push('', `### 第${row.chapter}章《${chapter.title ?? ''}》`)
+    const drops = Array.isArray(row.record?.dropPoints) ? row.record.dropPoints.filter((point) => point && String(point.quote ?? '').trim()) : []
+    drops.slice(0, 3).forEach((point, i) => {
+      lines.push(`- 弃读点 ${i + 1}：「${String(point.quote).slice(0, 80)}」—— ${String(point.why ?? '').slice(0, 60) || '读者会在这里停下来'}`)
+    })
+    if (row.deficits.length === 0) {
+      lines.push(`- 冷读没给结构性诊断：直接按最弱一拍（${ATTENTION_BEAT_LABEL[row.weakest] ?? '四拍最低项'}）与弃读点补。`)
+    } else {
+      for (const deficit of row.deficits) {
+        lines.push(`- [${deficit.severity >= 3 ? '必改' : deficit.severity === 2 ? '建议' : '可选'}] ${deficit.evidence}；处方：${deficit.prescribe}`)
+      }
+    }
+  })
+  lines.push('', '## 执行协议（逐章处理，别一次吞完）')
+  lines.push('1. 一批处理 2~3 章：直接 read 上面列的正文文件（工作单不贴正文）；要更细的诊断可 novel_desk_attention_fix(op="workorder", chapters=[这批章号]) 取单章详细单（同样只给路径）。')
+  lines.push('2. 每章写完立刻提交 novel_desk_propose(kind="attention-fix", chapter=N, ...)，不要全部读完再统一提。')
+  lines.push('3. 建议每 2~3 章汇报一次进度（章号 / 提案 id / 预期提分合计）；全部做完停下汇报，不要直接 upsert 正文。')
+  lines.push('4. 中途断了就用 op="scoreboard" 看还剩哪些章没有方案，再继续。')
+  lines.push('', ...attentionFixSubmissionLines())
+  lines.push('', '作者在提案页采纳后，服务端按 before 定位、只替换补丁段（其余原文不动）、自动备份，并把该章标记「待复测」；复测任务重新冷读后写回 Δ。')
+  return lines.join('\n')
+}
+
+/**
+ * 复测单的提交口径：打分写回 → 复核新发现的问题落审稿 → 仍弱再出提分方案。
+ * 「只交打分/只交补丁」是旧链路的缺口：复核发现的问题必须能进「审稿」页被作者逐条审阅。
+ */
+function attentionRecheckSubmissionLines(project = {}) {
+  const projectArg = project?.id ? `project="${project.id}", ` : ''
+  return [
+    '## 提交格式（每章一条）',
+    'novel_desk_propose(kind="attention", chapter=N, items=[{"chapter":N,"score":0-100,"breakdown":{"hook":0-25,"tension":0-25,"payoff":0-25,"cliff":0-25},"dropPoints":[{"quote":"逐字引文","why":"为什么弃读"}],"verdict":"会|犹豫|不会","weakest":"hook|tension|payoff|cliff","dropRisk":"","detail":"一段说明"}])',
+    `必须给 breakdown（四拍各 0-25，合计与总分之差不超过 10）和 1~3 条 dropPoints 引文。只写实测字段，不要写设计字段，不要改正文。服务端会把新分写回分数历史、清掉「待复测」并算出 Δ。`,
+    '',
+    '## 复核发现的问题要落成审稿（不要只交打分）',
+    `复测读出来的新问题（上次补丁没改好的、以及读的时候新看出来的），逐条写成审稿，别只在 detail 里提一句：novel_desk_review(${projectArg}origin="recheck", reviews=[{"chapter":N,"dimension":"节奏|情节|人物|连续性|文笔|对话","severity":"major|minor|suggestion","issue":"问题是什么（带一句原文引文）","suggestion":"改哪段、怎么改","quote":"原文引文"}])。`,
+    `- 每章至少 1 条、最多 3 条；要能指名原文，禁止「还是不够抓人」这种空话。
+- 跨章共性问题（同一个毛病在好几章重复）单独写一条 chapter=0，issue 里列出涉及章号。
+- 这些条目进「审稿」页：作者可勾选 →「加入清单」→ 生成改动提案（注意力/节奏类会合并成段落补丁方案），也可忽略。新问题走审稿，不要拿整章重写糊过去。`,
+    '',
+    `复测后如果某章仍低于 75 分，或四拍里仍有 < ${ATTENTION_BEAT_WEAK} 的拍，再对该章提交一份 novel_desk_propose(kind="attention-fix")：至少 ${ATTENTION_FIX_MIN_ITEMS} 条 before/after 补丁、before 逐字抄正文；达标就只交打分。`,
+  ]
+}
+
+/** 注意力复测批量工作单（超过 3 章）：不内联正文，给清单与逐章复测协议。 */
+function attentionRecheckBatchText(bundle, rows, chapters, rootPath, project, scopeLabel, sandbox = null) {
+  const label = scopeLabel || `${rows.length} 章`
+  const lines = [
+    `【注意力复测 · 批量】项目《${project.name ?? ''}》 projectId=${project.id ?? ''} · ${label}`,
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '',
+    `下面 ${rows.length} 章刚按提分方案改过正文，需要【零上下文】复测：只读正文，不要看旧分、不要看修改记录、不要查账本/设定/大纲/人物卡。章节多，正文不内联（只给文件路径）；按清单逐章 read 文件再打分，按该类型读者预期校准，内容没变好就打低分，禁止凑分。`,
+    attentionGenreLine(projectGenre(bundle)),
+    '',
+    '## 待复测章节',
+  ]
+  rows.forEach((row, index) => {
+    const chapter = chapters.get(row.chapter) ?? {}
+    const words = String(chapter.content ?? '').length
+    lines.push(`${index + 1}. 第${row.chapter}章《${chapter.title ?? ''}》｜${words} 字｜${chapterFilePath(bundle, row.chapter, rootPath, sandbox)}`)
+  })
+  lines.push('', ...attentionRecheckSubmissionLines(project))
+  lines.push('执行协议：一次处理 2~3 章，先 read 上面列的正文文件；每读完 2~3 章提交一次（打分、审稿、方案各一次工具调用），建议中途报进度；全部做完停下汇报每章新分与四拍。')
+  return lines.join('\n')
+}
+
+/**
+ * 注意力提分工作单：按提分空间选章，输出实测/设计/四拍/弃读点/确定性诊断/正文/提交格式。
+ * 冷读任务末尾、"生成提分方案"按钮、novel_desk_attention_fix(op=workorder) 共用。
+ */
+export function attentionFixWorkorder(bundle, options = {}, rootPath = '') {
+  const project = bundle?.project ?? {}
+  const chapters = new Map((bundle?.chapters ?? []).map((chapter) => [Number(chapter.id), chapter]))
+  const requested = Number(options?.chapter) || 0
+  const selected = attentionChapterSelection(options)
+  const all = attentionWantsAll(options)
+  const limit = Math.max(1, Number(options?.limit) || 3)
+  const candidates = attentionFixCandidates(bundle)
+  const checkRow = (chapterNumber) => {
+    const row = attentionRowForChapter(bundle, chapterNumber)
+    if (!row) throw new Error(`第 ${chapterNumber} 章还没有注意力记录：先做零上下文冷读打分，再生成提分方案`)
+    const chapter = chapters.get(chapterNumber)
+    if (!chapter || !String(chapter.content ?? '').trim()) throw new Error(`第 ${chapterNumber} 章还没有正文，无法按段落提分（先写正文）`)
+    return row
+  }
+  let rows
+  let scopeLabel = ''
+  if (requested > 0) {
+    rows = [checkRow(requested)]
+  } else if (selected.length > 0) {
+    rows = selected.map((chapterNumber) => checkRow(chapterNumber))
+    scopeLabel = `自选 ${rows.length} 章`
+  } else {
+    rows = all ? candidates : candidates.slice(0, limit)
+    if (rows.length === 0) {
+      const unscored = attentionUnscoredChapters(bundle)
+      throw new Error(unscored.length > 0
+        ? `还没有可提分的章节：有 ${unscored.length} 章未冷读打分（${unscored.slice(0, 10).join('、')}），先做零上下文首读打分`
+        : `没有需要提分的章节：已打分章节都在 ${ATTENTION_GOOD_SCORE} 分以上，或还没有已打分章节`)
+    }
+    scopeLabel = all ? `全书 ${rows.length} 章` : (rows.length > 1 ? `${rows.length} 章` : '')
+  }
+  const sandbox = reviewSandboxFor(bundle, rootPath, rows.map((row) => row.chapter))
+  if (rows.length > ATTENTION_BATCH_INLINE_MAX) {
+    return attentionFixBatchText(bundle, rows, chapters, rootPath, project, scopeLabel, sandbox)
+  }
+  const suffix = scopeLabel ? ` · ${scopeLabel}` : ''
+  const lines = [
+    `【注意力提分方案】项目《${project.name ?? ''}》 projectId=${project.id ?? ''}${suffix}`,
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '',
+    '目标：把「冷读实测分」拉上去。下面每章已经给出提分空间、四拍短板与弃读点；正文不贴进对话，自己用 read 工具读章节文件。请给每章写一份【段落级】before/after 补丁方案，提交 attention-fix 提案。不要重写整章，不要直接改正文。',
+  ]
+  rows.forEach((row, index) => {
+    const chapter = chapters.get(row.chapter) ?? {}
+    const head = row.score === null
+      ? `第 ${row.chapter} 章《${chapter.title ?? ''}》（还没有冷读分）`
+      : `第 ${row.chapter} 章《${chapter.title ?? ''}》（实测 ${row.score} 分 / 设计 ${row.designScore ?? '—'} 分 / 目标 ${row.target} 分 / 提分空间 +${row.potential}）`
+    lines.push('', `## ${index + 1}. ${head}`)
+    lines.push(`- 四拍（满分 ${ATTENTION_BEAT_MAX}，< ${ATTENTION_BEAT_WEAK} 算明显偏弱）：${attentionBeatLine(row.record)}`)
+    lines.push(`- 最弱一环：${ATTENTION_BEAT_LABEL[row.weakest] ?? (row.weakest || '冷读没标（按四拍最低的一项补）')}`)
+    if (row.record?.type) lines.push(`- 类型：${row.record.type}`)
+    const drops = Array.isArray(row.record?.dropPoints) ? row.record.dropPoints.filter((point) => point && String(point.quote ?? '').trim()) : []
+    if (drops.length > 0) {
+      lines.push('- 弃读点（提分方案必须直接改这几处原文）：')
+      drops.slice(0, 3).forEach((point, i) => {
+        lines.push(`  ${i + 1}) 「${String(point.quote).slice(0, 120)}」—— ${String(point.why ?? '').slice(0, 80) || '读者会在这里停下来'}`)
+      })
+    }
+    if (row.deficits.length > 0) {
+      lines.push('- 确定性诊断（按优先级，方案要逐条对上）：')
+      for (const deficit of row.deficits) {
+        lines.push(`  - [${deficit.severity >= 3 ? '必改' : deficit.severity === 2 ? '建议' : '可选'}] ${deficit.evidence}；处方：${deficit.prescribe}`)
+      }
+    }
+    lines.push(`- 本章最少 ${row.minFixes} 条补丁；全章至少 ${ATTENTION_FIX_MIN_ITEMS} 条、最多 ${ATTENTION_FIX_MAX_ITEMS} 条，至少覆盖 2 个不同 target，expectedGain 合计不超过 ${ATTENTION_FIX_MAX_TOTAL}。`)
+    if (row.pendingFixes > 0) lines.push(`- ⚠ 已有 ${row.pendingFixes} 份提分方案在等作者采纳：先看旧方案，别重复提，补旧方案没覆盖的拍。`)
+    if (row.recheckPending) lines.push('- 本章刚改过、还没复测：先别重复改上次那几段，优先补四拍里仍然最弱的拍。')
+    if (row.fixCount > 0) lines.push(`- 历史补丁 ${row.fixCount} 条，上一次复测 Δ ${row.lastDelta === null ? '—' : (row.lastDelta > 0 ? `+${row.lastDelta}` : String(row.lastDelta))}：没加分的拍要换手法，不要重复同样的改法。`)
+    lines.push('', attentionFixChapterSource(chapter, bundle, rootPath, sandbox))
+  })
+  lines.push('', ...attentionFixSubmissionLines())
+  lines.push('', '作者在提案页采纳后，服务端按 before 定位、只替换补丁段（其余原文不动）、自动备份，并把该章标记「待复测」；复测任务重新冷读后写回 Δ。做完停下汇报：每章提案 id + 预期提分合计。')
+  return lines.join('\n')
+}
+
+/**
+ * 注意力复测工作单：对「待复测」章节做零上下文重新打分（不透露旧分，避免凑分），
+ * 分数由服务端写进 scoreHistory 并算 Δ；复测后仍低分的章节要求再出一份提分方案。
+ */
+export function attentionRecheckWorkorder(bundle, options = {}, rootPath = '') {
+  const project = bundle?.project ?? {}
+  const chapters = new Map((bundle?.chapters ?? []).map((chapter) => [Number(chapter.id), chapter]))
+  const attentionMap = attentionByChapter(bundle?.attention)
+  const requested = Number(options?.chapter) || 0
+  const selected = attentionChapterSelection(options)
+  const all = attentionWantsAll(options)
+  const limit = Math.max(1, Number(options?.limit) || 3)
+  const pendingRows = [...attentionMap.values()]
+    .filter((record) => record?.recheckPending === true)
+    .map((record) => ({ chapter: Number(record.chapter), record }))
+    .filter((row) => Number.isFinite(row.chapter) && row.chapter > 0)
+    .sort((a, b) => a.chapter - b.chapter)
+  const rowFor = (chapterNumber) => {
+    const record = attentionMap.get(chapterNumber)
+    if (!record) throw new Error(`第 ${chapterNumber} 章还没有注意力记录：先做零上下文冷读打分`)
+    return { chapter: chapterNumber, record }
+  }
+  let rows
+  let scopeLabel = ''
+  if (requested > 0) {
+    rows = [rowFor(requested)]
+  } else if (selected.length > 0) {
+    rows = selected.map((chapterNumber) => rowFor(chapterNumber))
+    scopeLabel = `自选 ${rows.length} 章`
+  } else {
+    rows = all ? pendingRows : pendingRows.slice(0, limit)
+    if (all) scopeLabel = `全书待复测 ${rows.length} 章`
+  }
+  if (rows.length === 0) {
+    throw new Error('没有标记「待复测」的章节：先采纳一份提分方案（采纳后自动标记待复测），或指定 chapter 复测某章；先冷读打分才有可复测的分数')
+  }
+  const sandbox = reviewSandboxFor(bundle, rootPath, rows.map((row) => row.chapter))
+  if (rows.length > ATTENTION_BATCH_INLINE_MAX) {
+    return attentionRecheckBatchText(bundle, rows, chapters, rootPath, project, scopeLabel, sandbox)
+  }
+  const suffix = scopeLabel ? ` · ${scopeLabel}` : ''
+  const lines = [
+    `【注意力复测】项目《${project.name ?? ''}》 projectId=${project.id ?? ''}${suffix}`,
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '',
+    '下面这些章节刚按提分方案改过正文，需要一次【零上下文】复测：只读正文（自己 read 章节文件，工作单不贴正文），不要看旧分、不要看修改记录、不要查账本/设定/大纲/人物卡。读法：逐章读完再打分，按该类型读者预期校准；内容没变好就打低分，禁止凑分。',
+    attentionGenreLine(projectGenre(bundle)),
+  ]
+  rows.forEach((row, index) => {
+    const chapter = chapters.get(row.chapter) ?? {}
+    lines.push('', `## ${index + 1}. 第 ${row.chapter} 章《${chapter.title ?? ''}》`)
+    lines.push('', attentionFixChapterSource(chapter, bundle, rootPath, sandbox))
+  })
+  lines.push('', ...attentionRecheckSubmissionLines(project))
+  lines.push('做完停下汇报：每章新分与四拍、这次新写了哪几条审稿（章号+问题）、是否又出了补丁方案；分数对比由服务端自动算。')
+  return lines.join('\n')
+}
+
+/** 全书提分看板：哪些章待提分/待复测/已复测 Δ 多少，一屏看完提分闭环卡在哪。 */
+export function attentionScoreboardText(bundle) {
+  const project = bundle?.project ?? {}
+  const stats = attentionFixStats(bundle)
+  const candidates = attentionFixCandidates(bundle)
+  const attentionMap = attentionByChapter(bundle?.attention)
+  const chapterMap = new Map((bundle?.chapters ?? []).map((chapter) => [Number(chapter.id), chapter]))
+  const scored = [...attentionMap.values()].filter((row) => attentionScoreOf(row.score) !== null)
+  const avgDelta = stats.avgDelta === null ? '—' : (stats.avgDelta > 0 ? `+${stats.avgDelta}` : String(stats.avgDelta))
+  const lines = [
+    `# 注意力提分看板 · ${project.name ?? ''}`,
+    `- 已打分：${scored.length} 章 ｜ 实测均分 ${attentionStats(bundle).average ?? '—'} ｜ 未冷读：${attentionUnscoredChapters(bundle).length} 章`,
+    `- 提分闭环：待复测 ${stats.pendingRecheck} 章 ｜ 已复测 ${stats.verified} 章 ｜ 补丁 ${stats.fixCount} 条 ｜ 平均 Δ ${avgDelta}（最好 ${stats.bestDelta === null ? '—' : `+${stats.bestDelta}`} / 最差 ${stats.worstDelta === null ? '—' : stats.worstDelta}）｜ 待采纳提分方案 ${stats.pendingFixProposals} 份 ｜ 复测没加分 ${stats.noGain} 章`,
+  ]
+  if (candidates.length === 0) {
+    lines.push('', `没有需要提分的章节（已打分章节都在 ${ATTENTION_GOOD_SCORE} 分以上，或还没有冷读分）。先做零上下文冷读打分。`)
+    return lines.join('\n')
+  }
+  lines.push('', '## 待提分章节（按提分空间降序）')
+  for (const row of candidates) {
+    const chapter = chapterMap.get(row.chapter) ?? {}
+    const status = row.recheckPending
+      ? '待复测'
+      : row.pendingFixes > 0
+        ? `等采纳（${row.pendingFixes} 份方案）`
+        : row.stale
+          ? '分数过期（正文改过，需复测）'
+          : row.lastDelta !== null
+            ? (row.lastDelta > 0 ? `已复测 Δ+${row.lastDelta}` : `已复测 Δ${row.lastDelta}（没加分）`)
+            : '等方案'
+    lines.push(`- 第${row.chapter}章《${chapter.title ?? ''}》 实测 ${row.score} / 设计 ${row.designScore ?? '—'} / 空间 +${row.potential} ｜ 四拍 ${attentionBeatLine(row.record)} ｜ 最弱 ${ATTENTION_BEAT_LABEL[row.weakest] ?? '—'} ｜ ${status}`)
+  }
+  lines.push('', '下一步：novel_desk_attention_fix(op="workorder") 出提分工作单 → novel_desk_propose(kind="attention-fix") → 作者采纳 → op="recheck" 复测写回 Δ。')
+  return lines.join('\n')
+}
+
+export const TASK_LABEL = {
   'next-chapter-plan': '生成下一章方案',
   'review-chapter': '审阅一章',
   'fresh-read': '零上下文首读一章',
   'attention-design': 'AI 补齐注意力机制（逐章设计）',
+  'attention-fix': '生成注意力提分方案',
+  'attention-recheck': '复测提分效果',
   'world-build': 'AI 生成世界地图',
   'world-infer': 'AI 反推地点',
   'review-fix': '按审稿意见修改',
@@ -1127,6 +1660,7 @@ const TASK_LABEL = {
   'enrich-events': 'AI 补全时间线',
   'enrich-conflicts': 'AI 补全冲突',
   'enrich-outlines': 'AI 补全章节大纲',
+  'align-ledgers': '对齐账本到当前稿（版本对齐）',
 }
 
 /**
@@ -1150,12 +1684,18 @@ export function pickHandoffTarget(items, options = {}) {
   }
 }
 
+/** 交接 payload → 提分/复测工作单的选章参数（scope=all / limit=0 都按「全部」处理）。 */
+function handoffAttentionOptions(body = {}) {
+  const all = attentionWantsAll(body)
+  return { chapter: body.chapter, chapters: body.chapters, all, limit: body.limit }
+}
+
 /** 工作台 → 对话 的交接 prompt。 */
 export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
   const task = String(body.task ?? 'custom')
   const project = bundle.project
   // 零上下文首读：提前 return，绝不能拼上常规交接头/进度/账本/agents/风格规则
-  // scope=chapter 只带一章；scope=book 带全书（整本放不下时改成分批工作单）
+  // scope=chapter 只给一章的正文文件路径；scope=book 给全书章节文件清单，正文都由 AI 自己 read
   if (task === 'fresh-read') {
     const chapters = bundle.chapters ?? []
     if (chapters.length === 0) throw new Error('没有可首读的章节')
@@ -1163,35 +1703,38 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     const scope = body.scope === 'book' ? 'book' : 'chapter'
     // 类型化打分：只带类型与读者预期，不带账本，保持零上下文
     const genreLine = attentionGenreLine(projectGenre(bundle))
-    const reviewLine = (count) => `读完用 novel_desk_review 写 ${count} 条审稿（project=${project.id}, chapter=对应章号, dimension=首读, severity=blocker|major|minor|suggestion），每条一句话：问题 + 依据。`
+    const reviewLine = (count) => `读完用 novel_desk_review 写 ${count} 条审稿（project=${project.id}, chapter=对应章号, dimension=首读, severity=blocker|major|minor|suggestion, origin="cold-read"），每条一句话：问题 + 依据（带原文引文）。`
     if (scope === 'book') {
       const totalChars = ordered.reduce((n, row) => n + String(row.content ?? '').length, 0)
-      if (totalChars <= FRESH_READ_INLINE_LIMIT) {
-        const body = ordered.map((row) => `第 ${Number(row.id)} 章《${row.title}》\n\n${String(row.content ?? '')}`)
-        return [
-          '零上下文首读（全书）：按顺序读完下面整本正文。不要读工作台、不要查设定/大纲/人物卡。',
-          reviewLine('3~8'),
-          '最后给一段 12 行内全书综合意见：哪里抓得住、哪里想弃读、主线是否清楚、人物是否可信、信息过载还是不足、最想继续读和最先放弃的位置。不要改正文。',
-          genreLine,
-          '除首读意见外，给每一章一个 0-100 的注意力总分（按该类型读者预期校准，格式固定为「第N章 78」），每章再附一句理由；最后给一段全书注意力总评：最抓人/最想弃读的章、曲线高低点、平均分。用 novel_desk_propose(kind=attention) 提交一条 attention 提案（items 每章一个，只写实测字段：chapter/score/verdict/weakest/dropRisk/detail）；钩子/张力/回报/章末牵引的设计归注意力设计师，不要写这些字段（type 也不要写），不要改正文。',
-          '---',
-          ...body,
-        ].join('\n\n')
+      const sandbox = reviewSandboxFor(bundle, rootPath, ordered.map((row) => Number(row.id)))
+      const plan = ordered.map((row) => `第 ${Number(row.id)} 章《${row.title}》｜${String(row.content ?? '').length} 字｜${chapterFilePath(bundle, row.id, rootPath, sandbox)}`)
+      const scoreLine = '除首读意见外，给每一章一个 0-100 的注意力总分（按该类型读者预期校准，格式固定为「第N章 78」），每章再附一句理由；同时给每章最弱一环 weakest（hook|tension|payoff|cliff）。最后给一段全书注意力总评：最抓人/最想弃读的章、曲线高低点、平均分。用 novel_desk_propose(kind=attention) 提交一条 attention 提案（items 每章一个，只写实测字段：chapter/score/breakdown/dropPoints/verdict/weakest/dropRisk/detail；breakdown={hook,tension,payoff,cliff} 各 0-25、合计与总分差≤10，<70 分的章必须给 breakdown 与 1 条 dropPoints 引文）；钩子/张力/回报/章末牵引的设计归注意力设计师，不要写这些字段（type 也不要写），不要改正文。'
+      const fixLine = '打完分后按提分空间排序（设计分/均值 - 实测分，弃读点多的优先），给最低的 3 章各提交一份 novel_desk_propose(kind=attention-fix)：items 至少 ' + ATTENTION_FIX_MIN_ITEMS + ' 条、覆盖至少 2 个不同 target，每条 {target,weak,expectedGain:1-15,after,why,before:逐字照抄章节文件原文 4-600 字}，合计 ≤' + ATTENTION_FIX_MAX_TOTAL + '；只改段落不重写剧情。至少要给最低 3 章出方案；作者要全书提分时再用 novel_desk_attention_fix(op="workorder", all=true) 分批补齐其余低分章。至少 3 章都 ≥' + ATTENTION_GOOD_SCORE + ' 分且无弃读点时，说明理由后可以不出方案。'
+      const bookLines = [
+        '零上下文首读（全书）：只读这本书的正文，自己用 read 工具读文末清单里的章节文件。不要读工作台、不要查设定/大纲/人物卡，也不要读事实账本、事件、时间线、审稿、提案。',
+        '',
+        ...REVIEW_ISOLATION_LINES,
+        '',
+        `全书 ${ordered.length} 章 / ${totalChars} 字，正文不贴进对话（只给文件路径）；长章用 offset/limit 分段读。`,
+      ]
+      if (totalChars <= FRESH_READ_BATCH_HINT) {
+        bookLines.push('读法：按章号顺序逐章 read 文末清单里的章节文件，边读边记要点，读完再汇总。')
+      } else {
+        bookLines.push(
+          '读法：一次读不完，按下面的章节清单分批读。用 subagent 工具按顺序分批（每批不超过约 4 万字），每个子 Agent 只给这一批的正文文件路径，要求它只读正文、返回 3~5 条首读意见（哪里抓得住 / 想弃读、人物可信度、信息过载或不足），并给这一批每章一个 0-100 注意力总分 + 一句理由 + 最弱一环（hook|tension|payoff|cliff）；没有子 Agent 工具就逐章读、边读边记要点再汇总。',
+          '每个子 Agent 除首读意见外，还要返回该批每一章的注意力总分；收齐后由主会话汇总成一条 attention 提案。',
+        )
       }
-      // 整本超出一次能读完的长度：给分批工作单，正文让子 Agent 直接读文件
-      const dir = join(bundle.root ?? '', 'projects', project.id, 'chapters')
-      const plan = ordered.map((row) => `第 ${Number(row.id)} 章《${row.title}》｜${String(row.content ?? '').length} 字｜${join(dir, `${row.id}.md`)}`)
-      return [
-        '零上下文首读（全书）：只读这本书的正文，不要读事实账本、事件、时间线、大纲、人物卡、审稿、提案。',
-        `全书 ${ordered.length} 章 / ${totalChars} 字，一次读不完，按下面的章节清单分批读。`,
-        '读法：用 subagent 工具按顺序分批（每批不超过约 4 万字），每个子 Agent 只给这一批的正文文件路径，要求它只读正文、返回 3~5 条首读意见（哪里抓得住 / 想弃读、人物可信度、信息过载或不足）。没有 subagent 工具就逐章读、边读边记要点再汇总。',
-        reviewLine('5~10'),
+      bookLines.push(
+        reviewLine('3~8'),
+        '最后给一段 12 行内全书综合意见：哪里抓得住、哪里想弃读、主线是否清楚、人物是否可信、信息过载还是不足、最想继续读和最先放弃的位置。不要改正文。',
         genreLine,
-        '每个子 Agent 除首读意见外，还要返回该批每一章的 0-100 注意力总分 + 一句理由（按该类型读者预期校准）。主会话汇总成一条 attention 提案（novel_desk_propose, kind=attention, items 每章一个，只写实测字段：chapter/score/verdict/weakest/dropRisk/detail）；钩子/张力/回报/章末牵引的设计归注意力设计师，不要写这些字段（type 也不要写），不要改正文。',
-        '最后给一段 12 行内全书综合意见：主线是否清楚、人物是否可信、节奏与断点、最想继续读和最先放弃的位置。不要改正文。',
+        scoreLine,
+        fixLine,
         '---',
         ...plan,
-      ].join('\n')
+      )
+      return bookLines.join('\n')
     }
     const requested = Number(body.chapter) || 0
     if (requested > 0 && !ordered.some((row) => Number(row.id) === requested)) {
@@ -1199,16 +1742,20 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     }
     const target = ordered.find((row) => Number(row.id) === requested) ?? ordered[ordered.length - 1]
     const chapter = Number(target.id)
+    const sandbox = reviewSandboxFor(bundle, rootPath, [chapter])
     return [
-      '零上下文首读：只读下面这一章正文。不要读工作台、不要查设定/大纲/人物卡。',
-      `读完用 novel_desk_review 写 2~4 条审稿（project=${project.id}, chapter=${chapter}, dimension=首读, severity=blocker|major|minor|suggestion），每条一句话：问题 + 依据。`,
+      '零上下文首读：只读这一章正文（自己用 read 工具读章节文件，不要读工作台、不要查设定/大纲/人物卡）。',
+      '',
+      ...REVIEW_ISOLATION_LINES,
+      '',
+      `本章正文不贴进对话（${String(target.content ?? '').length} 字），只给文件路径；长章用 offset/limit 分段读。`,
+      `读完用 novel_desk_review 写 2~4 条审稿（project=${project.id}, chapter=${chapter}, dimension=首读, severity=blocker|major|minor|suggestion, origin="cold-read"），每条一句话：问题 + 依据（带原文引文）。`,
       '最后给一段 8 行内综合意见：哪里抓得住、哪里想弃读、人物可信度、信息过载或不足。不要改正文。',
       genreLine,
-      '除首读意见外，给这一章一个 0-100 注意力总分（按该类型读者预期校准），并写一段详细说明：钩子/张力/回报/章末牵引哪里有效、哪里不足、最弱一环、一个弃读点（段落位置）、会不会读下一章（会/犹豫/不会）。用 novel_desk_propose(kind=attention) 提交本章实测记录（chapter/score/verdict/weakest/dropRisk/detail）；钩子/张力/回报/章末牵引的设计归注意力设计师，不要写这些字段（type 也不要写），不要改正文。',
+      '除首读意见外，给这一章一个 0-100 注意力总分（按该类型读者预期校准），并拆成四拍分数 breakdown={hook,tension,payoff,cliff}（各 0-25，合计与总分差不超过 10）；再写一段详细说明：钩子/张力/回报/章末牵引哪里有效、哪里不足、最弱一环 weakest（hook|tension|payoff|cliff）、一个弃读点（段落位置）、会不会读下一章 verdict（会/犹豫/不会）、以及 1~3 条 dropPoints（每条 {quote:"逐字引文", why:"读者为什么会在这里停下来"}）。用 novel_desk_propose(kind=attention) 提交本章实测记录（chapter/score/breakdown/dropPoints/verdict/weakest/dropRisk/detail）；钩子/张力/回报/章末牵引的设计归注意力设计师，不要写这些字段（type 也不要写），不要改正文。',
+      '提分方案（读完必须产）：无论这一章打多少分，都再提交一份 novel_desk_propose(kind=attention-fix, chapter=' + chapter + ', title="第' + chapter + '章提分方案", items=[...])：items 至少 ' + ATTENTION_FIX_MIN_ITEMS + ' 条、最多 ' + ATTENTION_FIX_MAX_ITEMS + ' 条，至少覆盖 2 个不同 target（hook|tension|payoff|cliff|type|language），每条 {target, weak:"这条补什么", expectedGain:1-15 的整数, before:"逐字复制章节文件原文 4-600 字", after:"改写后的同一段", why:"为什么这样改能提分"}，合计 expectedGain 不超过 ' + ATTENTION_FIX_MAX_TOTAL + '。规则：优先改最弱一拍与 dropPoints 那几处原文；只改局部段落，不整章重写、不改剧情走向和人物关系；before 必须与原文完全一致（标点也算）且在正文里只出现一次，否则提案会被拒绝；总分 ≥' + ATTENTION_GOOD_SCORE + ' 且没有弃读点时可以不出方案，但要说明理由。',
       '---',
-      `第 ${chapter} 章《${target.title}》`,
-      '',
-      String(target.content ?? ''),
+      `第 ${chapter} 章《${target.title}》｜${String(target.content ?? '').length} 字｜${chapterFilePath(bundle, chapter, rootPath, sandbox)}`,
     ].join('\n')
   }
   // 按审稿出提案：清单里的审稿项（或直接给的 reviewIds）逐条变成 chapter 提案，作者在提案页验收，不直接改正文
@@ -1219,22 +1766,53 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     const ids = Array.isArray(body.reviewIds) ? body.reviewIds.map(String) : fromItems
     const picked = (bundle.reviews ?? []).filter((row) => ids.includes(String(row.id)))
     if (picked.length === 0) throw new Error('没有选择要处理的审稿意见')
+    // 注意力/文笔/节奏类意见合并成段落补丁（不动整章）；情节/人物/连续性等结构问题才走整章修订
+    const patchDimensions = new Set(['节奏', '文笔', '语言', '句子', '对话', '首读'])
+    const patchRows = picked.filter((row) => patchDimensions.has(String(row.dimension ?? '').trim()))
+    const structuralRows = picked.filter((row) => !patchDimensions.has(String(row.dimension ?? '').trim()))
+    const chapterTitle = new Map((bundle.chapters ?? []).map((row) => [Number(row.id), row.title ?? '']))
+    const reviewChapters = [...new Set(picked.map((row) => Number(row.chapter)).filter((n) => Number.isFinite(n) && n > 0))]
+    const sandbox = reviewSandboxFor(bundle, rootPath, reviewChapters.length > 0 ? reviewChapters : null)
+    const chapterRows = sandbox ? [...sandbox.byId.values()] : []
     const lines = [
       `【按审稿出提案】项目《${project.name}》 projectId=${project.id}`,
-      `下面 ${picked.length} 条是已经审出来的意见。请逐条生成修订提案，不要重写整本，也不要直接改正文。`,
-    ]
+      '',
+      ...REVIEW_ISOLATION_LINES,
+      '',
+      `下面 ${picked.length} 条是已经审出来的意见。请生成修订提案，不要重写整本，也不要直接改正文。`,
+      patchRows.length > 0
+        ? `其中 ${patchRows.length} 条是注意力/文笔/节奏类的局部问题：合并成段落补丁方案（novel_desk_propose kind="attention-fix"，只改几段原文，不整章回写）。`
+        : '',
+      structuralRows.length > 0
+        ? `${structuralRows.length} 条是情节/人物/连续性等结构问题：每条一个 chapter 提案（完整章节正文 + reviewIds）。`
+        : '',
+      '每一条审稿都必须被某份提案的 reviewIds 覆盖，不能漏；一条审稿确实无法执行时，在汇报里说明原因。',
+      ...(chapterRows.length > 0 ? ['', '## 涉及章节的正文文件（唯一允许读取的文件）', ...chapterRows.map((row) => `- 第${Number(row.id)}章《${row.title}》｜${row.words} 字｜${row.path}`)] : []),
+    ].filter((line) => line !== '')
     picked.forEach((row, index) => {
-      lines.push('', `${index + 1}. 第${row.chapter}章 · ${row.dimension ?? ''} · ${row.severity ?? ''}（审稿 id=${row.id}）`, `问题：${row.issue ?? ''}`, `建议：${row.suggestion ?? ''}`)
+      const kindLabel = patchDimensions.has(String(row.dimension ?? '').trim()) ? '段落补丁' : '整章修订'
+      const chapterLabel = Number(row.chapter) === 0 ? '全书级' : `第${row.chapter}章${chapterTitle.get(Number(row.chapter)) ? `《${chapterTitle.get(Number(row.chapter))}》` : ''}`
+      lines.push('', `${index + 1}. [${kindLabel}] ${chapterLabel} · ${row.dimension ?? ''} · ${row.severity ?? ''}（审稿 id=${row.id}）`, `问题：${row.issue ?? ''}`, `建议：${row.suggestion ?? ''}`)
+      if (String(row.quote ?? '').trim()) lines.push(`原文：${String(row.quote).trim()}`)
     })
     lines.push(
       '',
       '执行要求：',
-      '1. 先读对应章节原文，只改这条意见相关的段落，其余原文尽量保持。',
-      '2. 每条提交一个 chapter 提案（novel_desk_propose，data 里放 title/summary/content 完整章节正文，并加 reviewIds=[审稿 id]），不要多条合并，也不要直接 upsert 改正文。',
-      '3. 提案 summary 写清改了什么、依据哪条审稿；拿不准就在 summary 里说明，不要自行扩大改动范围。',
-      '4. 做完停下来汇报：每条审稿对应哪个提案 id。审稿状态留给作者在审稿页处理，不要自己改。',
+      '1. 先读上面「涉及章节的正文文件」清单里的文件（用 read），只改这些意见相关的段落，其余原文保持不动；清单之外的文件一律不要打开。',
+      '2. 段落补丁类：按章合并成 novel_desk_propose(kind="attention-fix", chapter=N, title="第N章按审稿提分", summary="对应审稿 id 与问题", data={chapter:N, reviewIds:[审稿 id...], items:[{target:"hook|tension|payoff|cliff|type|language", weak:"补什么", expectedGain:1-15 整数, before:"逐字抄这段原文（4-600 字、唯一、不重叠）", after:"改写后的同一段", why:"为什么能提分"}]})。items 至少 3 条、最多 12 条，至少覆盖 2 个不同 target，expectedGain 合计 ≤ 40。不要整章重写；chapter=0 的全书级意见按 issue 里列到的章号拆进对应章的补丁，reviewIds 照带。',
+      '3. 整章修订类：每条提交一个 chapter 提案（novel_desk_propose，data 里放 title/summary/content 完整章节正文，并加 reviewIds=[审稿 id]），不要多条合并。',
+      '4. 提案 summary 写清改了什么、依据哪几条审稿；拿不准就在 summary 里说明，不要自行扩大改动范围。',
+      '5. 做完停下来汇报：每条审稿对应哪个提案 id（补丁方案写清覆盖了哪几条审稿）。审稿状态留给作者在审稿页处理，不要自己改。',
     )
     return lines.join('\n')
+  }
+  // 注意力提分：打分之后按提分空间出段落级 before/after 补丁方案（不动整章）
+  if (task === 'attention-fix') {
+    return attentionFixWorkorder(bundle, handoffAttentionOptions(body), rootPath)
+  }
+  // 注意力复测：采纳补丁后零上下文重新打分，服务端写回分数历史与 Δ
+  if (task === 'attention-recheck') {
+    return attentionRecheckWorkorder(bundle, handoffAttentionOptions(body), rootPath)
   }
   // 常规交接：一号原则置顶（零上下文 fresh-read 已在上方提前 return，不会被污染）
   const attentionFirstTask = task === 'next-chapter-plan' || task === 'continue-chapter'
@@ -1254,6 +1832,9 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     `【工作台交接】项目《${project.name}》 projectId=${project.id}${rootPath ? `，工作区=${rootPath}` : ''}`,
     `进度：${bundle.chapters.length} 章 / ${bundle.stats.words} 字；人物 ${bundle.characters.length}；大纲 ${bundle.outlines.length}；事件 ${bundle.events.length}；事实 ${bundle.facts.length}；伏笔 ${bundle.foreshadow.length}；待处理提案 ${bundle.stats.pendingProposals}；审稿 ${bundle.stats.openReviews}。`,
   )
+  // 带上下文的审阅任务同样硬隔离：禁止跨作品对比、禁止读本书工作台以外的文件
+  const reviewerTasks = new Set(['full-review', 'import-review', 'review-chapter', 'review-fix'])
+  if (reviewerTasks.has(task)) lines.push('', ...REVIEW_ISOLATION_NOTICE_LINES, '')
   const chapter = Number(body.chapter) || null
   if (chapter) {
     const hit = (bundle.chapters ?? []).find((row) => Number(row.id) === chapter)
@@ -1316,12 +1897,10 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
     if (dispatchAgents.length < agents.length) lines.push('独立审稿人只做零上下文首读，不带账本上下文，不在本批次派单。')
   }
   const tasks = new Set(items.map((item) => item.task).filter(Boolean))
-  const activePreset = (bundle.presets ?? []).find((preset) => preset.id === bundle.project.activePresetId)
-    ?? (bundle.presets ?? []).find((preset) => preset.source === 'import')
-    ?? (bundle.presets ?? [])[0]
-    ?? {}
-  const styleRules = (activePreset.styleRules ?? []).slice(0, 10)
-  const taboo = (activePreset.taboo ?? []).slice(0, 8)
+  const activePreset = resolveActivePreset(bundle)
+  // 不截断：预设是作者写的规格书，截断会静默丢掉排在后面的规则（含范文锚点）。
+  const styleRules = activePreset.styleRules ?? []
+  const taboo = activePreset.taboo ?? []
   const reviewFocus = (activePreset.reviewFocus ?? []).slice(0, 10)
   if (tasks.has('full-review') || items.some((item) => item.kind === 'review')) {
     lines.push('', '分角色审阅规范（必须执行，不能只做冲突检查）：')
@@ -1348,6 +1927,18 @@ export function buildHandoffPrompt(bundle, body = {}, rootPath = '') {
   // 已有书补注意力机制：逐章设计（不是打分），设计字段归设计师
   if (tasks.has('attention-design') || task === 'attention-design') {
     lines.push('', '任务：为已写章节补「注意力设计」（不是打分）。逐章提交 novel_desk_propose(kind=attention) 一条，只写 design 字段：chapter/type/hook/tension/payoff/cliff/question/designScore/status="planned"。读正文 + outlines + foreshadow/conflicts/highlights 作为素材；章末必须给出未决问题；同类型不要连续超 3 章；书大时用 subagent 分批（每批 ≤4 万字）。不要打 score（留给独立审稿人），不要改正文。')
+  }
+  // 版本对齐：把落后/未追踪的账本补齐到当前稿本版本（只提交提案，作者采纳后才生效）
+  if (tasks.has('align-ledgers') || task === 'align-ledgers') {
+    lines.push(
+      '',
+      '任务：版本对齐（把人物、事实、时间线、地图地点、世界、高光、伏笔、冲突、注意力、章节大纲等账本补齐到当前稿本版本）。严格按下面 5 步执行：',
+      '1. 先调用 novel_desk_bundle({ kind: "alignment" }) 读版本对齐：稿本版本、每个账本域的对齐版本、落后域（behind）/未追踪域（untracked）、变更章节（changedChapters）与缺口（gaps）。',
+      '2. 对每个 behind / untracked 域：读它 changedChapters 里那些章的正文和已有账本，只补这段落差与 gaps 里的缺口，不要重刷整本。',
+      '3. 用 novel_desk_propose 提交提案（kind 用账本 kind：characters/facts/events/locations/world/highlights/foreshadow/conflicts/attention/outlines）；不要直接改账本，也不要改正文；人物/地点先查重，不要重复建同名条目。',
+      '4. 全部提交后调用 novel_desk_align({ op: "mark", kinds: [实际完成的域], note: "..." })：只标实际完成的域，没做的留着继续显示落后。',
+      '5. 汇报：补了哪些域、提交了几条提案、哪些域没动（及原因）。',
+    )
   }
   if (tasks.has('next-chapter-plan') || tasks.has('continue-chapter')) {
     lines.push('', '## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）', '写正文前先提交本章 attention 设计（planned）：type/hook/tension/payoff/cliff/question/designScore（提交 kind=attention 提案），再写正文/下一章方案；正文必须按四拍落地，章末必须留未决问题。')
@@ -1642,6 +2233,194 @@ async function startPipelineSession(ctx, root, bundle, prompt) {
   return { sessionId, workspacePath, project }
 }
 
+/**
+ * 所有审阅的硬性边界（去 AI 化 / 零上下文首读 / 提分工作单 / 复测 / 全文重新审阅共用）。
+ * 清单之外一律不许读：这是「不能污染本书」的底线，不是建议。
+ */
+export const REVIEW_ISOLATION_LINES = [
+  '## 审阅隔离（硬性边界，违反任何一条本次审阅作废）',
+  '1. 只能读下面列出的章节文件（清单在最后）；禁止读取清单以外的任何文件或路径（上级目录、其他作品目录、library.json、历史审阅报告、旧基线、临时草稿）。',
+  '2. 绝对禁止跨作品对比：不得把任何其他作品当「人类对照 / 人写基线」，输出里不得出现其他书名或其他作品的人物名。',
+  '3. 除非作者在本轮明确指定了目录或文件，否则不得打开清单之外的任何东西；缺材料就停下来问作者，不要自己去翻。',
+  '4. 只提交审阅/打分/提案结果，不要改正文。',
+]
+
+/**
+ * 带上下文的审阅（工作台把账本/大纲/人物卡直接写进 prompt，不需要读文件清单）用的隔离边界：
+ * 同样禁止跨作品、禁止读本书工作台以外的文件。
+ */
+export const REVIEW_ISOLATION_NOTICE_LINES = [
+  '## 审阅隔离（硬性边界，违反任何一条本次审阅作废）',
+  '1. 只审当前这一本书：禁止读取本书工作台目录以外的任何文件或路径（其他作品目录、library.json、历史审阅报告、旧基线、临时草稿）。',
+  '2. 绝对禁止跨作品对比：不得把任何其他作品当「人类对照 / 人写基线」，输出里不得出现其他书名或其他作品的人物名。',
+  '3. 除非作者在本轮明确指定了目录或文件，否则不要打开本书工作台之外的东西；缺材料就停下来问作者，不要自己去翻。',
+  '4. 只提交审阅/打分/提案结果，不要改正文。',
+]
+
+/** 审阅隔离区根目录（每本书一个；真正的副本放在每次新建的子目录里，见 prepareReviewSandbox）。 */
+function reviewSandboxDir(root, project) {
+  const raw = String(project?.name || project?.id || 'book').trim()
+  const safe = raw.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-').replace(/^\.+|\.+$/g, '').trim().slice(0, 40) || 'book'
+  return join(root, '.review-workspaces', `${safe}-${String(project?.id ?? '').slice(-6)}`)
+}
+
+/** 同一本书同时可能有多个审阅在跑（全文审阅慢慢读、提分工作单随时出），按章集合分目录，互不清理。 */
+function pruneReviewSandboxes(baseDir, keep = 8) {
+  let entries = []
+  try {
+    entries = readdirSync(baseDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^[0-9a-f]{12}$/.test(entry.name))
+      .map((entry) => ({ name: entry.name, at: statSync(join(baseDir, entry.name)).mtimeMs }))
+      .sort((a, b) => b.at - a.at)
+  } catch {
+    return
+  }
+  for (const entry of entries.slice(keep)) rmSync(join(baseDir, entry.name), { recursive: true, force: true })
+}
+
+/**
+ * 章节集合指纹：同一批章号 + 同一批正文 → 同一个目录（幂等）。
+ * 不同章集合（全书审阅 vs 单章工作单）落在不同目录，不会互相清文件。
+ */
+function reviewSandboxKey(chapters) {
+  const hash = createHash('sha1')
+  for (const chapter of chapters) {
+    hash.update(String(chapter.id))
+    hash.update('\u0000')
+    hash.update(String(chapter.content ?? ''))
+    hash.update('\u0001')
+  }
+  return hash.digest('hex').slice(0, 12)
+}
+
+/**
+ * 准备审阅隔离区：只把本书章节正文复制进去（不带元数据、不带账本、不带历史报告、不带其他作品）。
+ * chapterNumbers=null 复制全书；传数组只复制这些章。同步实现，供同步 prompt 构造器直接调用。
+ * 目录名由「章号 + 正文」的 sha1 前 12 位决定：同一批章重复调用落到同一目录（幂等），
+ * 全书审阅与单章工作单章集合不同、目录不同，不会互相清文件；每个目录只保留最近 8 份，更早的自动清掉。
+ * 返回 { dir, chapterFiles, byId }，chapterFiles 会写进 prompt 的「唯一允许读取」清单。
+ */
+export function prepareReviewSandbox(root, bundle = {}, chapterNumbers = null) {
+  const baseDir = reviewSandboxDir(root, bundle.project)
+  const wanted = chapterNumbers === null ? null : new Set((chapterNumbers ?? []).map((n) => Number(n)))
+  const chapters = (bundle.chapters ?? []).slice()
+    .filter((chapter) => !wanted || wanted.has(Number(chapter.id)))
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)))
+  const dir = join(baseDir, reviewSandboxKey(chapters))
+  const chaptersDir = join(dir, 'chapters')
+  mkdirSync(chaptersDir, { recursive: true })
+  const chapterFiles = []
+  const byId = new Map()
+  const keepNames = new Set()
+  for (const chapter of chapters) {
+    const number = Number(chapter.id)
+    const id = String(chapter.id ?? '').padStart(4, '0')
+    const path = join(chaptersDir, `${id}.md`)
+    writeFileSync(path, String(chapter.content ?? ''), 'utf8')
+    keepNames.add(`${id}.md`)
+    const row = { id, title: String(chapter.title ?? ''), words: String(chapter.content ?? '').length, path }
+    chapterFiles.push(row)
+    byId.set(number, row)
+  }
+  for (const name of readdirSync(chaptersDir)) {
+    if (!keepNames.has(name)) rmSync(join(chaptersDir, name), { force: true })
+  }
+  const now = new Date()
+  try {
+    utimesSync(dir, now, now)
+  } catch {}
+  pruneReviewSandboxes(baseDir, 8)
+  return { dir, chapterFiles, byId }
+}
+
+/** prompt 构造器用：有 root 一定走隔离区；只有手工 bundle（无 root）才退回项目目录。 */
+function reviewSandboxFor(bundle, rootPath, chapterNumbers = null) {
+  const root = String(bundle?.root ?? rootPath ?? '')
+  if (!root) return null
+  return prepareReviewSandbox(root, bundle, chapterNumbers)
+}
+
+/**
+ * 准备「去 AI 化审阅」隔离工作区（与所有审阅共用同一套隔离区）。
+ * 返回的 chapterFiles 会写进 prompt 的只读清单，AI 只能读这些文件。
+ */
+export async function prepareDeaiWorkspace(root, bundle = {}) {
+  const sandbox = prepareReviewSandbox(root, bundle, null)
+  return { dir: sandbox.dir, chapterFiles: sandbox.chapterFiles }
+}
+
+/** 建/复用隔离工作区对应的 DSH workspace；返回 workspaceId。 */
+async function ensureReviewWorkspace(ctx, dir, title) {
+  const registry = ctx?.get?.('workspaceRegistry')
+  if (!registry?.resolveByPath || !registry?.create) return null
+  let workspace = null
+  try { workspace = await registry.resolveByPath(dir) } catch { workspace = null }
+  if (!workspace) workspace = await registry.create(dir, title)
+  else if (workspace.title !== title && typeof workspace.setTitle === 'function') {
+    try { await workspace.setTitle(title) } catch { /* ignore */ }
+  }
+  return workspace?.id ?? null
+}
+
+/** 在隔离区里新建空会话（workspace 也指向隔离区，AI 的 cwd 里看不到任何其他作品）。 */
+async function startIsolatedReviewSession(ctx, root, project, prompt) {
+  const workspaceId = await ensureReviewWorkspace(ctx, root, `审阅 · ${String(project?.name ?? '').trim() || String(project?.id ?? '')}`)
+  if (!workspaceId) throw new Error('无法注册审阅隔离工作区：宿主未提供 workspaceRegistry')
+  const controller = ctx?.get?.('sessionController')
+  if (!controller?.create || !controller?.prompt) throw new Error('宿主未提供会话服务，无法启动独立审阅')
+  const created = await controller.create({ workspaceId })
+  const sessionId = created?.sessionId
+  if (!sessionId) throw new Error('宿主新建会话失败')
+  await controller.prompt({
+    requestId: randomUUID(),
+    sessionId,
+    mode: 'queue',
+    content: [{ type: 'text', text: prompt }],
+    clientTimeZone: 'Asia/Shanghai',
+  }, AbortSignal.timeout(20000))
+  return { sessionId, workspaceId }
+}
+
+/**
+ * 启动「去 AI 化审阅」：独立空会话 + 隔离工作区（只含本书章节正文副本）+ 写死边界的 prompt。
+ * 这是 review.startDeai RPC 与 novel_desk_deai_review 工具的共同实现。
+ */
+export async function startDeaiReview(root, projectId, ctx = null, options = {}) {
+  const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
+  const audit = auditAiStyle(bundle.chapters ?? [])
+  const workspace = await prepareDeaiWorkspace(root, bundle)
+  const prompt = buildAiStyleReviewPrompt(bundle, audit, { chapterFiles: workspace.chapterFiles })
+  const auditBrief = { overall: audit.overall, flags: audit.flags, mdChapters: audit.mdChapters }
+  const base = {
+    prompt,
+    workspacePath: workspace.dir,
+    chapterCount: workspace.chapterFiles.length,
+    audit: auditBrief,
+    summary: auditSummaryText(audit),
+  }
+  if (options.dryRun) return base
+  const { sessionId } = await startIsolatedReviewSession(ctx, workspace.dir, bundle.project, prompt)
+  return { ...base, sessionId }
+}
+
+
+/**
+ * 启动「全文重新审阅」：独立空会话 + 隔离工作区（只含本书章节副本）+ 写死边界的通读 prompt。
+ * review.startFull RPC 的实现。
+ */
+export async function startFullBookReview(root, projectId, input = {}, ctx = null) {
+  const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
+  const focus = Array.isArray(input.focus)
+    ? input.focus
+    : String(input.focus ?? '').split(/[\n、,，]+/).map((item) => item.trim()).filter(Boolean)
+  const sandbox = prepareReviewSandbox(root, bundle, null)
+  const prompt = buildFullBookReviewPrompt(bundle, { focus, sandbox })
+  const { sessionId } = await startIsolatedReviewSession(ctx, sandbox.dir, bundle.project, prompt)
+  return { sessionId, prompt, focus, workspacePath: sandbox.dir, chapterCount: sandbox.chapterFiles.length }
+}
+
 /** 向已存在的会话投递一条 prompt（恢复/兜底用）。 */
 async function sendPipelinePrompt(ctx, sessionId, prompt) {
   const controller = ctx?.get?.('sessionController')
@@ -1659,9 +2438,10 @@ async function sendPipelinePrompt(ctx, sessionId, prompt) {
 /** 准备阶段：生成阶段列表 + 新会话 + 准备阶段 prompt。 */
 export async function preparePipeline(root, projectId, input = {}, ctx = null) {
   const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
   const current = await getPipeline(root, projectId)
   if (current.status === 'running') throw new Error('流水线正在运行，先暂停/结束再重新准备')
-  const preset = bundle.presets[0] ?? {}
+  const preset = resolveActivePreset(bundle)
   const targetChapter = Number(bundle.project.targetChapters)
     || pipelineMaxChapter((bundle.outlines ?? []).map((outline) => ({ id: outline.chapter })))
     || pipelineMaxChapter(bundle.chapters)
@@ -1730,9 +2510,23 @@ export async function markPipelinePrepared(root, projectId) {
   })
 }
 
+/**
+ * 开工前自动快照：保证任何自动改动都能整本回滚。
+ * 快照失败不阻断开工（只记日志），但会在控制台提示。
+ */
+async function autoSnapshotBeforeRun(root, projectId, label, runId = '') {
+  try {
+    return await createSnapshot(root, projectId, { label, trigger: 'run-start', runId })
+  } catch (error) {
+    console.error('[story-desk] 开工前快照失败：', error instanceof Error ? error.message : String(error))
+    return null
+  }
+}
+
 /** 启动一次 run：生成 runId/阶段/目标，新会话投递 goal prompt。 */
 export async function startPipelineRun(root, projectId, options = {}, ctx = null) {
   const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
   const current = await getPipeline(root, projectId)
   if (current.status === 'running') throw new Error('流水线已经在运行')
   const currentMax = pipelineMaxChapter(bundle.chapters)
@@ -1774,6 +2568,7 @@ export async function startPipelineRun(root, projectId, options = {}, ctx = null
     }
   }
   const runId = `run-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
+  await autoSnapshotBeforeRun(root, projectId, `生成整本书开工前 · 目标第 ${targetChapter} 章`, runId)
   const usageBefore = await summarizeUsage(root, projectId, ctx)
   const budget = {
     maxTokens: Number(options.budget?.maxTokens) || Number(current.budget.maxTokens) || 0,
@@ -2265,6 +3060,534 @@ export function buildExpansionGoalPrompt(bundle, expansionInput = {}) {
   return lines.join('\n')
 }
 
+/**
+ * 去 AI 化审稿工作单：把确定性指标当证据，让审稿人只负责「怎么改」，
+ * 不负责「像不像机器」——那部分已经算出来了。
+ */
+export function buildFullBookReviewPrompt(bundle = {}, input = {}) {
+  const project = bundle.project ?? {}
+  const focus = Array.isArray(input.focus) ? input.focus.map((item) => String(item).trim()).filter(Boolean) : []
+  const chapters = bundle.chapters ?? []
+  const sandbox = input.sandbox ?? reviewSandboxFor(bundle, String(input.rootPath ?? ''), null)
+  const files = sandbox ? sandbox.chapterFiles : chapters.slice().sort((a, b) => String(a.id).localeCompare(String(b.id))).map((chapter) => {
+    const id = String(chapter.id ?? '').padStart(4, '0')
+    return {
+      id,
+      title: String(chapter.title ?? ''),
+      words: String(chapter.content ?? '').length,
+      path: bundle.root && project.id ? join(bundle.root, 'projects', String(project.id), 'chapters', `${id}.md`) : '',
+    }
+  })
+  const lines = [
+    '你是本书的「全文重新审阅」负责人。这次不是抽读，是通读全书重新审一遍；独立会话、零上下文，只审这一本书。',
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '',
+    `# 作品：${project.name || '未命名'}（${chapters.length} 章）`,
+    '## 本次重点（作者指定，优先级最高；未指定的维度按默认口径）',
+    ...(focus.length > 0 ? focus.map((item, index) => `${index + 1}. ${item}`) : ['（作者未指定重点，按默认口径：情节因果、人物动机、连续性、节奏、文笔、章末钩子）']),
+    '',
+    '## 章节文件清单（唯一允许读取的文件）',
+    '用 read 工具读文件，长章用 offset/limit 分段读。每一条审稿都必须能指回下面某一章。',
+    ...files.map((item) => `- 第${Number(item.id) || item.id}章《${item.title}》｜${item.words} 字${item.path ? `｜${item.path}` : ''}`),
+    '',
+    '## 审阅口径',
+    '- 每条意见必须带章号、维度、严重度（blocker/major/minor）、引用原文、可执行改法；',
+    '- 重点里的每一条都要单独回应：满足 / 部分满足 / 不满足，并给出证据；',
+    '- 不许只写感受，不许空泛总结；',
+    '- 指出哪些地方不要改（风格资产）。',
+    '',
+    '## 提交方式',
+    `用 novel_desk_review 逐章提交（origin="review"）；最后用一段总结回答：全书在本次重点上处于什么水平。`,
+    '提交前自查：每条审稿的章号都在清单里、引文逐字来自该章，没有出现任何其他作品的书名或人物名。',
+  ]
+  return lines.join('\n')
+}
+
+export function buildAiStyleReviewPrompt(bundle = {}, audit = null, options = {}) {
+  const project = bundle.project ?? {}
+  const result = audit ?? auditAiStyle(bundle.chapters ?? [])
+  const { overall, flags, chapterFlags } = result
+  const projectId = String(project.id ?? '')
+  const root = String(bundle.root ?? '')
+  const files = Array.isArray(options.chapterFiles) && options.chapterFiles.length > 0
+    ? options.chapterFiles
+    : (root ? prepareReviewSandbox(root, bundle, null).chapterFiles : (bundle.chapters ?? []).slice().sort((a, b) => String(a.id).localeCompare(String(b.id))).map((chapter) => {
+      const id = String(chapter.id ?? '').padStart(4, '0')
+      return {
+        id,
+        title: String(chapter.title ?? ''),
+        words: String(chapter.content ?? '').length,
+        path: root && projectId ? join(root, 'projects', projectId, 'chapters', `${id}.md`) : '',
+      }
+    }))
+  const head = [
+    '# 去 AI 化审阅（独立会话 · 零上下文 · 只审本书）',
+    '',
+    ...REVIEW_ISOLATION_LINES,
+    '5. 这是独立新建的审稿会话，不继承任何旧对话；你没有「前情」，也不需要，不要去找旧上下文。',
+    '6. **只审这一本书**：所有判断只能来自下面「章节文件清单」里的文件。',
+    '7. 不要为了「像人」而编造口语、病句、错别字或降低质量；去 AI 化是让叙述更具体、更有信息量，不是伪装。',
+    '8. 本轮只提交审稿意见（novel_desk_review），不要改正文、不要提交章节提案。',
+    '',
+    `# 作品：${project.name || '未命名'}（${overall.chapters} 章 / ${overall.chars} 字符）`,
+    `项目 id：${projectId || '（未知）'}`,
+    '',
+    '## 章节文件清单（唯一允许读取的文件）',
+    '用 read 工具读文件，长章用 offset/limit 分段读。每一条审稿都必须能指回下面某一章。',
+    ...files.map((item) => `- 第${Number(item.id) || item.id}章《${item.title}》｜${item.words} 字${item.path ? `｜${item.path}` : ''}`),
+    '',
+    '## 第一优先级：Markdown 残留（有一条就是错，必须先清）',
+    `- 全书残留：${overall.mdArtifacts ?? 0} 处，分布在 ${(result.mdChapters ?? []).length} 章`,
+    ...(result.mdChapters ?? []).slice(0, 20).map((row) => {
+      const kinds = Object.entries(row.byKind ?? {}).map(([key, count]) => `${key} ${count}`).join('、')
+      const sample = (row.samples ?? []).slice(0, 2).map((item) => item.text).join(' / ')
+      return `  · 第${row.chapter}章《${row.title ?? ''}》：${row.total} 处（${kinds}）样例：${sample}`
+    }),
+    '  处理规则：## 标题改成纯文本或章回小标题；**粗体** 去掉星号；--- 分隔线删除；> 引用去掉符号；列表符删除；代码反引号删除。',
+    '',
+    '## 已测出的机器痕迹（这是证据，不是你判断的内容）',
+    `- 微动作帧密度：${overall.microFramesPer10k}/万字（阈值 ${result.thresholds.microFramesPer10k}）`,
+    `- 装饰性步长量化：${overall.stepQuantPer10k}/万字（阈值 ${result.thresholds.stepQuantPer10k}）`,
+    `- 情绪词密度：${overall.emotionPer10k}/万字（最低 ${result.thresholds.emotionPer10kMin}）`,
+    `- 长句占比：${(overall.longSentenceRatio * 100).toFixed(1)}%（最低 ${(result.thresholds.longSentenceRatioMin * 100).toFixed(0)}%）`,
+    `- 章间句长变异系数：${overall.sentenceMeanCv}（最低 ${result.thresholds.sentenceMeanCvMin}）`,
+    `- 对话文言度：${overall.dialogueClassicalPer10k}/万字（最低 ${result.thresholds.dialogueClassicalPer10kMin}）`,
+    `- 对话白话标记：${overall.dialogueVernacularPer10k}/万字（最高 ${result.thresholds.dialogueVernacularPer10kMax}）`,
+    `- 高频微动作集中度：前 ${overall.topFrames.length} 个帧（${overall.topFrames.join('、')}）占全部帧的 ${(overall.topFrameShare * 100).toFixed(0)}%（最高 ${(result.thresholds.topFrameShareMax * 100).toFixed(0)}%）`,
+    '',
+    '## 判定口径（必须照此分级）',
+    '- blocker：Markdown 残留（必须清零）；情绪词/长句缺口这类结构性问题，单章改不动，需要整段重写；',
+    '- major：微动作帧、步长量化、对话文言度这类可局部替换的问题；',
+    '- minor：单点重复用词。',
+    '',
+    '## 输出（用 novel_desk_review 提交，origin="deai"，每条带章号与原文引用）',
+    '1. 先清 Markdown：逐章列出残留位置并给出清理后的写法；',
+    '2. 再给结论：本书机器痕迹最重的三项（md 之外），各举 2 条原文；',
+    '3. 再按章给改法：删/换/补，写清楚改成什么；',
+    '4. 指出哪些地方**不能改**（例如器物白描是风格资产，不是机器痕迹）。',
+    '要求：每条审稿都带 chapter（章号）、quote（逐字摘自该章正文，≥4 字、≤600 字）、issue、suggestion；跨章共性问题用 chapter=0。',
+    '禁止在 issue/suggestion/quote 里提任何其他作品名；违反会被插件直接拒收。',
+  ]
+  if (flags.length > 0) {
+    head.push('', '## 需要重点开刀的指标')
+    for (const flag of flags) head.push(`- ${flag.label}：实测 ${flag.value} vs 阈值 ${flag.threshold}`)
+  }
+  if (chapterFlags.length > 0) {
+    head.push('', '## 逐章偏差（按章开工）')
+    for (const row of chapterFlags.slice(0, 60)) {
+      head.push(`- 第${row.chapter}章《${row.title ?? ''}》：${row.hits.map((hit) => `${hit.key}=${hit.value}`).join('；')}`)
+    }
+  }
+  head.push(
+    '',
+    '## 提交前自查（逐条确认后再提交）',
+    '- [ ] 我读的每个文件都在「章节文件清单」里，没有读清单外文件；',
+    '- [ ] 输出里没有其他作品名，没有「人类对照 / 人写基线」这类跨作品比较；',
+    '- [ ] 每条审稿都带 chapter、quote（逐字来自该章正文）、issue、suggestion；',
+    '- [ ] 我只提交了 novel_desk_review（origin="deai"），没有改正文、没有提章节提案；',
+    `- [ ] 需要作者人工复检 AI 痕迹时，提示用朱雀 AI 检测：${DEAI_AUDIT_URL}`,
+  )
+  return head.join('\n')
+}
+
+/** 从 RPC body 里取出改动契约（preview/plan 共用）。 */
+function revisionContractFromBody(body = {}) {
+  const charter = body.charter && typeof body.charter === 'object' ? body.charter : {}
+  const tiers = (Array.isArray(body.tiers) ? body.tiers : String(body.tiers ?? body.tier ?? '').split(/[+、,，\s]+/))
+    .map((item) => String(item ?? '').trim().toUpperCase())
+    .filter(Boolean)
+  // 批次大小与停顿方式由作者选：'auto' = 不指定，交给分层默认（L3 逐章、L1/L2 每 5 章）。
+  const batchSizeRaw = String(body.batchSize ?? '').trim().toLowerCase()
+  const batchCount = Number(batchSizeRaw)
+  const batchSize = batchSizeRaw === 'all'
+    ? 'all'
+    : (Number.isFinite(batchCount) && batchCount > 0 ? Math.floor(batchCount) : 'auto')
+  const stopMode = findStopMode(body.stopMode)?.id ?? 'auto'
+  return {
+    tiers: [...new Set(tiers)],
+    tier: String(body.tier ?? tiers[0] ?? '').trim().toUpperCase(),
+    batchSize,
+    stopMode,
+    goalMode: ['preset', 'custom', 'both'].includes(String(body.goalMode ?? '')) ? String(body.goalMode) : 'custom',
+    presetId: String(body.presetId ?? '').trim(),
+    chapters: (Array.isArray(body.chapters) ? body.chapters : String(body.chapters ?? '').split(/[、,，\s]+/))
+      .map((id) => String(id ?? '').trim())
+      .filter(Boolean),
+    goal: String(body.goal ?? '').trim(),
+    charter: {
+      oldValue: String(charter.oldValue ?? '').trim(),
+      newValue: String(charter.newValue ?? '').trim(),
+      affectedCharacters: (Array.isArray(charter.affectedCharacters) ? charter.affectedCharacters : String(charter.affectedCharacters ?? '').split(/[、,，\s]+/))
+        .map((name) => String(name ?? '').trim())
+        .filter(Boolean),
+      keywords: (Array.isArray(charter.keywords) ? charter.keywords : String(charter.keywords ?? '').split(/[、,，\s]+/))
+        .map((word) => String(word ?? '').trim())
+        .filter(Boolean),
+    },
+  }
+}
+
+/**
+ * 全文改动工作单：分层决定它必须怎么说。
+ * L1 只准换语域；L3 必须先立价值基准再级联，且逐章停。
+ */
+export function buildRevisionGoalPrompt(bundle = {}, revision = {}, plan = null) {
+  const project = bundle.project ?? {}
+  const contract = revision.contract ?? {}
+  const composedTier = composeTiers(
+    Array.isArray(contract.tiers) && contract.tiers.length > 0 ? contract.tiers : (revision.tier || plan?.tier?.id || ''),
+  )
+  const tier = composedTier?.id ?? ''
+  const policy = revisionGatePolicy(composedTier)
+  const tierInfo = describeRevisionTier(composedTier)
+  const impact = revision.impact ?? {}
+  const batches = Array.isArray(revision.batches) ? revision.batches : []
+  const stopModeInfo = findStopMode(contract.stopMode)
+  const stopMode = stopModeInfo?.id ?? ''
+  const confirmBatches = batches.filter((batch) => batch.requiresAuthorConfirm)
+  const batchSizeInfo = contract.batchSize === 'all'
+    ? '一次全改：全书一批'
+    : contract.batchSize === 'auto'
+      ? '按分层默认（L3 逐章 / L1·L2 每 5 章）'
+      : `每批 ${contract.batchSize} 章`
+  const stopLine = stopMode === 'run-to-end'
+    ? '一路跑到底（不停批，全部改完再汇报）'
+    : stopMode === 'fix-only'
+      ? '只在出问题时停（同章两次修不过闸门 / 撞冻结项才停）'
+      : stopMode === 'per-batch'
+        ? `每批停下确认（${batches.length} 批都停）`
+        : `按分层默认（${confirmBatches.length} / ${batches.length} 批需要确认）`
+  const lines = [
+    '你是本书的「全文改动执行者」。这不是扩写：扩写是把内容写厚，你是把已有正文换掉，',
+    '情节、事实、伏笔、时间线、章末钩子一律冻结，只动本层允许动的东西。',
+    '',
+    `# 作品：${project.name || '未命名'} ｜ 改动层级：${tier}`,
+    tierInfo,
+    '',
+    `## 本次目标（唯一验收口径）`,
+    contract.goal || '（未填；见下方预设规格）',
+    ...(() => {
+      const presets = bundle.presets ?? []
+      const usePreset = contract.goalMode === 'preset' || contract.goalMode === 'both'
+      if (!usePreset) return []
+      const preset = presets.find((item) => String(item.id) === String(contract.presetId))
+        ?? presets.find((item) => String(item.id) === String(bundle.project?.activePresetId))
+        ?? presets[0]
+      if (!preset) return ['', '## 文风规格来源：预设（未找到可用预设）']
+      const rules = Array.isArray(preset.styleRules) ? preset.styleRules : []
+      const cards = Array.isArray(preset.styleCards) ? preset.styleCards : []
+      return [
+        '',
+        `## 文风规格来源：预设《${preset.name ?? preset.id}》`,
+        ...(preset.tone ? [`- tone：${preset.tone}`] : []),
+        ...(preset.structure ? [`- 结构：${preset.structure}`] : []),
+        ...(rules.length > 0 ? ['- 风格规则：', ...rules.map((rule) => `  · ${rule}`)] : []),
+        ...(cards.length > 0 ? ['- 指标卡：', ...cards.map((card) => `  · ${card.label ?? card.id}：${card.min ?? ''}–${card.max ?? ''}`)] : []),
+        '以上预设条款与本次目标同等优先；冲突时以「本次目标」为准。',
+      ]
+    })(),
+    '',
+    `## 范围：${(contract.chapters ?? []).length} 章，共 ${batches.length} 批（${batchSizeInfo}）`,
+    `## 停顿方式：${stopLine}`,
+    ...batches.map((batch) => `- 批次 ${batch.index}｜${batch.label}｜${batch.kind}${batch.requiresAuthorConfirm ? '｜需作者确认' : ''}`),
+  ]
+
+  if (composedTier?.members?.includes('L3')) {
+    const charter = contract.charter ?? {}
+    lines.push(
+      '',
+      '## 价值变更书（L3 必读，逐条照做）',
+      `- 旧立场：${charter.oldValue || '（未填）'}`,
+      `- 新立场：${charter.newValue || '（未填）'}`,
+      `- 受影响人物：${(charter.affectedCharacters ?? []).join('、') || '（未填）'}`,
+      '',
+      '### 执行顺序（不得颠倒）',
+      '1. 先做批次 0（settings）：改人物卡的 goal / motivation / arc / relationships，让设定层先站到新立场上；',
+      stopMode === 'run-to-end' || stopMode === 'fix-only'
+        ? '2. 再按批次清单连续级联正文：不停批，一路做完；每章仍要过保真 + Markdown 闸门；'
+        : stopMode === 'per-batch'
+          ? '2. 再逐批级联正文：每批改完停下等作者确认，不得跳批、不得连做；'
+          : '2. 再按批次清单的「需作者确认」标记推进：标了的停下等确认，没标的直接接下一批；',
+      '3. 每章只改「该角色在这一章的价值取向与相应行为描写」，事件外部结果不得抹除（可重解读，不可删除）。',
+    )
+  }
+
+  if (composedTier?.members?.includes('L1')) {
+    lines.push(
+      '',
+      '## L1 硬规则',
+      '- 只准改句式、用词、语域、比喻、描写顺序、情绪抒写方式；',
+      '- 事件、人物动作与结果、对白信息量、专名、数字、章末钩子一个字不动；',
+      '- 每章改完必须能通过保真闸门（专名不丢、数字保留率 ≥80%、对白条数 ±20%、章末钩子有承接）。',
+    )
+  }
+
+  lines.push(
+    '',
+    `## 影响面（${impact.chapters?.length ?? 0} 章命中，${impact.uncovered ?? 0} 章未命中）`,
+    ...(impact.chapters ?? []).slice(0, 60).map((row) => `- 第${row.chapter}章《${row.title ?? ''}》：${(row.matched ?? []).join('、')}`),
+    '',
+    '## 提交方式（硬性）',
+    '- 改完一章，调用 novel_desk_revision(op="apply", chapter=..., content=...) 写回；不要用 novel_desk_upsert 直接改正文；',
+    '- 每批结束调用 novel_desk_revision(op="stage", data={batchIndex, status, note}) 上报；',
+    ...(stopMode === 'run-to-end'
+      ? ['- 不要中途停下等作者确认：一路跑完（含修不通过的章）再 op="finish" 汇报；预算到顶会自动暂停。']
+      : stopMode === 'fix-only'
+        ? ['- 不要每批停下：连续往下跑。只有同一章两次修不过闸门、或与冻结项冲突无法自决时，才 op="pause" 停下说明原因。']
+        : ['- 清单里标「需作者确认」的批次，结束后调用 op="pause" 停下，不要自行继续；没标的批次直接接下一批；']),
+    '- 全部完成调用 op="finish"。',
+    '',
+    '## 预算',
+    `token 上限 ${Number(revision.budget?.maxTokens) || 0}（0=不限）｜费用上限 ¥${Number(revision.budget?.maxCostCNY) || 0}（0=不限）；80% 预警、100% 自动暂停。`,
+  )
+  return lines.join('\n')
+}
+
+/** 改动状态摘要（MCP status / 页面提示）。 */
+export function revisionSummaryText(revision = {}) {
+  const contract = revision.contract ?? {}
+  const batches = Array.isArray(revision.batches) ? revision.batches : []
+  const done = batches.filter((batch) => batch.status === 'done').length
+  return [
+    '# 全文改动',
+    `状态：${revision.status ?? 'idle'} ｜ 层级：${revision.tier || '未选'} ｜ 进度：${done}/${batches.length} 批`,
+    `目标：${contract.goal || '（未填）'}`,
+    `范围：${(contract.chapters ?? []).length} 章 ｜ 影响面：${revision.impact?.chapters?.length ?? 0} 章命中`,
+    ...batches.map((batch) => `- 批次 ${batch.index}｜${batch.label}｜${batch.status}｜保真 ${batch.fidelity?.hit ?? 0}/${batch.fidelity?.total ?? 0}`),
+    ...(revision.notes ?? []).slice(-3).map((note) => `· ${note.text ?? note}`),
+  ].join('\n')
+}
+
+
+// ── 全文改动：RPC / MCP 共用的执行函数 ────────────────────────
+
+function revisionBatchForChapter(revision, chapterId) {
+  const list = Array.isArray(revision.batches) ? revision.batches : []
+  return list.findIndex((batch) => (batch.chapters ?? []).map(String).includes(String(chapterId)))
+}
+
+/**
+ * 提交单章改写：写正文（自动留历史备份）+ 跑双闸门。
+ * 闸门不通过也写入（作者可回滚），但批次标记 needs-fix。
+ */
+export async function applyRevisionChapter(root, projectId, input = {}) {
+  const chapterId = String(input.chapter ?? '').trim()
+  const content = String(input.content ?? '')
+  if (!chapterId) throw new Error('缺少 chapter')
+  if (!content.trim()) throw new Error('缺少 content（改写后的正文）')
+  const bundle = await getBundle(root, projectId)
+  const original = (bundle.chapters ?? []).find((chapter) => String(chapter.id) === chapterId)
+  if (!original) throw new Error(`章节不存在：${chapterId}`)
+  const revision = await getRevision(root, projectId)
+
+  const anchors = extractAnchors(original, { characterNames: (bundle.characters ?? []).map((c) => c.name).filter(Boolean) })
+  const fidelity = evaluateFidelity(original, { content }, anchors)
+  const styleBefore = auditAiStyle([original]).overall
+  const styleAfter = auditAiStyle([{ id: chapterId, title: original.title, content }]).overall
+  // Markdown 残留是去 AI 化的第一优先级：改写稿里还有 ## /**/--- 就不算达标。
+  const md = scanMarkdownArtifacts(content)
+
+  const saved = await saveChapter(root, projectId, {
+    id: original.id,
+    title: original.title,
+    status: original.status,
+    summary: original.summary,
+    location: original.location,
+    storyTime: original.storyTime,
+    characters: original.characters,
+    content,
+  })
+
+  const index = revisionBatchForChapter(revision, chapterId)
+  const batches = (revision.batches ?? []).map((batch, i) => {
+    if (i !== index) return batch
+    const passed = fidelity.pass && (md.total ?? 0) === 0
+    return {
+      ...batch,
+      status: passed ? 'done' : 'needs-fix',
+      fidelity: { hit: fidelity.hit, total: fidelity.total, missing: fidelity.missing },
+      style: { before: styleBefore, after: styleAfter },
+      md: { total: md.total, byKind: md.byKind },
+    }
+  })
+  const next = await saveRevision(root, projectId, {
+    batches,
+    notes: [...(revision.notes ?? []), { at: new Date().toISOString(), text: `第${chapterId}章已改：保真 ${fidelity.hit}/${fidelity.total}，Markdown 残留 ${md.total} 处${fidelity.pass && md.total === 0 ? '' : '（未通过，已标记 needs-fix）'}` }],
+  })
+  return { revision: next, fidelity, style: { before: styleBefore, after: styleAfter }, md, backup: saved.backup ?? null }
+}
+
+/** 影响面预览（不落盘）。 */
+export function previewRevision(bundle = {}, body = {}) {
+  const contract = revisionContractFromBody(body)
+  const validation = validateRevisionContract(contract)
+  const plan = planRevisionForBundle(bundle, contract, { batchSize: contract.batchSize === 'auto' ? undefined : contract.batchSize })
+  return { contract, validation, ...plan }
+}
+
+/** 出方案：算批次 + 影响面，落盘 plan-ready。 */
+export async function planRevisionRun(root, projectId, body = {}) {
+  const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
+  const contract = revisionContractFromBody(body)
+  // 目标可以来自预设：没手写目标时，用预设的 tone / 规则生成一句可判定的目标
+  if (!contract.goal && (contract.goalMode === 'preset' || contract.goalMode === 'both')) {
+    const presets = bundle.presets ?? []
+    const preset = presets.find((item) => String(item.id) === String(contract.presetId))
+      ?? presets.find((item) => String(item.id) === String(bundle.project?.activePresetId))
+      ?? presets[0]
+    if (preset) {
+      contract.goal = `按预设《${preset.name ?? preset.id}》重写：${String(preset.tone ?? '').trim() || (preset.styleRules ?? []).slice(0, 2).join('；')}`
+    }
+  }
+  const plan = planRevisionForBundle(bundle, contract, { batchSize: contract.batchSize === 'auto' ? undefined : contract.batchSize })
+  if (!plan.ok) throw new Error(`改动契约不成立：${plan.errors.join('；')}`)
+  contract.tier = plan.tier.id
+  const current = await getRevision(root, projectId)
+  if (current.status === 'running') throw new Error('改动正在执行，先暂停/重置再重新出方案')
+  const runId = `rev-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`
+  const saved = await saveRevision(root, projectId, {
+    status: 'plan-ready',
+    runId,
+    tier: plan.tier.id,
+    contract,
+    impact: plan.impact,
+    gates: plan.gates,
+    batches: plan.batches.map((batch) => ({
+      ...batch,
+      status: 'pending',
+      fidelity: { hit: 0, total: 0, missing: [] },
+      style: { before: {}, after: {} },
+    })),
+    budget: { ...current.budget, usedTokens: 0, usedCostCNY: 0 },
+    notes: [...(current.notes ?? []), { at: new Date().toISOString(), text: `出方案：${plan.tier.id} 改动 ${contract.chapters.length} 章 / ${plan.batches.length} 批` }],
+  })
+  // 在这里一并生成 prompt，避免 RPC 再取一次 bundle（52 章时取一次要跑 checks + alignment，很慢）
+  return {
+    revision: saved,
+    plan,
+    prompt: buildRevisionGoalPrompt(bundle, saved),
+    impact: saved.impact,
+    batchCount: (saved.batches ?? []).length,
+  }
+}
+
+/**
+ * 开始前的执行设置：批次大小与停顿方式由作者在「开始」这一步决定。
+ * 只改这两项时不动契约其它字段；未传 / 'auto' 表示沿用方案里的值（'auto' 表示回到分层默认）。
+ */
+function startBatchSizeOverride(value) {
+  if (value === undefined || value === null || value === '') return null
+  const text = String(value).trim().toLowerCase()
+  if (text === 'all') return 'all'
+  if (text === 'auto') return 'auto'
+  const num = Number(text)
+  return Number.isFinite(num) && num > 0 ? Math.floor(num) : null
+}
+
+function startStopModeOverride(value) {
+  if (value === undefined || value === null || value === '') return null
+  const text = String(value).trim()
+  if (text === 'auto') return 'auto'
+  return findStopMode(text)?.id ?? null
+}
+
+/**
+ * 开始时按作者此刻的选择重新切批，并按章保留已有进度。
+ * 不改正文、不跑闸门，只重排批次（每章仍是独立改写）。
+ */
+export function rebatchRevision(bundle = {}, revision = {}, input = {}) {
+  const current = revision.contract ?? {}
+  const batchSize = startBatchSizeOverride(input.batchSize)
+  const stopMode = startStopModeOverride(input.stopMode)
+  if (batchSize === null && stopMode === null) return { changed: false, revision }
+  const contract = { ...current }
+  if (batchSize !== null) contract.batchSize = batchSize
+  if (stopMode !== null) contract.stopMode = stopMode
+  if (String(contract.batchSize ?? 'auto') === String(current.batchSize ?? 'auto')
+    && String(contract.stopMode ?? 'auto') === String(current.stopMode ?? 'auto')) {
+    return { changed: false, revision }
+  }
+  const plan = planRevisionForBundle(bundle, contract, { batchSize: contract.batchSize === 'auto' ? undefined : contract.batchSize })
+  if (!plan.ok) throw new Error(`改动契约不成立：${plan.errors.join('；')}`)
+  // 章节 → 旧批次：重新切批后按章沿用状态（全 done 才算 done，任一 needs-fix 即 needs-fix）
+  const chapterState = new Map()
+  for (const batch of revision.batches ?? []) {
+    for (const id of batch.chapters ?? []) chapterState.set(String(id), batch)
+  }
+  const emptyFidelity = () => ({ hit: 0, total: 0, missing: [] })
+  const batches = plan.batches.map((batch) => {
+    if (batch.kind === 'settings') {
+      const old = (revision.batches ?? []).find((item) => item.kind === 'settings')
+      return {
+        ...batch,
+        status: old?.status === 'done' ? 'done' : 'pending',
+        fidelity: old?.fidelity ?? emptyFidelity(),
+        style: old?.style ?? { before: {}, after: {} },
+      }
+    }
+    const olds = (batch.chapters ?? []).map((id) => chapterState.get(String(id))).filter(Boolean)
+    const allDone = olds.length === (batch.chapters ?? []).length && olds.every((item) => item.status === 'done')
+    const needsFix = olds.some((item) => item.status === 'needs-fix')
+    return {
+      ...batch,
+      status: allDone ? 'done' : (needsFix ? 'needs-fix' : 'pending'),
+      fidelity: allDone
+        ? { hit: olds.reduce((sum, item) => sum + (Number(item.fidelity?.hit) || 0), 0), total: olds.reduce((sum, item) => sum + (Number(item.fidelity?.total) || 0), 0), missing: [] }
+        : emptyFidelity(),
+      style: { before: {}, after: {} },
+    }
+  })
+  return { changed: true, contract, tier: plan.tier.id, gates: plan.gates, batches }
+}
+
+/** 开始执行：建会话 + 投递工作单（可带开始时的批次 / 停顿设置，先重排再投递）。 */
+export async function startRevisionRun(root, projectId, ctx = null, body = {}) {
+  const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
+  const revision = await getRevision(root, projectId)
+  if (!['plan-ready', 'paused'].includes(revision.status)) throw new Error('请先出方案（plan-ready）再开始改动')
+  if ((revision.batches ?? []).length === 0) throw new Error('方案里没有批次，请重新出方案')
+  const rebatched = rebatchRevision(bundle, revision, body)
+  let work = revision
+  if (rebatched.changed) {
+    work = await saveRevision(root, projectId, {
+      contract: rebatched.contract,
+      tier: rebatched.tier,
+      gates: rebatched.gates,
+      batches: rebatched.batches,
+      notes: [...(revision.notes ?? []), {
+        at: new Date().toISOString(),
+        text: `开始时改执行设置：批次 ${rebatched.contract.batchSize} / 停顿 ${rebatched.contract.stopMode}，重排 ${rebatched.batches.length} 批（已完成进度按章保留）`,
+      }],
+    })
+  }
+  const prompt = buildRevisionGoalPrompt(bundle, work)
+  await autoSnapshotBeforeRun(root, projectId, `全文改动开工前 · ${revision.tier || '改动'}`, revision.runId)
+  const session = await startPipelineSession(ctx, root, bundle, prompt)
+  const saved = await saveRevision(root, projectId, {
+    status: 'running',
+    sessionId: session.sessionId,
+    notes: [...(work.notes ?? []), { at: new Date().toISOString(), text: '开始执行改动' }],
+  })
+  return { revision: saved, sessionId: session.sessionId, prompt, rebatched: rebatched.changed }
+}
+
+/** 推进批次状态。 */
+export async function advanceRevision(root, projectId, input = {}) {
+  const revision = await getRevision(root, projectId)
+  const index = Number(input.batchIndex)
+  const status = String(input.status ?? '').trim() || 'done'
+  const batches = (revision.batches ?? []).map((batch, i) => (i === index ? { ...batch, status } : batch))
+  const allDone = batches.length > 0 && batches.every((batch) => ['done', 'skipped'].includes(batch.status))
+  return saveRevision(root, projectId, {
+    batches,
+    ...(input.note ? { notes: [...(revision.notes ?? []), { at: new Date().toISOString(), text: String(input.note) }] } : {}),
+    ...(allDone ? { status: 'done' } : {}),
+  })
+}
+
 /** 大纲确认 / 手动恢复时发给同一会话的续跑 prompt。 */
 export function buildExpansionResumePrompt(expansionInput = {}) {
   const expansion = { ...defaultExpansion(), ...expansionInput }
@@ -2300,6 +3623,7 @@ export async function planExpansion(root, projectId, input = {}, ctx = null) {
   const targetWords = Number(input.targetWords)
   if (!Number.isFinite(targetWords) || targetWords <= 0) throw new Error('请填写目标字数')
   const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
   const current = await getExpansion(root, projectId)
   if (current.status === 'structuring' || current.status === 'running') throw new Error('扩写正在执行，先暂停/重置再重新出方案')
   const mode = input.mode === 'chapter' ? 'chapter' : 'book'
@@ -2381,6 +3705,7 @@ export async function confirmExpansionPlan(root, projectId, input = {}) {
 /** 第二步：按已确认方案启动自动扩写（新会话 + goal prompt）。 */
 export async function startExpansion(root, projectId, ctx = null) {
   const bundle = await getBundle(root, projectId)
+  assertActivePreset(bundle)
   const current = await getExpansion(root, projectId)
   if (current.status !== 'plan-ready') throw new Error('请先确认扩写方案（status=plan-ready）再开始')
   const targetWords = Number(current.targetWords)
@@ -2405,6 +3730,7 @@ export async function startExpansion(root, projectId, ctx = null) {
     baseline: { tokens: usageBefore.tokens, costCNY: usageBefore.costCNY },
   }
   const status = unapprovedOutlineChanges.length > 0 ? 'structuring' : 'running'
+  await autoSnapshotBeforeRun(root, projectId, `扩写开工前 · ${targets.length} 章`, current.runId)
   const saved = await saveExpansion(root, projectId, {
     status,
     runId: current.runId || `exp-${Date.now().toString(36)}${randomUUID().slice(0, 4)}`,
@@ -3182,6 +4508,9 @@ const bundleTool = {
       lines.push('', '## 计划对齐', `- 章节：${a.actualChapters} / ${a.plannedChapters || '未设'}（${a.chapterProgress ?? '—'}%）`)
       lines.push(`- 字数：${a.actualWords} / ${a.totalWords || '未设'}（${a.wordProgress ?? '—'}%）｜ 每章目标 ${a.chapterWords || '未设'}`)
       for (const row of a.perChapter) lines.push(`- 第 ${row.id} 章：${row.words} 字（${row.delta === null ? '无目标' : (row.delta >= 0 ? '+' : '') + row.delta}）｜事件 ${row.events}｜事实 ${row.facts}｜待审 ${row.openReviews}`)
+      // 版本对齐排在计划对齐之后（计划对齐字段保留不变）
+      const versionReport = a.version ?? computeVersionAlignment(bundle)
+      if (versionReport) lines.push('', formatVersionAlignment(versionReport))
     }
     if (kind === 'facts') lines.push('', `## 事实账本（${bundle.facts.length}）`, ...bundle.facts.map((f) => `- [第${f.chapter ?? '?'}章] ${f.subject} · ${f.attribute} = ${f.value}`))
     if (kind === 'events') lines.push('', `## 时间线（${bundle.events.length}）`, ...bundle.events.map((e) => `- [第${e.chapter ?? '?'}章 ｜ ${e.storyTime || '时间未填'}] ${e.title}${e.summary ? `：${e.summary}` : ''}`))
@@ -3189,7 +4518,11 @@ const bundleTool = {
     if (kind === 'conflicts') lines.push('', `## 冲突（${bundle.conflicts.length}）`, ...bundle.conflicts.map((c) => `- ${c.title} ｜ ${c.type ?? ''} ｜ ${c.status ?? 'active'} ｜ 赌注：${c.stakes ?? '—'}`))
     if (kind === 'characters') lines.push('', `## 人物（${bundle.characters.length}）`, ...bundle.characters.map((c) => `- ${c.name} ｜ ${c.role ?? ''} ｜ 目标：${c.goal ?? '—'} ｜ 缺陷：${c.flaw ?? '—'}`))
     if (kind === 'highlights') lines.push('', `## 高光（${bundle.highlights.length}）`, ...bundle.highlights.map((x) => `- [第${x.chapter ?? '?'}章] ${x.text ?? ''}`))
-    if (kind === 'attention') lines.push('', `## 注意力（${bundle.attention.length}）`, ...bundle.attention.map((a) => `- 第${a.chapter ?? '?'}章 ｜ ${a.type ?? '未分型'} ｜ 实测 ${a.score ?? '—'} / 设计 ${a.designScore ?? '—'} ｜ ${a.verdict ?? '—'}${a.weakest ? ` ｜ 最弱：${a.weakest}` : ''}${a.cliff ? ` ｜ 章末：${a.cliff}` : ''}`))
+    if (kind === 'attention') lines.push('', `## 注意力（${bundle.attention.length}）`, ...bundle.attention.map((a) => {
+      const fixCount = Array.isArray(a.fixLog) ? a.fixLog.length : 0
+      const lastDelta = attentionScoreOf(a.lastRecheckDelta)
+      return `- 第${a.chapter ?? '?'}章 ｜ ${a.type ?? '未分型'} ｜ 实测 ${a.score ?? '—'} / 设计 ${a.designScore ?? '—'} ｜ ${a.verdict ?? '—'}${a.weakest ? ` ｜ 最弱：${a.weakest}` : ''}${a.breakdown ? ` ｜ 四拍：${attentionBeatLine(a)}` : ''}${Array.isArray(a.dropPoints) && a.dropPoints.length > 0 ? ` ｜ 弃读点 ${a.dropPoints.length} 条` : ''}${a.recheckPending ? ' ｜ ⏳待复测' : ''}${fixCount > 0 ? ` ｜ 补丁 ${fixCount} 条${lastDelta === null ? '' : `（上次 Δ ${lastDelta > 0 ? '+' : ''}${lastDelta}）`}` : ''}${a.cliff ? ` ｜ 章末：${a.cliff}` : ''}`
+    }))
     if (kind === 'outlines') lines.push('', `## 章节大纲（${bundle.outlines.length}）`, ...bundle.outlines.slice(0, 60).map((o) => `- 第${o.chapter}章 ${o.title}${o.summary ? `：${String(o.summary).slice(0, 80)}` : ''}`))
     if (kind === 'presets') lines.push('', `## 写作预设（${bundle.presets.length}）`, ...bundle.presets.map((p) => `- ${p.name} ｜ 计划 ${p.plannedChapters ?? '—'} 章 × ${p.chapterWords ?? '—'} 字 ｜ ${p.pov ?? ''} ｜ ${p.tone ?? ''}`))
     if (kind === 'reviews') lines.push('', `## 审稿（${bundle.reviews.length}）`, ...bundle.reviews.map((r) => `- [第${r.chapter ?? '?'}章 ｜ ${r.severity ?? ''} ｜ ${r.dimension ?? ''}] ${r.issue ?? ''} → ${r.suggestion ?? ''}（${r.status ?? 'open'}）`))
@@ -3199,9 +4532,45 @@ const bundleTool = {
   },
 }
 
+const alignTool = {
+  name: 'novel_desk_align',
+  description: '读或标记「版本对齐」状态（稿本版本 vs 各账本版本）。作者说“对齐账本 / 对齐人物时间线”或你刚补齐账本后用它；op=status 读当前稿本版本与每个账本版本、落后域、缺口；op=mark 表示你刚提交完某几类账本的提案，把那些域标记为“已对齐到当前稿本版本”（提案采纳后作者才能看到内容生效）。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      op: { type: 'string', enum: ['status', 'mark'], description: '操作，默认 status' },
+      kinds: { type: 'array', items: { type: 'string' }, description: `op=mark 要标记的账本域，取值同版本对齐域：${ALIGN_KINDS.join('/')}；缺省 = 全部` },
+      note: { type: 'string', description: 'op=mark 的备注（例如补了哪几条落差）' },
+    },
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const op = String(args?.op ?? 'status')
+    const root = defaultRoot()
+    // 先把正文文件的 mtime 变化记进稿本版本，再读/标记，避免拿旧版本对比
+    await ensureDraftCurrent(root, project.id)
+    if (op === 'status') {
+      const bundle = await getBundle(root, project.id)
+      const report = bundle.alignment?.version ?? computeVersionAlignment(bundle)
+      return formatVersionAlignment(report)
+    }
+    if (op === 'mark') {
+      const kinds = normalizeAlignKinds(args?.kinds)
+      const marked = await markLedgersAligned(root, project.id, kinds, { note: args?.note })
+      const bundle = await getBundle(root, project.id)
+      const report = bundle.alignment?.version ?? computeVersionAlignment(bundle)
+      return `已标记 ${marked.kinds.length} 个域对齐到稿本 v${marked.version}：${marked.kinds.join('、')}\n\n${formatVersionAlignment(report)}`
+    }
+    throw new Error(`未知操作：${op}（可选 status/mark）`)
+  },
+}
+
 const contextTool = {
   name: 'novel_desk_context',
-  description: '生成写作上下文：作品设定与写作预设（计划章数/每章字数/结构/风格/禁忌）、世界与地点（尺度/坐标/交通/地点清单/最近章节地点）、11 个 Agent 分工（含权重）、人物卡、事实账本、时间线、未回收伏笔、进行中冲突、注意力（最近 6 章分数/类型、未标章数、平均分）、未处理审稿、待采纳提案、最近章节。写新章或审稿前调用。',
+  description: '生成写作上下文：作品设定与写作预设（计划章数/每章字数/结构/风格/禁忌）、世界与地点（尺度/坐标/交通/地点清单/最近章节地点）、12 个 Agent 分工（含权重）、人物卡、事实账本、时间线、未回收伏笔、进行中冲突、注意力（最近 6 章分数/类型、未标章数、平均分）、未处理审稿、待采纳提案、最近章节。写新章或审稿前调用。',
   parameters: {
     type: 'object',
     properties: {
@@ -3242,6 +4611,22 @@ const contextTool = {
           || String(row.verdict ?? '').trim()
           || '—'
         lines.push(`  - 第${Number(row.chapter)}章 ${row.score ?? '未标'}分/${row.type ?? '未分型'}｜${oneLine}`)
+      }
+    }
+    // 提分闭环：冷读之后第一件事是提分，不是继续写（用户反馈：方案太少/改完不加分）
+    const fixStats = attentionFixStats(bundle)
+    const fixCandidates = attentionFixCandidates(bundle)
+    if (fixStats.pendingRecheck > 0 || fixStats.verified > 0 || fixStats.pendingFixProposals > 0 || fixCandidates.length > 0) {
+      const avgDelta = fixStats.avgDelta === null ? '—' : (fixStats.avgDelta > 0 ? `+${fixStats.avgDelta}` : String(fixStats.avgDelta))
+      lines.push(`- 提分闭环：待复测 ${fixStats.pendingRecheck} 章 ｜ 已复测 ${fixStats.verified} 章 ｜ 补丁 ${fixStats.fixCount} 条 ｜ 平均 Δ ${avgDelta} ｜ 待采纳提分方案 ${fixStats.pendingFixProposals} 份`)
+      if (fixStats.pendingRecheck > 0) {
+        lines.push(`- ⚠ ${fixStats.pendingRecheck} 章采纳补丁后还没复测：先跑 novel_desk_attention_fix(op="recheck")，否则分数与 Δ 不算数。`)
+        lines.push('- 复测读完把新发现的问题写成审稿（novel_desk_review，origin="recheck"，全书共性用 chapter=0）：作者在「审稿」页勾选 →「加入清单」→ 生成改动提案；新问题不要只塞进补丁或整章重写。')
+      }
+      if (fixCandidates.length > 0) {
+        const top = fixCandidates.slice(0, 3)
+        lines.push(`- 提分空间最大：${top.map((row) => `第${row.chapter}章 +${row.potential}（实测 ${row.score}，最弱 ${ATTENTION_BEAT_LABEL[row.weakest] ?? '—'}）`).join('；')}`)
+        lines.push('- 低分章先出段落补丁：novel_desk_attention_fix(op="workorder") → novel_desk_propose(kind="attention-fix")，采纳后自动标记待复测。默认按提分空间取 3 章；要全书用 op="workorder", all=true，要自选章节用 chapters=[...]。')
       }
     }
     // 世界与地点：写场景 / 设计移动前先读，避免出现地图外地点
@@ -3399,6 +4784,19 @@ const planTool = {
       lines.push(`- 上一章最弱一环：${WEAKEST_LABELS[weakestKey]}（${weakestKey}）；本章必须优先补强：${WEAKEST_REINFORCE[weakestKey]}。`)
       lines.push('- 补强要落到可核对的动作：在 hook/tension/payoff/cliff 至少两拍写清具体段落、人物选择与代价，不能只写“加强节奏/更有张力”。')
     }
+    // 提分待办：待复测/待采纳提分方案没处理完，先别拿旧分数写新章
+    const planFixStats = attentionFixStats(bundle)
+    const planFixProposals = (bundle.proposals ?? []).filter((p) => p?.status === 'pending' && p?.kind === 'attention-fix')
+    const planFixCandidates = attentionFixCandidates(bundle)
+    if (planFixStats.pendingRecheck > 0 || planFixProposals.length > 0) {
+      lines.push('', '## 提分待办（先处理，再写新章）')
+      if (planFixStats.pendingRecheck > 0) {
+        const pendingChapters = (bundle.attention ?? []).filter((row) => row?.recheckPending === true).map((row) => Number(row.chapter)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b)
+        lines.push(`- 待复测 ${planFixStats.pendingRecheck} 章（${pendingChapters.join('、')}）：采纳补丁后还没重新打分；先跑 novel_desk_attention_fix(op="recheck")，拿到真实分再决定下一章怎么承接。复测读到的新问题用 novel_desk_review（origin="recheck"）落成审稿条目，作者勾选后再出改动提案。`)
+      }
+      if (planFixProposals.length > 0) lines.push(`- 待采纳提分方案 ${planFixProposals.length} 份：先让作者在提案页采纳/驳回，不要拿旧分数写下一章。`)
+      if (planFixCandidates.length > 0) lines.push(`- 提分空间最大：第${planFixCandidates[0].chapter}章 +${planFixCandidates[0].potential}（novel_desk_attention_fix(op="workorder")；全书用 all=true，自选用 chapters=[...]）。`)
+    }
     lines.push(`- 设计定好后先提交 novel_desk_propose(kind="attention", chapter=${chapter}, items=[{chapter, type, hook, tension, payoff, cliff, question, designScore, status:"planned"}])；下面的 plan 提案 data.attention 里也要带同一份设计（作者采纳 plan 时会自动补进注意力账本），再产出 plan 提案。`)
 
     // 之后才是大纲 / 事实 / 时间线 / 伏笔 / 冲突
@@ -3436,17 +4834,17 @@ const planTool = {
 
 const proposeTool = {
   name: 'novel_desk_propose',
-  description: '把 AI 生成的内容作为「提案」提交到工作台，等待作者在 UI 里对比采纳。用于下一章方案（kind=plan）、章节正文（kind=chapter）、时间线事件（kind=events）、事实（kind=facts）、人物（kind=characters）、伏笔（kind=foreshadow）、注意力（kind=attention：注意力设计师写 design 字段、独立审稿人写实测字段，按 chapter 合并成同一条记录）、世界（kind=world：单例，data 直接是 world）、地点（kind=locations：条目数组）。如果这是对某条「冲突决策」提案的处理结果，在 data.resolvesProposalId 填原决策 id，工作台会把原决策标记为已修订。采纳动作由作者在 UI 点击完成，提交本身不改账本。',
+  description: '把 AI 生成的内容作为「提案」提交到工作台，等待作者在 UI 里对比采纳。用于下一章方案（kind=plan）、章节正文（kind=chapter）、时间线事件（kind=events）、事实（kind=facts）、人物（kind=characters）、伏笔（kind=foreshadow）、注意力（kind=attention：注意力设计师写 design 字段、独立审稿人写实测字段，按 chapter 合并成同一条记录）、注意力提分方案（kind=attention-fix：段落级 before/after 补丁，采纳后只替换补丁段并标记待复测）、世界（kind=world：单例，data 直接是 world）、地点（kind=locations：条目数组）。如果这是对某条「冲突决策」提案的处理结果，在 data.resolvesProposalId 填原决策 id，工作台会把原决策标记为已修订。采纳动作由作者在 UI 点击完成，提交本身不改账本。',
   parameters: {
     type: 'object',
     properties: {
       project: { type: 'string', description: '作品 id 或名称' },
-      kind: { type: 'string', enum: ['plan', 'chapter', 'events', 'facts', 'characters', 'foreshadow', 'highlights', 'attention', 'world', 'locations', 'custom'], description: '提案类型' },
+      kind: { type: 'string', enum: ['plan', 'chapter', 'events', 'facts', 'characters', 'foreshadow', 'highlights', 'attention', 'attention-fix', 'world', 'locations', 'custom'], description: '提案类型' },
       chapter: { type: 'integer', minimum: 1, maximum: 999, description: '章号' },
       title: { type: 'string', description: '提案标题' },
       summary: { type: 'string', description: '一句话摘要' },
       data: { type: 'object', description: 'plan/chapter/world 用：完整 JSON（world 单例直接放 world 字段；plan 可带 attention）' },
-      items: { type: 'array', description: 'events/facts/characters/foreshadow/highlights/attention/locations 用：条目数组', items: { type: 'object' } },
+      items: { type: 'array', description: 'events/facts/characters/foreshadow/highlights/attention/locations 用：条目数组；attention-fix 用：每章 3~12 条 {target,weak,expectedGain(1-15),before(逐字原文 4-600 字),after,why}', items: { type: 'object' } },
       rationale: { type: 'string', description: '为什么这样写' },
     },
     additionalProperties: false,
@@ -3467,6 +4865,33 @@ const proposeTool = {
     })
     const resolves = args?.data?.resolvesProposalId
     return `已提交提案「${proposal.title}」（kind=${proposal.kind}，chapter=${proposal.chapter ?? '—'}）。${resolves ? `\n这份提案关联原决策 ${resolves}，在它被采纳时工作台会把原决策标记为「已修订」。` : ''}\n作者需在工作台「提案」页对比后处理；采纳前不会改动任何账本或正文。`
+  },
+}
+
+const attentionFixTool = {
+  name: 'novel_desk_attention_fix',
+  description: '注意力提分闭环工具（打分之后用，不是打分本身）：op=workorder 按提分空间生成「段落级 before/after 补丁」工作单（实测/设计/四拍/弃读点/确定性诊断/正文文件路径/提交格式；正文不贴进 prompt，由 AI 自己 read）；支持单章 chapter=N、自选 chapters=[...]、全书 all=true（超过 3 章自动出批量工作单：章节清单+正文文件路径+逐章协议，不内联正文），让 AI 提交 kind=attention-fix 提案；op=recheck 生成「待复测」章节的零上下文复测工作单（不透露旧分，避免凑分），要求提交 kind=attention 实测记录 + 把复核新发现的问题写成审稿条目（novel_desk_review origin="recheck"，整书共性问题用 chapter=0）+ 仍弱再出 attention-fix；op=scoreboard 读全书提分看板（待复测/已复测 Δ/补丁数/等方案章节）。冷读后提分方案太少、改完不加分时先用它。',
+  parameters: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      op: { type: 'string', enum: ['workorder', 'recheck', 'scoreboard'], description: '操作，默认 workorder' },
+      chapter: { type: 'integer', minimum: 1, maximum: 999, description: '只处理这一章（op=workorder/recheck）' },
+      chapters: { type: 'array', items: { type: 'integer', minimum: 1, maximum: 999 }, maxItems: 200, description: '自选章节（按给定顺序；op=workorder/recheck），优先于 chapter/limit' },
+      all: { type: 'boolean', description: '处理全部候选章（op=workorder 全部待提分章 / op=recheck 全部待复测章）；章节多时自动出批量工作单' },
+      limit: { type: 'integer', minimum: 0, maximum: 200, description: '最多处理几章，默认 3；0=全部' },
+    },
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args) {
+    const project = await requireProject(args?.project)
+    const bundle = await getBundle(defaultRoot(), project.id)
+    const op = String(args?.op ?? 'workorder')
+    if (op === 'workorder') return attentionFixWorkorder(bundle, { chapter: args?.chapter, chapters: args?.chapters, all: args?.all, limit: args?.limit }, defaultRoot())
+    if (op === 'recheck') return attentionRecheckWorkorder(bundle, { chapter: args?.chapter, chapters: args?.chapters, all: args?.all, limit: args?.limit }, defaultRoot())
+    if (op === 'scoreboard') return attentionScoreboardText(bundle)
+    throw new Error(`未知操作：${op}（可选 workorder/recheck/scoreboard）`)
   },
 }
 
@@ -3502,39 +4927,207 @@ const proposalReadTool = {
   },
 }
 
+const REVIEW_ORIGINS = ['cold-read', 'recheck', 'review', 'manual', 'deai']
+const REVIEW_SEVERITIES = ['blocker', 'major', 'minor', 'suggestion']
+const REVIEW_SEVERITY_ALIAS = { 阻断: 'blocker', 严重: 'major', 一般: 'minor', 建议: 'suggestion' }
+
+/** 审稿去重用的归一化：去掉空白/标点，截到 80 字（同一问题的不同说法仍能对上） */
+export function reviewIssueKey(text) {
+  return String(text ?? '').replace(/[\s\u3000，。；、：！？…—“”‘’"'「」『』（）()【】\[\]<>《》~·,.;:!?]/g, '').slice(0, 80)
+}
+
+function normalizeReviewSeverity(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 'minor'
+  const mapped = REVIEW_SEVERITY_ALIAS[raw] ?? raw
+  if (!REVIEW_SEVERITIES.includes(mapped)) {
+    throw new Error(`审稿 severity 不认识：${raw}（可选 blocker/major/minor/suggestion，或写 阻断/严重/一般/建议）`)
+  }
+  return mapped
+}
+
+function normalizeReviewOrigin(value) {
+  const raw = String(value ?? '').trim()
+  if (!raw) return 'review'
+  if (!REVIEW_ORIGINS.includes(raw)) {
+    throw new Error(`审稿 origin 不认识：${raw}（可选 cold-read/recheck/review/manual/deai）`)
+  }
+  return raw
+}
+
+/** 审稿隔离校验用的归一化：去掉所有空白与常见标点。 */
+function normalizeGuardText(text) {
+  return String(text ?? '').replace(/[\s\u3000，。；、：！？…—“”‘’"'「」『』（）()【】\[\]<>《》~·,.;:!?]/g, '')
+}
+
+/**
+ * 其他作品名（含去掉括号副标题、·/／分段后的变体），用于拒绝跨作品对比。
+ * 与当前书名互相包含的名字不算（避免《X》与《X 前传》误判）。
+ */
+function crossWorkNames(projects, currentProject) {
+  const current = String(currentProject?.name ?? '').trim()
+  const currentId = String(currentProject?.id ?? '')
+  const names = new Set()
+  for (const row of projects ?? []) {
+    if (!row || String(row.id ?? '') === currentId) continue
+    const name = String(row.name ?? '').trim()
+    if (!name) continue
+    const variants = [name, name.split(/[（(]/)[0], ...name.split(/[·・/／]/)]
+    for (const raw of variants) {
+      const value = String(raw ?? '').trim()
+      if (value.length < 3) continue
+      if (current && (current.includes(value) || value.includes(current))) continue
+      names.add(value)
+    }
+  }
+  return [...names]
+}
+
+/**
+ * 写审稿条目：支持多章混交、全书级（chapter=0）、来源标记、同章同维度同题去重与重新打开。
+ * 复核/冷读新发现的问题先落这里，作者勾选后由审稿页「加入清单」生成改动提案。
+ * 隔离校验：禁止跨作品对比（提到其他作品名直接拒收）；去 AI 化审稿（origin=deai）必须带本章逐字 quote。
+ */
+export async function writeReviewBatch(root, projectId, input = {}) {
+  const raw = Array.isArray(input.reviews) ? input.reviews : []
+  if (raw.length === 0) throw new Error('没有要写入的审稿意见：reviews 不能为空')
+  const bundle = await getBundle(root, projectId)
+  const chapterIds = new Set((bundle.chapters ?? []).map((chapter) => Number(chapter.id)))
+  const chapterContents = new Map((bundle.chapters ?? []).map((chapter) => [Number(chapter.id), normalizeGuardText(chapter.content)]))
+  const otherWorkNames = crossWorkNames(await listProjects(root), bundle.project)
+  const existing = Array.isArray(bundle.reviews) ? bundle.reviews.slice() : []
+  const indexByKey = new Map()
+  for (let i = 0; i < existing.length; i += 1) {
+    const row = existing[i]
+    if (!row) continue
+    const key = `${Number(row.chapter) || 0}|${String(row.dimension ?? '').trim()}|${reviewIssueKey(row.issue)}`
+    if (!indexByKey.has(key)) indexByKey.set(key, i)
+  }
+  const scopeBook = String(input.scope ?? '').trim() === 'book'
+  const defaultChapter = input.chapter === undefined || input.chapter === null ? null : Number(input.chapter)
+  const defaultOrigin = normalizeReviewOrigin(input.origin)
+  const patch = []
+  const touchedChapters = new Set()
+  let added = 0
+  let reopened = 0
+  let skipped = 0
+  const seen = new Set()
+  for (let i = 0; i < raw.length; i += 1) {
+    const row = raw[i] ?? {}
+    const issue = String(row.issue ?? '').trim()
+    if (!issue) throw new Error(`第 ${i + 1} 条审稿没写问题：issue 不能为空`)
+    let chapter = row.chapter === undefined || row.chapter === null ? defaultChapter : Number(row.chapter)
+    if (chapter === null || chapter === undefined) chapter = scopeBook ? 0 : NaN
+    if (!Number.isInteger(chapter) || chapter < 0) {
+      throw new Error(`第 ${i + 1} 条审稿没写章号：每条要带 chapter（全书级问题用 chapter=0）`)
+    }
+    if (chapter > 0 && !chapterIds.has(chapter)) {
+      throw new Error(`第 ${chapter} 章不存在：审稿只能写到已有章节（全书级问题用 chapter=0）`)
+    }
+    const dimension = String(row.dimension ?? '首读').trim() || '首读'
+    const severity = normalizeReviewSeverity(row.severity)
+    const origin = normalizeReviewOrigin(row.origin ?? defaultOrigin)
+    const quote = String(row.quote ?? '').trim().slice(0, 600)
+    const suggestion = String(row.suggestion ?? '').trim()
+    const guardText = [issue, suggestion, quote, dimension].join('\n')
+    const otherWork = otherWorkNames.find((name) => guardText.includes(name))
+    if (otherWork) {
+      throw new Error(`第 ${i + 1} 条审稿提到了其他作品「${otherWork}」：审稿禁止跨作品/跨工作区对比，只能审《${bundle.project?.name ?? projectId}》。请删掉跨作品内容后重新提交。`)
+    }
+    if (origin === 'deai' && chapter > 0) {
+      const needle = normalizeGuardText(quote)
+      if (needle.length < 4) {
+        throw new Error(`第 ${i + 1} 条去 AI 化审稿没带 quote：每条必须引用该章正文原文（≥4 字）`)
+      }
+      const body = chapterContents.get(chapter) ?? ''
+      if (!body.includes(needle)) {
+        throw new Error(`第 ${i + 1} 条去 AI 化审稿的 quote 不在第 ${chapter} 章正文里：quote 必须逐字摘自本书该章正文（不准跨作品引用）`)
+      }
+    }
+    const key = `${chapter}|${dimension}|${reviewIssueKey(issue)}`
+    if (seen.has(key)) { skipped += 1; continue }
+    seen.add(key)
+    const found = indexByKey.get(key)
+    if (found !== undefined) {
+      const prev = existing[found]
+      if (String(prev?.status ?? 'open') === 'open') { skipped += 1; continue }
+      const reopenPatch = {
+        id: prev.id,
+        status: 'open',
+        origin,
+        severity,
+        suggestion: suggestion || prev.suggestion,
+        quote: quote || prev.quote,
+        reopenedAt: new Date().toISOString(),
+        reopenCount: Number(prev.reopenCount ?? 0) + 1,
+        reopenFrom: prev.status,
+      }
+      patch.push(reopenPatch)
+      existing[found] = { ...prev, ...reopenPatch }
+      reopened += 1
+      touchedChapters.add(chapter)
+      continue
+    }
+    const created = {
+      chapter,
+      dimension,
+      severity,
+      issue,
+      suggestion,
+      origin,
+      source: 'ai',
+      status: 'open',
+    }
+    if (quote) created.quote = quote
+    patch.push(created)
+    indexByKey.set(key, existing.length)
+    existing.push(created)
+    added += 1
+    touchedChapters.add(chapter)
+  }
+  for (const row of patch) {
+    await upsertEntity(root, projectId, 'reviews', row)
+  }
+  const chapters = [...touchedChapters].sort((a, b) => a - b).map((n) => (n === 0 ? '全书' : `第${n}章`)).join('、')
+  const parts = [`新增 ${added} 条 / 重新打开 ${reopened} 条 / 跳过重复 ${skipped} 条`]
+  if (chapters) parts.push(`（${chapters}）`)
+  return `已写入审稿：${parts.join('')}。作者可在「审稿」页勾选 →「加入清单」→ 生成修订提案（注意力/节奏类会合并成段落补丁方案）。复核新发现的问题不再只能直接改正文。`
+}
+
 const reviewTool = {
   name: 'novel_desk_review',
-  description: '提交对某一章的审稿意见（写入工作台「审稿」）。每条含维度、严重度、问题、建议；作者可在 UI 里标记已修/忽略，也可让 AI 汇总修订单。',
+  description: '提交审稿意见（写入工作台「审稿」）。支持一次交多章、全书级问题（chapter=0）、来源标记（origin=cold-read/recheck/review/manual/deai）；同章同维度同题自动去重，已归档的会自动重新打开。复核/冷读新发现的问题先落这里，作者在「审稿」页勾选→加入清单→生成改动提案。审稿禁止跨作品/跨工作区对比（提到其他作品名会被拒收）；origin=deai 的每条必须带本章正文逐字 quote。',
   parameters: {
     type: 'object',
     properties: {
       project: { type: 'string', description: '作品 id 或名称' },
-      chapter: { type: 'integer', minimum: 1, maximum: 999, description: '章号' },
+      chapter: { type: 'integer', minimum: 0, maximum: 999, description: '默认章号；每条 reviews[].chapter 可覆盖；0=全书级问题' },
+      scope: { type: 'string', enum: ['chapter', 'book'], description: 'book=本书级（默认找 chapter=0）' },
+      origin: { type: 'string', enum: ['cold-read', 'recheck', 'review', 'manual', 'deai'], description: '来源：冷读/复核/审阅/人工/去AI化；默认 review' },
       reviews: {
         type: 'array',
         description: '审稿意见数组',
         items: {
           type: 'object',
           properties: {
-            dimension: { type: 'string', description: '情节/人物/文笔/连续性/节奏/对话/世界观/主题' },
+            chapter: { type: 'integer', minimum: 0, maximum: 999, description: '章号；0=全书级' },
+            dimension: { type: 'string', description: '情节/人物/文笔/连续性/节奏/对话/世界观/主题/首读' },
             severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'suggestion'] },
-            issue: { type: 'string' },
-            suggestion: { type: 'string' },
+            issue: { type: 'string', description: '问题是什么（复核时带上原文引文）' },
+            suggestion: { type: 'string', description: '改哪段、怎么改' },
+            quote: { type: 'string', description: '原文引文（选填，最多 600 字）' },
+            origin: { type: 'string', enum: ['cold-read', 'recheck', 'review', 'manual', 'deai'] },
           },
         },
       },
     },
     additionalProperties: false,
-    required: ['chapter', 'reviews'],
+    required: ['reviews'],
   },
   output: textOutput,
   async execute(args) {
     const project = await requireProject(args?.project)
-    const reviews = Array.isArray(args?.reviews) ? args.reviews : []
-    for (const review of reviews) {
-      await upsertEntity(defaultRoot(), project.id, 'reviews', { ...review, chapter: args?.chapter, source: 'ai', status: 'open' })
-    }
-    return `已写入 ${reviews.length} 条审稿意见到第 ${args?.chapter} 章。作者可在工作台「审稿」页处理。`
+    return writeReviewBatch(defaultRoot(), project.id, args ?? {})
   },
 }
 
@@ -3566,6 +5159,120 @@ const upsertTool = {
     const item = await upsertEntity(defaultRoot(), project.id, kind, args?.item ?? {})
     return `已写入 ${kind}：${item.title ?? item.name ?? item.id}（id: ${item.id}）`
   },
+}
+
+function createRevisionTool(ctx) {
+  return {
+    name: 'novel_desk_revision',
+    description: '全文改动执行工具（goal 中的 AI 使用，不是作者用）：op=status 读状态；op=plan 出方案；op=start 开始；op=stage 上报批次进度；op=apply 提交单章改写（自动留备份并跑双闸门）；op=pause 暂停等待作者；op=finish 完成；op=stuck 卡住说明原因。L1=只换文风（事件/专名/数字/钩子全冻结），L3=价值观改动（必须先立价值基准再逐章级联，逐章停）。',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+        op: { type: 'string', enum: ['status', 'plan', 'start', 'stage', 'apply', 'pause', 'finish', 'stuck'], description: '操作' },
+        data: { type: 'object', description: 'op=plan：{tiers,batchSize,stopMode,goal,charter}；op=start：{batchSize,stopMode}（开始前重排批次，按章保留进度）；op=stage：{batchIndex,status,note}' },
+        chapter: { type: 'string', description: 'op=apply：章号' },
+        content: { type: 'string', description: 'op=apply：改写后的完整正文' },
+        note: { type: 'string', description: '进度说明 / 卡住原因' },
+        reason: { type: 'string', description: 'op=stuck：卡住原因' },
+      },
+      additionalProperties: false,
+      required: ['op'],
+    },
+    output: textOutput,
+    async execute(args) {
+      const project = await requireProject(args?.project)
+      const op = String(args?.op ?? 'status')
+      const root = defaultRoot()
+      if (op === 'status') return revisionSummaryText(await getRevision(root, project.id))
+      if (op === 'plan') {
+        const data = args?.data && typeof args.data === 'object' ? args.data : {}
+        const result = await planRevisionRun(root, project.id, {
+          tier: data.tier, chapters: data.chapters, goal: data.goal, charter: data.charter,
+          batchSize: data.batchSize,
+        })
+        return revisionSummaryText(result.revision)
+      }
+      if (op === 'start') {
+        const data = args?.data && typeof args.data === 'object' ? args.data : {}
+        const result = await startRevisionRun(root, project.id, ctx, data)
+        return `已开始改动（会话 ${result.sessionId}）。\n\n${revisionSummaryText(result.revision)}`
+      }
+      if (op === 'stage') {
+        const data = args?.data && typeof args.data === 'object' ? args.data : {}
+        return revisionSummaryText(await advanceRevision(root, project.id, data))
+      }
+      if (op === 'apply') {
+        const result = await applyRevisionChapter(root, project.id, { chapter: args?.chapter, content: args?.content })
+        const { fidelity, style } = result
+        return [
+          `第${args?.chapter}章已写入（原稿已备份${result.backup ? '' : '：无变化'}）。`,
+          `保真闸门：${fidelity.hit}/${fidelity.total}${fidelity.pass ? ' 通过' : ' 未通过'}`,
+          ...(fidelity.missing ?? []).map((item) => `  - 缺 ${item.type}: ${item.value}`),
+          `风格闸门：微动作帧 ${style.before.microFramesPer10k} → ${style.after.microFramesPer10k} ｜ 情绪词 ${style.before.emotionPer10k} → ${style.after.emotionPer10k}`,
+          `Markdown 残留：${result.md?.total ?? 0} 处${(result.md?.total ?? 0) > 0 ? '（必须清零）' : ''}`,
+        ].join('\n')
+      }
+      if (op === 'pause') {
+        const current = await getRevision(root, project.id)
+        const saved = await saveRevision(root, project.id, {
+          status: 'paused',
+          notes: [...(current.notes ?? []), { at: new Date().toISOString(), text: String(args?.note ?? '等待作者确认') }],
+        })
+        return revisionSummaryText(saved)
+      }
+      if (op === 'finish') {
+        const saved = await saveRevision(root, project.id, {
+          status: 'done',
+          ...(args?.note ? { notes: [...((await getRevision(root, project.id)).notes ?? []), { at: new Date().toISOString(), text: String(args.note) }] } : {}),
+        })
+        return revisionSummaryText(saved)
+      }
+      if (op === 'stuck') {
+        const current = await getRevision(root, project.id)
+        const saved = await saveRevision(root, project.id, {
+          status: 'stuck',
+          notes: [...(current.notes ?? []), { at: new Date().toISOString(), text: `卡住：${String(args?.reason ?? args?.note ?? '未说明')}` }],
+        })
+        return revisionSummaryText(saved)
+      }
+      throw new Error(`未知操作：${op}`)
+    },
+  }
+}
+
+/** 去 AI 化审阅工具：作者提「去AI化审核」时优先走这里，强制新建独立空会话 + 隔离工作区。 */
+function createDeaiReviewTool(ctx) {
+  return {
+    name: 'novel_desk_deai_review',
+    description: '去 AI 化审阅（作者说「去AI化审核/审阅/机器味重」时先调用本工具，不要在当前对话里直接审）。会新建独立空会话 + 隔离工作区（只含本书章节正文副本），工作单写死硬边界：禁止读其他作品/历史报告，禁止跨作品对比与「人类对照」。op=start 直接启动；op=workorder 只返回工作单全文，供预览。',
+    parameters: {
+      type: 'object',
+      properties: {
+        project: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+        op: { type: 'string', enum: ['start', 'workorder'], description: 'start=新建隔离会话并启动审阅（默认）；workorder=只返回工作单' },
+      },
+      additionalProperties: false,
+      required: ['op'],
+    },
+    output: textOutput,
+    async execute(args) {
+      const project = await requireProject(args?.project)
+      const op = String(args?.op ?? 'start')
+      if (op !== 'start' && op !== 'workorder') throw new Error(`未知操作：${op}（可选 start/workorder）`)
+      const result = await startDeaiReview(defaultRoot(), project.id, ctx, { dryRun: op === 'workorder' })
+      if (op === 'workorder') return result.prompt
+      return [
+        '已新建「去 AI 化审阅」独立会话：零上下文，只审本书。',
+        `- sessionId：${result.sessionId}`,
+        `- 隔离工作区：${result.workspacePath}（只含本书 ${result.chapterCount} 章正文副本，没有历史报告/其他作品）`,
+        `- 当前机器痕迹：${result.summary.split('\n').join('；')}`,
+        '',
+        '硬性边界：禁止跨作品/跨工作区对比；只读工作单「章节文件清单」里的文件；只提交 novel_desk_review(origin="deai")，不改正文。',
+        `作者人工复检 AI 痕迹：${DEAI_AUDIT_URL}`,
+      ].join('\n')
+    },
+  }
 }
 
 function createPipelineTool(ctx) {
@@ -3733,12 +5440,16 @@ export function apply(ctx) {
   mountRoute(ctx)
   ctx.tools.register(projectsTool)
   ctx.tools.register(bundleTool)
+  ctx.tools.register(alignTool)
   ctx.tools.register(contextTool)
   ctx.tools.register(planTool)
   ctx.tools.register(proposalReadTool)
   ctx.tools.register(proposeTool)
+  ctx.tools.register(attentionFixTool)
   ctx.tools.register(reviewTool)
+  ctx.tools.register(createDeaiReviewTool(ctx))
   ctx.tools.register(upsertTool)
   ctx.tools.register(createPipelineTool(ctx))
   ctx.tools.register(createExpansionTool(ctx))
+  ctx.tools.register(createRevisionTool(ctx))
 }

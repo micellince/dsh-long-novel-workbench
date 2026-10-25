@@ -211,7 +211,7 @@ test('交接 prompt：常规交接原则置顶；next-chapter-plan/continue-chap
   assert.ok(multiAgent.includes('注意力设计师权重最高（10），先出设计'), 'multiAgent 派单应要求注意力设计师先出设计')
 })
 
-test('交接 prompt：零上下文 fresh-read 绝不注入一号原则（单章 + 全书内联）', async (t) => {
+test('交接 prompt：零上下文 fresh-read 绝不注入一号原则（单章 + 全书）', async (t) => {
   const { root, project } = await makeProject(t, { chapters: 2, attention: [attentionRecord(1)] })
   const bundle = await store.getBundle(root, project.id)
 

@@ -207,6 +207,29 @@ window.__ModuleLoader__.load({
     const ATTENTION_DESIGN_CART = { kind: 'task', id: 'attention-design', task: 'attention-design', title: 'AI 补齐注意力机制（逐章设计）' }
     // 判断「有设计」只看设计字段：type / hook / tension / payoff / cliff 至少两项非空。
     const ATTENTION_DESIGN_FIELDS = ['type', 'hook', 'tension', 'payoff', 'cliff']
+    // ── 提分闭环（打分 → 提分方案 → 采纳 → 复测）常量 ──────────
+    // 契约见 docs/ATTENTION-FIX.md：一条提案 = 一章的一组段落级 before/after 补丁，不整章重写。
+    const ATTENTION_BEAT_LABEL = { hook: '钩子', tension: '张力', payoff: '兑现', cliff: '章末' }
+    const ATTENTION_BEAT_ORDER = ['hook', 'tension', 'payoff', 'cliff']
+    // 提案 item 的 target 还可能是主类型 / 语言这类非四拍维度。
+    const ATTENTION_FIX_TARGET_LABEL = { ...ATTENTION_BEAT_LABEL, type: '主类型', language: '语言' }
+    // 四拍各 0–25 分；实测 <13 视为这一拍没立住（与 ATTENTION-FIX.md §4 同口径）。
+    const ATTENTION_BEAT_MAX = 25
+    const ATTENTION_BEAT_WEAK = 13
+    // 提分空间：目标分缺省 = 全书均值 + 8，再兜底 80；设计没兑现 / 有弃读点各加一点权重。
+    const ATTENTION_FIX = { targetBonus: 8, targetFallback: 80, designGapBonus: 5, dropPointBonus: 3, skipScore: 88 }
+    const ATTENTION_FIX_STATUS_LABEL = { recheck: '改过待复测', verified: '已复测', proposal: '有方案待采纳', waiting: '等方案' }
+    const ATTENTION_FIX_STATUS_TONE = { recheck: 'warn', verified: 'success', proposal: 'brand', waiting: 'muted' }
+    const ATTENTION_FIX_TASK = 'attention-fix'
+    const ATTENTION_RECHECK_TASK = 'attention-recheck'
+    const ATTENTION_FIX_HINT = '冷读打分 → 定位最弱拍 → 逐条提分方案（段落级 before/after）→ 采纳后自动待复测 → 复测比对 Δ'
+    const ATTENTION_FIX_DESC = '段落级 patch：before 必须逐字来自该章正文，一条提案 ≥3 条、至少覆盖 2 个不同的拍；采纳后自动标记待复测，复测把 Δ 写回分数历史。'
+    // 审稿来源（origin）：复测/复核发现的新问题落成审稿条目，来源标「复核」；旧记录没有 origin 时按 source 兜底。
+    const REVIEW_ORIGIN_OPTIONS = [['cold-read', '冷读'], ['recheck', '复核'], ['review', '审阅'], ['manual', '人工'], ['deai', '去AI化']]
+    const REVIEW_ORIGIN_LABEL = Object.fromEntries(REVIEW_ORIGIN_OPTIONS)
+    const REVIEW_RECHECK_HINT = '复测发现的新问题会进「审稿」页（来源 = 复核），可勾选加入清单生成修订提案。'
+    // 朱雀（腾讯 AI 检测）公开入口：只做外链，不调 API。
+    const DEAI_AUDIT_URL = 'https://matrix.tencent.com/ai-detect/'
     // 一号原则（工作台常驻条 / 总览 hero / 注意力页 / 分工页共用文案）
     const PRINCIPLE_SLOGAN = '⚡ ATTENTION IS ALL YOU NEED'
     const PRINCIPLE_SUB = '怎么吸引读者怎么来 · 一切为读者服务'
@@ -438,24 +461,34 @@ window.__ModuleLoader__.load({
           { k: 'note', t: '备注', type: 'textarea', rows: 2 },
         ],
       },
+      'attention-fix': {
+        title: '提分方案',
+        icon: '🎯',
+        desc: '按章出段落级补丁：一条提案 ≥3 条 before/after，before 必须逐字来自该章正文，每条给预计提分；采纳后自动标记「改过待复测」，复测把 Δ 写回分数历史。提案页可逐条对照。',
+        columns: [],
+        fields: [],
+      },
       reviews: {
         title: '审稿',
         icon: '📝',
-        desc: '人工或 AI 的审稿意见：维度、严重度、问题、建议、状态。可以只处理 blocker/major。',
+        desc: '人工或 AI 的审稿意见：维度、严重度、问题、建议、状态。可以只处理 blocker/major。复测复核发现的新问题会带「复核」来源；勾选 → 加入清单 → 生成修订提案（注意力类走段落补丁提案，不直接改正文）。',
         columns: [
-          { k: 'chapter', t: '章', w: '56px' },
+          { k: 'chapter', t: '章', w: '56px', format: (v) => (v === 0 || v === '0' ? '全书' : (v === '' || v === null || v === undefined ? '—' : String(v))) },
+          { k: 'origin', t: '来源', w: '64px', format: (v, item) => reviewOriginLabel(item) },
           { k: 'dimension', t: '维度', w: '90px' },
           { k: 'severity', t: '严重度', w: '80px', format: (v) => ({ blocker: '阻断', major: '严重', minor: '一般', suggestion: '建议' }[v] ?? v ?? '—') },
           { k: 'issue', t: '问题' },
           { k: 'status', t: '状态', w: '80px', format: (v) => ({ open: '待处理', fixed: '已修', wontfix: '忽略' }[v] ?? v ?? '待处理') },
         ],
         fields: [
-          { k: 'chapter', t: '章号', type: 'number' },
+          { k: 'chapter', t: '章号（0=全书）', type: 'number', ph: '0 = 全书级 / 跨章共性问题' },
           { k: 'dimension', t: '维度', type: 'select', options: [['情节', '情节'], ['人物', '人物'], ['文笔', '文笔'], ['连续性', '连续性'], ['节奏', '节奏'], ['对话', '对话'], ['世界观', '世界观'], ['主题', '主题'], ['首读', '首读']] },
           { k: 'severity', t: '严重度', type: 'select', options: [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']] },
           { k: 'issue', t: '问题（引用原文）', type: 'textarea', rows: 3, required: true },
           { k: 'suggestion', t: '修改建议', type: 'textarea', rows: 3 },
           { k: 'status', t: '状态', type: 'select', options: [['open', '待处理'], ['fixed', '已修'], ['wontfix', '忽略']] },
+          { k: 'origin', t: '来源', type: 'select', options: REVIEW_ORIGIN_OPTIONS },
+          { k: 'quote', t: '原文引文（可选）', type: 'text', ph: '逐字引用原文，方便定位' },
           { k: 'source', t: '来源', type: 'text', ph: 'manual / ai' },
         ],
       },
@@ -728,6 +761,186 @@ window.__ModuleLoader__.load({
       if (value < 80) return ' sd-att-tone-ok'
       return ' sd-att-tone-top'
     }
+    // ── 提分闭环：纯前端派生（与 lib/attention-fix.js 同口径，见 ATTENTION-FIX.md §4）──
+    /** scoreHistory 容错取出（老记录可能没有）。 */
+    function attentionScoreHistory(row) {
+      return Array.isArray(row && row.scoreHistory) ? row.scoreHistory.filter((entry) => entry && typeof entry === 'object') : []
+    }
+    /** 四拍实测分（0–25）；没有 breakdown 返回 null。 */
+    function attentionBreakdownOf(row) {
+      const raw = row && row.breakdown
+      if (!raw || typeof raw !== 'object') return null
+      const pick = (key) => {
+        const value = raw[key]
+        if (value === undefined || value === null || value === '') return null
+        const num = Number(value)
+        if (!Number.isFinite(num)) return null
+        return Math.max(0, Math.min(ATTENTION_BEAT_MAX, num))
+      }
+      const out = { hook: pick('hook'), tension: pick('tension'), payoff: pick('payoff'), cliff: pick('cliff') }
+      return ATTENTION_BEAT_ORDER.some((key) => out[key] !== null) ? out : null
+    }
+    /** 最弱拍：有 breakdown 取最低分的拍；否则退回 weakest 字段。 */
+    function attentionWeakBeat(row) {
+      const breakdown = attentionBreakdownOf(row)
+      if (breakdown) {
+        let key = null
+        let value = Infinity
+        for (const candidate of ATTENTION_BEAT_ORDER) {
+          const score = breakdown[candidate]
+          if (score === null) continue
+          if (score < value) { value = score; key = candidate }
+        }
+        if (key) return { key, score: value }
+      }
+      const weakest = row && row.weakest
+      if (weakest) return { key: weakest, score: null }
+      return null
+    }
+    /** 最近一次复测（source === 'recheck'）。 */
+    function attentionLatestRecheck(row) {
+      const list = attentionScoreHistory(row).filter((entry) => entry.source === 'recheck')
+      return list.length > 0 ? list[list.length - 1] : null
+    }
+    /** 最近一条分数历史（首读 / 复测都算）。 */
+    function attentionLatestHistory(row) {
+      const list = attentionScoreHistory(row)
+      return list.length > 0 ? list[list.length - 1] : null
+    }
+    function attentionDeltaText(delta) {
+      const value = Number(delta)
+      if (!Number.isFinite(value)) return ''
+      return (value >= 0 ? '+' : '') + value
+    }
+    /** 分数历史展示文本：首读 → 「71 → 78 +7」。 */
+    function attentionHistoryText(entry) {
+      if (!entry || typeof entry !== 'object') return ''
+      const from = entry.from === undefined || entry.from === null || entry.from === '' ? null : Number(entry.from)
+      const to = entry.to === undefined || entry.to === null || entry.to === '' ? null : Number(entry.to)
+      const delta = entry.delta === undefined || entry.delta === null ? NaN : Number(entry.delta)
+      if (from === null) return '首读 ' + (to === null ? '—' : to) + ' 分'
+      return from + ' → ' + (to === null ? '—' : to) + (Number.isFinite(delta) ? ' ' + attentionDeltaText(delta) : '')
+    }
+    /** 全书所有复测 Δ。 */
+    function attentionRecheckDeltas(bundle) {
+      const deltas = []
+      const rows = Array.isArray(bundle && bundle.attention) ? bundle.attention : []
+      for (const row of rows) {
+        for (const entry of attentionScoreHistory(row)) {
+          if (entry.source !== 'recheck') continue
+          const delta = Number(entry.delta)
+          if (Number.isFinite(delta)) deltas.push(delta)
+        }
+      }
+      return deltas
+    }
+    /** 提分目标分：designScore → 全书均值 + 8 → 80。 */
+    function attentionFixTarget(row, average) {
+      if (attentionHasDesign(row)) return Number(row.designScore)
+      const base = average !== null && average !== undefined && Number.isFinite(Number(average)) ? Math.round(Number(average)) : null
+      if (base !== null) return Math.min(95, base + ATTENTION_FIX.targetBonus)
+      return ATTENTION_FIX.targetFallback
+    }
+    /** 提分空间（ATTENTION-FIX.md §4）：目标分 − 实测分 + 设计没兑现 + 弃读点加成。 */
+    function attentionFixPotential(row, average) {
+      const score = Number(row.score)
+      const target = attentionFixTarget(row, average)
+      const design = attentionHasDesign(row) ? Number(row.designScore) : null
+      const designGap = design !== null && design - score >= 20 ? ATTENTION_FIX.designGapBonus : 0
+      const drop = Array.isArray(row.dropPoints) && row.dropPoints.length > 0 ? ATTENTION_FIX.dropPointBonus : 0
+      return Math.round(target - score + designGap + drop)
+    }
+    /** 待采纳提分方案覆盖的章号集合（proposal.status === 'pending'）。 */
+    function attentionPendingFixChapters(bundle) {
+      const chapters = new Set()
+      const proposals = Array.isArray(bundle && bundle.proposals) ? bundle.proposals : []
+      for (const proposal of proposals) {
+        if (!proposal || proposal.kind !== ATTENTION_FIX_TASK || proposal.status !== 'pending') continue
+        const chapter = Number((proposal.data && proposal.data.chapter) !== undefined ? proposal.data.chapter : proposal.chapter)
+        if (Number.isFinite(chapter)) chapters.add(chapter)
+      }
+      return chapters
+    }
+    /** 状态徽章优先级：改过待复测 → 已复测 → 有方案待采纳 → 等方案。 */
+    function attentionFixStatus(row, pendingChapters) {
+      if (row && row.recheckPending) return { key: 'recheck', label: ATTENTION_FIX_STATUS_LABEL.recheck, tone: ATTENTION_FIX_STATUS_TONE.recheck }
+      const recheck = attentionLatestRecheck(row)
+      if (recheck) {
+        const delta = Number(recheck.delta)
+        return { key: 'verified', label: ATTENTION_FIX_STATUS_LABEL.verified + (Number.isFinite(delta) ? ' ' + attentionDeltaText(delta) : ''), tone: ATTENTION_FIX_STATUS_TONE.verified }
+      }
+      const chapter = Number(row && row.chapter)
+      if (pendingChapters && pendingChapters.has(chapter)) return { key: 'proposal', label: ATTENTION_FIX_STATUS_LABEL.proposal, tone: ATTENTION_FIX_STATUS_TONE.proposal }
+      return { key: 'waiting', label: ATTENTION_FIX_STATUS_LABEL.waiting, tone: ATTENTION_FIX_STATUS_TONE.waiting }
+    }
+    /** 提分闭环统计（ATTENTION-FIX.md §4）。 */
+    function attentionFixStats(bundle) {
+      const rows = Array.isArray(bundle && bundle.attention) ? bundle.attention : []
+      const pendingChapters = attentionPendingFixChapters(bundle)
+      let pendingRecheck = 0
+      let verified = 0
+      let fixCount = 0
+      for (const row of rows) {
+        if (row && row.recheckPending) pendingRecheck += 1
+        if (attentionLatestRecheck(row)) verified += 1
+        if (Array.isArray(row && row.fixLog)) fixCount += row.fixLog.length
+      }
+      const deltas = attentionRecheckDeltas(bundle)
+      return {
+        pendingRecheck,
+        verified,
+        avgDelta: deltas.length > 0 ? Math.round((deltas.reduce((sum, value) => sum + value, 0) / deltas.length) * 10) / 10 : null,
+        bestDelta: deltas.length > 0 ? Math.max.apply(null, deltas) : null,
+        worstDelta: deltas.length > 0 ? Math.min.apply(null, deltas) : null,
+        fixCount,
+        pendingFixProposals: (Array.isArray(bundle && bundle.proposals) ? bundle.proposals : []).filter((proposal) => proposal && proposal.kind === ATTENTION_FIX_TASK && proposal.status === 'pending').length,
+        pendingChapters,
+      }
+    }
+    /** 提分工作台行：排除未打分与 ≥88 的章，按提分空间降序。 */
+    function attentionFixBoard(bundle) {
+      const stats = attentionFixStats(bundle)
+      const rows = attentionRows(bundle)
+      const average = attentionAverage(rows)
+      const scored = rows.filter(attentionHasScore)
+      const list = []
+      for (const row of scored) {
+        const score = Number(row.score)
+        if (score >= ATTENTION_FIX.skipScore) continue
+        const weak = attentionWeakBeat(row)
+        list.push({
+          row,
+          chapter: Number(row.chapter),
+          score,
+          target: attentionFixTarget(row, average),
+          potential: attentionFixPotential(row, average),
+          weak,
+          weakLabel: weak
+            ? (ATTENTION_BEAT_LABEL[weak.key] || ATTENTION_WEAKEST_LABEL[weak.key] || weak.key) + (weak.score === null ? '' : ' ' + weak.score + '/25')
+            : '—',
+          status: attentionFixStatus(row, stats.pendingChapters),
+        })
+      }
+      list.sort((a, b) => b.potential - a.potential || a.chapter - b.chapter)
+      return Object.assign({}, stats, { rows: list, scored: scored.length, average })
+    }
+
+    // 审稿来源解析：origin 由后端写入（cold-read / recheck / review / manual），旧记录没有 origin 时按 source 兜底。
+    function reviewOriginKey(item) {
+      const value = item && item.origin
+      if (value && REVIEW_ORIGIN_LABEL[value]) return value
+      return item && item.source === 'ai' ? 'review' : 'manual'
+    }
+
+    function reviewOriginLabel(item) {
+      return REVIEW_ORIGIN_LABEL[reviewOriginKey(item)] ?? '人工'
+    }
+
+    // 复核（复测）发现、还没处理掉的审稿：提分工作台「看复核审稿（N）」入口用。
+    function attentionRecheckReviews(bundle) {
+      return (bundle.reviews ?? []).filter((review) => reviewOriginKey(review) === 'recheck' && review.status !== 'fixed' && review.status !== 'wontfix')
+    }
+
     /** 分工页「权重」单元格：weight=10 用品牌色小徽章标出。 */
     function agentWeightCell(weight) {
       const empty = weight === undefined || weight === null || weight === ''
@@ -3735,11 +3948,20 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         budgetBars)
     }
 
-    // ── 整本书页：子导航（生成整本书 / 扩写）──────────────────
+    // ── 整本书页：子导航（生成整本书 / 扩写 / 全文改动 / 审阅 / 版本）──
+    const SUBSECTIONS = [
+      { id: 'pipeline', label: '📚 生成整本书' },
+      { id: 'expansion', label: '✍️ 扩写' },
+      { id: 'revision', label: '🩹 全文改动' },
+      { id: 'review', label: '🔍 审阅' },
+      { id: 'versions', label: '🕘 版本' },
+    ]
+
     function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard, expansionIntent, onExpansionConsumed }) {
       const [section, setSection] = useState('pipeline')
       const [pendingIntent, setPendingIntent] = useState(expansionIntent ?? null)
       const [expansionStatus, setExpansionStatus] = useState(() => normalizeExpansion(bundle.expansion).status)
+      const [reviewAlert, setReviewAlert] = useState(null)
       useEffect(() => {
         setExpansionStatus(normalizeExpansion(bundle.expansion).status)
       }, [bundle.expansion])
@@ -3749,21 +3971,47 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         setSection('expansion')
         onExpansionConsumed?.()
       }, [expansionIntent])
+      const updateReviewAlert = useCallback((audit) => {
+        const overall = audit?.overall ?? {}
+        const flags = Array.isArray(audit?.flags) ? audit.flags : []
+        setReviewAlert({
+          mdArtifacts: Number(overall.mdArtifacts) || 0,
+          blockers: flags.filter((flag) => flag?.severity === 'blocker').length,
+        })
+      }, [])
+      useEffect(() => {
+        let alive = true
+        api('aistyle.audit', { projectId }).then((value) => {
+          if (alive) updateReviewAlert(value?.audit)
+        }).catch(() => {
+          /* 后端可能尚未实现 aistyle.audit：静默，不显示「待清」角标 */
+        })
+        return () => { alive = false }
+      }, [projectId, bundle, updateReviewAlert])
       const needsExpansionConfirm = expansionStatus === 'plan-ready' || expansionStatus === 'waiting-outline'
+      const needsReviewCleanup = !!reviewAlert && (reviewAlert.mdArtifacts > 0 || reviewAlert.blockers > 0)
+      const tabClass = (id) => 'sd-pipe-subtab' + (section === id ? ' sd-pipe-subtab-active' : '')
       return h('div', { className: 'sd-page sd-pipe-page' },
         h('div', { className: 'sd-pipe-subnav' },
-          h('button', {
+          SUBSECTIONS.map((item) => h('button', {
+            key: item.id,
             type: 'button',
-            className: `sd-pipe-subtab${section === 'pipeline' ? ' sd-pipe-subtab-active' : ''}`,
-            onClick: () => setSection('pipeline'),
-          }, '📚 生成整本书'),
-          h('button', {
-            type: 'button',
-            className: `sd-pipe-subtab${section === 'expansion' ? ' sd-pipe-subtab-active' : ''}`,
-            onClick: () => { setPendingIntent(null); setSection('expansion') },
-          }, '✍️ 扩写', needsExpansionConfirm ? h('span', { className: 'sd-exp-badge' }, '待确认') : null)),
+            className: tabClass(item.id),
+            onClick: () => {
+              if (item.id === 'expansion') setPendingIntent(null)
+              setSection(item.id)
+            },
+          }, item.label,
+            item.id === 'expansion' && needsExpansionConfirm ? h('span', { className: 'sd-exp-badge' }, '待确认') : null,
+            item.id === 'review' && needsReviewCleanup ? h('span', { className: 'sd-exp-badge' }, '待清') : null))),
         section === 'expansion'
           ? h(ExpansionPanel, { bundle, projectId, intent: pendingIntent, onChanged, onGoTab, onStatusChange: setExpansionStatus })
+          : section === 'revision'
+          ? h(RevisionTab, { bundle, projectId, onChanged })
+          : section === 'review'
+          ? h(ReviewPanel, { bundle, projectId, onChanged })
+          : section === 'versions'
+          ? h(VersionsPanel, { bundle, projectId, onChanged })
           : h(PipelineRunPanel, { bundle, projectId, onChanged, onGoTab, onOpenWizard }))
     }
 
@@ -4273,7 +4521,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
     }
 
     // ── 提案页（AI 结果对比 + 采纳）────────────────────────────
-    const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', decision: '冲突决策', outlines: '章节大纲', custom: '自由' }
+    const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', decision: '冲突决策', outlines: '章节大纲', 'attention-fix': '提分方案', custom: '自由' }
 
     /** 去掉章节文件 frontmatter，只留正文：历史版本存的是完整文件，和编辑器里的正文对比时要先剥掉。 */
     function stripChapterFrontmatter(text) {
@@ -4480,6 +4728,33 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         if (p.kind === 'custom') {
           return h('div', { className: 'sd-proposal-text' }, data.answer ?? p.summary ?? JSON.stringify(data, null, 2))
         }
+        if (p.kind === 'attention-fix') {
+          const patchItems = data.items ?? p.items ?? []
+          const reviewIds = Array.isArray(data.reviewIds) ? data.reviewIds : (Array.isArray(p.reviewIds) ? p.reviewIds : [])
+          const total = Number(data.expectedGainTotal) || patchItems.reduce((sum, item) => sum + (Number(item && item.expectedGain) || 0), 0)
+          return h('div', { className: 'sd-proposal-body sd-att-patchbody' },
+            h('div', { className: 'sd-hint sd-att-patchintro' }, '段落级补丁 ' + patchItems.length + ' 条 · 预计合计 +' + total + ' 分 · before 逐字取自第 ' + (p.chapter ?? data.chapter ?? '?') + ' 章正文；采纳后自动标记「改过待复测」。'),
+            reviewIds.length > 0 ? h('div', { className: 'sd-att-review-links' },
+              h(Tag, { tone: 'brand' }, '处理 ' + reviewIds.length + ' 条审稿'),
+              h('span', { className: 'sd-hint' }, '采纳后这些审稿自动标记「已修」。')) : null,
+            patchItems.slice(0, 20).map((item, index) => {
+              const target = item && item.target
+              const label = ATTENTION_BEAT_LABEL[target] || ATTENTION_FIX_TARGET_LABEL[target] || String(target || '补丁')
+              return h('div', { key: index, className: 'sd-att-patch' },
+                h('div', { className: 'sd-att-patch-head' },
+                  h(Tag, { tone: 'brand' }, label),
+                  Number(item && item.expectedGain) ? h(Tag, { tone: 'success' }, '预计 +' + Number(item.expectedGain)) : null,
+                  item && item.weak ? h('span', { className: 'sd-hint' }, item.weak) : null),
+                h('div', { className: 'sd-att-patch-grid' },
+                  h('div', { className: 'sd-att-patch-side sd-att-patch-before' },
+                    h('div', { className: 'sd-att-patch-label' }, 'before · 原文'),
+                    h('div', { className: 'sd-att-patch-text' }, String((item && item.before) || ''))),
+                  h('div', { className: 'sd-att-patch-side sd-att-patch-after' },
+                    h('div', { className: 'sd-att-patch-label' }, 'after · 改成'),
+                    h('div', { className: 'sd-att-patch-text' }, String((item && item.after) || '')))),
+                item && item.why ? h('div', { className: 'sd-att-patch-why' }, item.why) : null)
+            }))
+        }
         const items = p.items ?? data.items ?? []
         return h('div', { className: 'sd-proposal-body' }, items.slice(0, 20).map((item, i) => h('div', { key: i, className: 'sd-proposal-item' }, JSON.stringify(item))))
       }
@@ -4571,29 +4846,155 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       )
     }
 
-    // ── 对齐页 ────────────────────────────────────────────────
-    function AlignmentTab({ bundle }) {
-      const a = bundle.alignment
-      if (!a) return h(Empty, null, '暂无对齐数据。')
-      const presets = bundle.presets ?? []
-      const activeId = bundle.project?.activePresetId
+    // ── 对齐页（版本对齐）─────────────────────────────────────
+    // 契约见 docs/ALIGNMENT-VERSION.md：稿本有一个递增版本号，每个账本记录自己对到哪一版。
+    // 字数 / 计划进度降级为折叠区；本页主角是「稿本和各账本各自在第几版、哪里没跟上」。
+    const VERALIGN_STATUS_LABEL = { idle: '未开始', untracked: '未追踪', behind: '落后', pending: '待验收', aligned: '已对齐' }
+    const VERALIGN_STATUS_CLASS = { idle: 'idle', untracked: 'untracked', behind: 'behind', pending: 'pending', aligned: 'aligned' }
+    const DRAFT_LOG_KIND_LABEL = {
+      'chapter-create': '新建章节',
+      'chapter-save': '保存章节',
+      'chapter-delete': '删除章节',
+      'chapter-import': '导入章节',
+      'snapshot-restore': '回滚整本',
+      'external-change': '外部改动',
+      baseline: '建立基线',
+    }
+    const VERALIGN_CART_TASK = { kind: 'task', id: 'align-ledgers', task: 'align-ledgers', title: '对齐账本到当前稿' }
+
+    /** 版本号展示：null / 非数字 → 「—」，否则 vN。 */
+    function veralignVersion(value) {
+      const n = Number(value)
+      return value === null || value === undefined || value === '' || !Number.isFinite(n) ? '—' : `v${n}`
+    }
+
+    /** 域状态文案：behind 带落后版数，其余用契约里的标签。 */
+    function veralignStatusText(domain) {
+      const status = String(domain?.status ?? 'aligned')
+      if (status === 'behind') return `落后 ${Number(domain?.behind) || 0} 版`
+      return VERALIGN_STATUS_LABEL[status] ?? status
+    }
+
+    /** 清单 detail：把「落后 / 未追踪 / 待验收」压成一句话（未对齐域最多列 4 个）。 */
+    function veralignCartDetail(report) {
+      const domains = Array.isArray(report?.domains) ? report.domains : []
+      const target = veralignVersion(report?.manuscript?.version)
+      const behind = domains.filter((d) => d?.status === 'behind')
+      const untracked = domains.filter((d) => d?.status === 'untracked')
+      const pending = domains.filter((d) => (Number(d?.pendingProposals) || 0) > 0)
+      let budget = 4
+      const behindShown = behind.slice(0, budget)
+      budget -= behindShown.length
+      const untrackedShown = untracked.slice(0, budget)
+      budget -= untrackedShown.length
+      const hidden = behind.length - behindShown.length + (untracked.length - untrackedShown.length)
+      const parts = []
+      if (behindShown.length > 0) parts.push(`落后：${behindShown.map((d) => `${d.label} ${veralignVersion(d.version)}→${target}`).join('、')}`)
+      if (untrackedShown.length > 0) parts.push(`未追踪：${untrackedShown.map((d) => d.label).join('、')}`)
+      if (hidden > 0) parts.push(`等 ${hidden} 个域`)
+      if (pending.length > 0) parts.push(`待验收：${pending.slice(0, 3).map((d) => `${d.label} ${Number(d.pendingProposals) || 0} 条`).join('、')}`)
+      return parts.length > 0 ? parts.join('；') : '全部账本已对齐'
+    }
+
+    function AlignmentTab({ bundle, projectId, onChanged, onAddCart, onGoTab, onAskAi }) {
+      const [report, setReport] = useState(null)
+      const [loading, setLoading] = useState(true)
+      const [loadError, setLoadError] = useState('')
+      const [busy, setBusy] = useState('')
+      const [notice, setNotice] = useState('')
+      const load = useCallback(async () => {
+        if (!projectId) {
+          setLoading(false)
+          return
+        }
+        setLoading(true)
+        try {
+          const value = await api('alignment.report', { projectId })
+          if (value && Array.isArray(value.domains)) {
+            setReport(value)
+            setLoadError('')
+          } else {
+            setReport(null)
+            setLoadError('对齐报告为空')
+          }
+        } catch (error) {
+          setReport(null)
+          setLoadError(error.message || '读取版本对齐失败')
+        } finally {
+          setLoading(false)
+        }
+      }, [projectId])
+      useEffect(() => {
+        setNotice('')
+        load()
+      }, [load])
+      // 宿主尚未重载时 alignment.report 不可用：回退 bundle.alignment.version（新宿主会注入 report）。
+      const fallback = bundle?.alignment?.version
+      const data = report ?? (fallback && Array.isArray(fallback.domains) ? fallback : null)
+      const summary = data?.summary ?? {}
+      const manuscript = data?.manuscript ?? {}
+      const domains = Array.isArray(data?.domains) ? data.domains : []
+      const log = Array.isArray(data?.log) ? data.log.slice(0, 12) : []
+      const needsAlign = summary.needsAlign ?? ((Number(summary.behind) || 0) + (Number(summary.untracked) || 0) > 0)
+      const plan = bundle?.alignment ?? null
+      // 折叠区仍用 bundle.alignment 的计划字段（老数据没有 version 也能显示）。
+      const planReady = !!plan && (plan.actualChapters !== undefined || plan.actualWords !== undefined)
+      const presets = bundle?.presets ?? []
+      const activeId = bundle?.project?.activePresetId
       const activePreset = presets.find((p) => p.id === activeId)
-      const presetName = activePreset?.name || (activeId ? '未找到当前预设（可能已删除）' : a.presetName || presets[0]?.name || '未设置')
+      const presetName = activePreset?.name || (activeId ? '未找到当前预设（可能已删除）' : plan?.presetName || presets[0]?.name || '未设置')
       const presetHint = activeId ? '来自「预设」页的当前预设' : '未设置当前预设，默认使用第一套'
       const bar = (pct) => h('div', { className: 'sd-progress' }, h('div', { className: 'sd-progress-fill', style: { width: `${pct ?? 0}%` } }))
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '🎯 计划对齐'), h('p', { className: 'sd-desc' }, `当前预设：${presetName}。预设计划 vs 实际产出，目标来自「预设」页的写作方案。`))),
-        h('div', { className: 'sd-align-cards' },
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '当前预设'), h('div', { className: 'sd-align-value sd-align-value-sm', title: presetName }, presetName), h('div', { className: 'sd-hint' }, presetHint)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '章节进度'), h('div', { className: 'sd-align-value' }, `${a.actualChapters} / ${a.plannedChapters || '—'}`), bar(a.chapterProgress)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '字数进度'), h('div', { className: 'sd-align-value' }, `${a.actualWords} / ${a.totalWords || '—'}`), bar(a.wordProgress)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '每章目标'), h('div', { className: 'sd-align-value' }, a.chapterWords ? `${a.chapterWords} 字` : '未设置'), h('div', { className: 'sd-hint' }, '在「预设」里设置')),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '待处理'), h('div', { className: 'sd-align-value' }, `${a.pendingProposals} 提案 / ${a.openReviews} 审稿`), h('div', { className: 'sd-hint' }, '提案和审稿都要人处理')),
+
+      const addAlignCart = () => {
+        if (!data || !onAddCart || !needsAlign) return
+        onAddCart({ ...VERALIGN_CART_TASK, detail: veralignCartDetail(data) })
+        setNotice('已加入清单。到「🧺 清单」发送到对话：AI 会先读版本对齐，再对落后 / 未追踪的域提交提案；采纳后才写进账本，不会直接改正文。')
+      }
+      const markAll = async () => {
+        if (busy) return
+        if (!window.confirm('把 10 个账本全部标记为「已对齐到当前稿本版本」？只改对齐记录，不改账本内容。')) return
+        setBusy('all')
+        try {
+          await api('alignment.mark', { projectId })
+          await load()
+          onChanged?.()
+          setNotice('已全部标记为已对齐。')
+        } catch (error) {
+          window.alert(`标记失败：${error.message}`)
+        } finally {
+          setBusy('')
+        }
+      }
+      const markDomain = async (domain) => {
+        if (busy || !domain?.kinds?.length) return
+        setBusy(domain.id)
+        try {
+          await api('alignment.mark', { projectId, kinds: domain.kinds })
+          await load()
+          onChanged?.()
+          setNotice(`已把「${domain.label}」标记为已对齐。`)
+        } catch (error) {
+          window.alert(`标记失败：${error.message}`)
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const planFold = planReady ? h('details', { className: 'sd-veralign-fold' },
+        h('summary', null, '计划进度（字数）'),
+        h('p', { className: 'sd-hint' }, '这里是计划章数 / 字数与实际产出的对照，不是版本对齐；版本对齐以上面的表格为准。'),
+        h('div', { className: 'sd-veralign-cards sd-veralign-plan-cards' },
+          h('div', { className: 'sd-veralign-card' }, h('div', { className: 'sd-veralign-card-label' }, '当前预设'), h('div', { className: 'sd-veralign-card-value sd-veralign-card-value-sm', title: presetName }, presetName), h('div', { className: 'sd-hint' }, presetHint)),
+          h('div', { className: 'sd-veralign-card' }, h('div', { className: 'sd-veralign-card-label' }, '章节进度'), h('div', { className: 'sd-veralign-card-value' }, `${plan.actualChapters} / ${plan.plannedChapters || '—'}`), bar(plan.chapterProgress)),
+          h('div', { className: 'sd-veralign-card' }, h('div', { className: 'sd-veralign-card-label' }, '字数进度'), h('div', { className: 'sd-veralign-card-value' }, `${plan.actualWords} / ${plan.totalWords || '—'}`), bar(plan.wordProgress)),
+          h('div', { className: 'sd-veralign-card' }, h('div', { className: 'sd-veralign-card-label' }, '每章目标'), h('div', { className: 'sd-veralign-card-value' }, plan.chapterWords ? `${plan.chapterWords} 字` : '未设置'), h('div', { className: 'sd-hint' }, '在「预设」里设置')),
+          h('div', { className: 'sd-veralign-card' }, h('div', { className: 'sd-veralign-card-label' }, '待处理'), h('div', { className: 'sd-veralign-card-value' }, `${plan.pendingProposals} 提案 / ${plan.openReviews} 审稿`), h('div', { className: 'sd-hint' }, '提案和审稿都要人处理')),
         ),
-        a.perChapter.length === 0 ? h(Empty, null, '还没有章节。') : h('div', { className: 'sd-table' },
+        !Array.isArray(plan.perChapter) || plan.perChapter.length === 0 ? h(Empty, null, '还没有章节。') : h('div', { className: 'sd-table' },
           h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '56px 1fr 90px 110px 70px 70px 70px 70px' } },
             h('div', null, '章'), h('div', null, '标题'), h('div', null, '字数'), h('div', null, '偏离目标'), h('div', null, '事件'), h('div', null, '事实'), h('div', null, '待审'), h('div', null, '提案')),
-          a.perChapter.map((row) => h('div', { key: row.id, className: 'sd-row', style: { gridTemplateColumns: '56px 1fr 90px 110px 70px 70px 70px 70px' } },
+          plan.perChapter.map((row) => h('div', { key: row.id, className: 'sd-row', style: { gridTemplateColumns: '56px 1fr 90px 110px 70px 70px 70px 70px' } },
             h('div', { className: 'sd-cell' }, row.id),
             h('div', { className: 'sd-cell', title: row.title }, row.title),
             h('div', { className: 'sd-cell' }, String(row.words)),
@@ -4604,6 +5005,107 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
             h('div', { className: 'sd-cell' }, String(row.proposals)),
           )),
         ),
+      ) : null
+
+      return h('div', { className: 'sd-page sd-veralign-page' },
+        h('div', { className: 'sd-pagehead' },
+          h('div', null,
+            h('h2', { className: 'sd-h2' }, '🎯 版本对齐'),
+            h('p', { className: 'sd-desc' }, '稿本和每个账本各自在第几版，哪里没跟上（不是字数对齐）。'))),
+        loading && !data
+          ? h('div', { className: 'sd-veralign-fallback' }, '读取中…')
+          : !data
+          ? h('div', { className: 'sd-veralign-fallback' },
+              h('div', null, '宿主未重载，重启插件后可用。'),
+              loadError ? h('div', { className: 'sd-hint' }, loadError) : null,
+              h('div', { className: 'sd-form-actions' }, h(Btn, { small: true, onClick: load }, '重试')))
+          : h(React.Fragment, null,
+              h('div', { className: 'sd-veralign-cards' },
+                h('div', { className: 'sd-veralign-card' },
+                  h('div', { className: 'sd-veralign-card-label' }, '稿本版本'),
+                  h('div', { className: 'sd-veralign-card-value' }, veralignVersion(manuscript.version)),
+                  h('div', { className: 'sd-hint', title: manuscript.updatedAt || '' }, manuscript.updatedAt ? `最近更新 ${relativeTime(manuscript.updatedAt) || manuscript.updatedAt}` : '还没有版本记录')),
+                h('div', { className: 'sd-veralign-card' },
+                  h('div', { className: 'sd-veralign-card-label' }, '已对齐域'),
+                  h('div', { className: 'sd-veralign-card-value' }, `${Number(summary.aligned) || 0} / ${Number(summary.total) || domains.length}`),
+                  h('div', { className: 'sd-hint' }, `未追踪 ${Number(summary.untracked) || 0} ｜ 未开始 ${Number(summary.idle) || 0}`)),
+                h('div', { className: 'sd-veralign-card' },
+                  h('div', { className: 'sd-veralign-card-label' }, '落后域'),
+                  h('div', { className: 'sd-veralign-card-value sd-veralign-warn' }, String(Number(summary.behind) || 0)),
+                  h('div', { className: 'sd-hint' }, `另有 ${Number(summary.untracked) || 0} 个未追踪（要一次全量对齐）`)),
+                h('div', { className: 'sd-veralign-card' },
+                  h('div', { className: 'sd-veralign-card-label' }, '待验收提案'),
+                  h('div', { className: 'sd-veralign-card-value' }, String(Number(summary.pending) || 0)),
+                  h('div', { className: 'sd-hint' }, '采纳后才进账本')),
+                h('div', { className: 'sd-veralign-card' },
+                  h('div', { className: 'sd-veralign-card-label' }, '缺口'),
+                  h('div', { className: 'sd-veralign-card-value' }, String(Number(summary.gaps) || 0)),
+                  h('div', { className: 'sd-hint' }, '正文引用了、账本里还没有的记录')),
+              ),
+              h('div', { className: 'sd-veralign-actions' },
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: !needsAlign || !onAddCart,
+                  title: needsAlign ? '把落后 / 未追踪的账本加入清单，交给 AI 按落差补齐' : '所有账本都已对齐',
+                  onClick: addAlignCart,
+                }, '＋ 加入清单：对齐落后账本'),
+                h(Btn, { onClick: markAll, disabled: busy !== '' }, busy === 'all' ? '标记中…' : '全部标记为已对齐'),
+                h(Btn, { small: true, onClick: load, disabled: loading }, loading ? '读取中…' : '刷新')),
+              notice ? h('div', { className: 'sd-veralign-notice' }, notice) : null,
+              h('p', { className: 'sd-hint' }, '一键对齐 = 加入清单交给 AI：AI 读取版本落差与缺口后提交的是提案，采纳后才写进账本；不会自动改正文、也不会直接改账本。'),
+              domains.length === 0
+                ? h(Empty, null, '还没有可对齐的域。')
+                : h('div', { className: 'sd-veralign-scroll' },
+                    h('div', { className: 'sd-veralign-table' },
+                      h('div', { className: 'sd-veralign-tr sd-veralign-tr-head' },
+                        h('div', null, '域'), h('div', null, '状态'), h('div', null, '账本版本'), h('div', null, '稿本版本'),
+                        h('div', null, '落后'), h('div', null, '变更章节'), h('div', null, '待验收'), h('div', null, '缺口'), h('div', null, '操作')),
+                      domains.map((domain) => {
+                        const status = String(domain?.status ?? 'aligned')
+                        const badgeClass = VERALIGN_STATUS_CLASS[status] ?? 'aligned'
+                        const chapters = Array.isArray(domain?.changedChapters) ? domain.changedChapters : []
+                        const chapterText = chapters.slice(0, 4).map((c) => `第${c.id}章${c.title ? ' ' + c.title : ''}`).join('；')
+                          + (chapters.length > 4 ? `；等 ${chapters.length - 4} 章` : '')
+                        const gapList = Array.isArray(domain?.gaps) ? domain.gaps : []
+                        const gapText = gapList.slice(0, 2).map((gap) => gap?.label || gap?.id || '缺口').join('；')
+                          + (gapList.length > 2 ? `；等 ${gapList.length - 2} 项` : '')
+                        const behindText = domain?.behind === null || domain?.behind === undefined
+                          ? (status === 'untracked' ? '未追踪' : '—')
+                          : `${Number(domain.behind) || 0} 版`
+                        const rowDisabled = busy !== '' || !domain?.kinds?.length
+                        return h('div', { key: domain.id, className: 'sd-veralign-tr' },
+                          h('div', { className: 'sd-veralign-domain', title: domain.label || domain.id }, h('span', { className: 'sd-veralign-icon' }, domain.icon || '•'), h('span', null, domain.label || domain.id)),
+                          h('div', null, h('span', { className: `sd-veralign-badge sd-veralign-badge-${badgeClass}` }, veralignStatusText(domain))),
+                          h('div', { className: 'sd-veralign-num', title: domain.dirty ? '对齐之后账本又被改过' : '' }, `${veralignVersion(domain.version)}${domain.dirty ? ' ⚠' : ''}`),
+                          h('div', { className: 'sd-veralign-num' }, veralignVersion(manuscript.version)),
+                          h('div', null, behindText),
+                          h('div', { title: chapterText }, chapterText || '—'),
+                          h('div', { className: 'sd-veralign-num' }, String(Number(domain.pendingProposals) || 0)),
+                          h('div', { title: gapText }, gapText || '—'),
+                          h('div', { className: 'sd-veralign-row-actions' },
+                            h(Btn, { small: true, disabled: !onGoTab, onClick: () => onGoTab?.(domain.tab) }, '去该页'),
+                            h(Btn, {
+                              small: true,
+                              disabled: rowDisabled || (status === 'aligned' && !domain.dirty),
+                              onClick: () => markDomain(domain),
+                            }, busy === domain.id ? '标记中…' : '标记已对齐')),
+                        )
+                      }),
+                    )),
+              h('h3', { className: 'sd-h3 sd-mt' }, '稿本版本历史'),
+              log.length === 0
+                ? h('p', { className: 'sd-hint' }, '还没有版本记录：第一次保存章节或建立基线后出现。')
+                : h('div', { className: 'sd-veralign-log' }, log.map((entry) => h('div', { key: `v${entry.version}-${entry.at ?? ''}`, className: 'sd-veralign-logrow' },
+                    h('span', { className: 'sd-veralign-logversion' }, veralignVersion(entry.version)),
+                    h('span', { className: 'sd-veralign-logkind' }, DRAFT_LOG_KIND_LABEL[entry.kind] ?? entry.kind ?? '变更'),
+                    entry.chapter !== null && entry.chapter !== undefined && entry.chapter !== ''
+                      ? h('span', { className: 'sd-veralign-logchapter' }, `第 ${entry.chapter} 章`)
+                      : null,
+                    h('span', { className: 'sd-veralign-logtitle', title: entry.title || entry.note || '' }, entry.title || entry.note || ''),
+                    h('span', { className: 'sd-veralign-logtime', title: entry.at || '' }, relativeTime(entry.at) || '—'),
+                  ))),
+            ),
+        planFold,
       )
     }
 
@@ -4734,6 +5236,1147 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         }))),
         editing !== null ? h(EntityEditor, { kind: 'presets', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
       )
+    }
+
+    // ── 全文改动：分层元数据（与 lib/revision.js 的 REVISION_TIERS 对齐）──
+    // 客户端只读展示用；真正的契约校验在后端 validateRevisionContract。
+    const REVISION_TIER_META = [
+      {
+        id: 'L1',
+        name: '语域层（文风 / 叙述声音）',
+        summary: '每章重写一遍，情节一个字不动。',
+        mutable: ['句式与句长', '用词与语域', '比喻与意象', '描写顺序', '情绪抒写的表达方式'],
+        frozen: ['事件', '人物动作与结果', '对白信息量', '专名', '数字', '章末钩子', '事实账本'],
+        risk: 'low',
+        tone: 'success',
+      },
+      {
+        id: 'L2',
+        name: '侧写层（场景 / 对白细节）',
+        summary: '可以增删场景细节与对白措辞，但事件与结果不变。',
+        mutable: ['场景增减', '对白措辞', '配角戏份', '细节密度'],
+        frozen: ['事件与结果', '因果链', '人物关系变化', '章末钩子', '事实账本'],
+        risk: 'medium',
+        tone: 'warn',
+      },
+      {
+        id: 'L3',
+        name: '语义层（价值观 / 动机 / 主题）',
+        summary: '改人物立场、动机与叙述者的价值判断。',
+        mutable: ['人物立场与动机', '叙述者的价值判断', '主题走向', '人物的道德选择'],
+        frozen: ['世界设定', '时代 / 地理 / 门派规则', '已发生事件的外部结果（可重解读，不可抹除）'],
+        risk: 'high',
+        tone: 'error',
+        note: '价值观是全局约束：先写价值变更书、算影响面，先改设定层，再逐章级联；逐章独立改必然自相矛盾。',
+      },
+    ]
+    const REVISION_RISK_LABEL = { low: '低风险', medium: '中风险', high: '高风险' }
+    const REVISION_RISK_TONE = { low: 'success', medium: 'warn', high: 'error' }
+    const REVISION_GOAL_MODES = [
+      { id: 'preset', label: '引用预设' },
+      { id: 'custom', label: '自己填' },
+      { id: 'both', label: '两者都要' },
+    ]
+    const REVISION_GOAL_MODE_LABEL = { preset: '预设', custom: '自填', both: '两者' }
+    // 批次大小与停顿方式都由作者选：一次一章 / 每几章 / 整本一批；每批停 / 出问题才停 / 跑到底。
+    // 'auto' = 不指定，交给分层默认（L3 逐章、L1/L2 每 5 章；L1 只停样张）。
+    const REVISION_BATCH_SIZES = [
+      { id: 'auto', label: '自动（按层级）' },
+      { id: '1', label: '一次一章' },
+      { id: '5', label: '每 5 章一批' },
+      { id: '10', label: '每 10 章一批' },
+      { id: 'all', label: '一次全改（1 批）' },
+    ]
+    const REVISION_STOP_MODES = [
+      { id: 'auto', label: '按层级默认', hint: 'L1 只停样张；L2/L3 每批停' },
+      { id: 'per-batch', label: '每批停下确认', hint: '最稳；每批改完停下等你看过' },
+      { id: 'fix-only', label: '只在出问题时停', hint: '一直跑；某章两次修不过闸门才停' },
+      { id: 'run-to-end', label: '一路跑到底', hint: '不停；全部改完再汇报，预算到顶自动停' },
+    ]
+    const REVISION_STOP_LABEL = Object.fromEntries(REVISION_STOP_MODES.map((item) => [item.id, item.label]))
+
+    /** 批次大小 / 停顿方式的展示文案（'auto' = 由分层决定）。 */
+    function revisionBatchLabel(value) {
+      if (value === 'all') return '一次全改'
+      if (value === undefined || value === null || value === '' || value === 'auto') return '按层级默认'
+      return '每批 ' + value + ' 章'
+    }
+    function revisionStopLabel(value) {
+      if (value === undefined || value === null || value === '' || value === 'auto') return '按层级默认'
+      return REVISION_STOP_LABEL[value] ?? String(value)
+    }
+    const REVISION_STATUS_META = {
+      idle: { label: '未开始', tone: 'muted' },
+      planned: { label: '已有方案', tone: 'brand' },
+      'plan-ready': { label: '已有方案', tone: 'brand' },
+      running: { label: '进行中', tone: 'warn' },
+      paused: { label: '已暂停', tone: 'warn' },
+      'awaiting-author': { label: '等待作者确认', tone: 'error' },
+      done: { label: '已完成', tone: 'success' },
+    }
+    const REVISION_BATCH_STATUS = {
+      pending: { label: '待开始', tone: 'muted' },
+      running: { label: '进行中', tone: 'warn' },
+      done: { label: '已完成', tone: 'success' },
+      'needs-fix': { label: '待修', tone: 'error' },
+      failed: { label: '失败', tone: 'error' },
+      skipped: { label: '已跳过', tone: 'muted' },
+    }
+
+    /** 章节 id：契约与正文统一用四位补零字符串（如 0001）。 */
+    function revisionChapterId(value) {
+      return String(Math.trunc(Number(value))).padStart(4, '0')
+    }
+
+    /**
+     * 解析章节范围：支持 "1-52"、"5,7,9"、"1-3,7"。
+     * 返回 { chapters: ['0001', ...], invalid: ['x'] }；本地解析失败就不发请求。
+     */
+    function parseChapterRange(text) {
+      const source = String(text ?? '').replace(/[，、；;]/g, ',').replace(/[～~—–至]/g, '-').trim()
+      if (!source) return { chapters: [], invalid: [] }
+      const numbers = []
+      const invalid = []
+      for (const raw of source.split(',')) {
+        const token = raw.trim()
+        if (!token) continue
+        const range = token.match(/^(\d+)\s*-\s*(\d+)$/)
+        if (range) {
+          let start = Number(range[1])
+          let end = Number(range[2])
+          if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= 0) {
+            invalid.push(token)
+            continue
+          }
+          if (start > end) {
+            const swap = start
+            start = end
+            end = swap
+          }
+          // 防止手滑写 1-99999999 卡死界面
+          if (end - start > 5000) {
+            invalid.push(token)
+            continue
+          }
+          for (let i = start; i <= end; i += 1) numbers.push(i)
+          continue
+        }
+        if (/^\d+$/.test(token)) {
+          const value = Number(token)
+          if (value > 0) numbers.push(value)
+          else invalid.push(token)
+          continue
+        }
+        invalid.push(token)
+      }
+      const unique = [...new Set(numbers)].sort((a, b) => a - b)
+      return { chapters: unique.map(revisionChapterId), invalid }
+    }
+
+    /** 作品全部有编号的章节（升序数字），用于「全部章节」按钮。 */
+    function revisionProjectChapters(bundle) {
+      const numbers = (bundle?.chapters ?? [])
+        .map((chapter) => Number(chapter?.id))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .sort((a, b) => a - b)
+      return [...new Set(numbers)]
+    }
+
+    /** 把数字章节列表压成范围文本：连续写 1-52，不连续写 1,3,7。 */
+    function revisionRangeText(numbers) {
+      if (numbers.length === 0) return ''
+      const first = numbers[0]
+      const last = numbers[numbers.length - 1]
+      return last - first + 1 === numbers.length ? first + '-' + last : numbers.join(',')
+    }
+
+    /** 预设的风格规则：兼容数组与换行分隔的字符串。 */
+    function presetStyleRules(preset) {
+      const value = preset?.styleRules
+      if (Array.isArray(value)) return value.map((item) => String(item ?? '').trim()).filter(Boolean)
+      return String(value ?? '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+    }
+
+    /** revision.get 的 audit 摘要：优先 summary，退回 audit.summary / audit / JSON。 */
+    function revisionAuditText(value) {
+      if (!value) return ''
+      if (typeof value.summary === 'string' && value.summary.trim()) return value.summary
+      const audit = value.audit
+      if (typeof audit === 'string' && audit.trim()) return audit
+      if (audit && typeof audit.summary === 'string' && audit.summary.trim()) return audit.summary
+      if (audit) {
+        try {
+          return JSON.stringify(audit, null, 2)
+        } catch {
+          return String(audit)
+        }
+      }
+      return ''
+    }
+
+    /** 契约校验失败时后端可能回 { error } 而不是抛错；统一转成可显示文本。 */
+    function revisionErrorText(value) {
+      if (!value || !value.error) return ''
+      if (typeof value.error === 'string') return value.error
+      return value.error.message || JSON.stringify(value.error)
+    }
+
+    // ── 全文改动（Revision）：分层选择 + 影响面预览 + 批次 ─────────
+    function RevisionTab({ bundle, projectId, onChanged }) {
+      const [live, setLive] = useState(null)
+      const [loading, setLoading] = useState(false)
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+      const [tiers, setTiers] = useState(['L1'])
+      const [rangeText, setRangeText] = useState('')
+      const [goal, setGoal] = useState('')
+      const [goalMode, setGoalMode] = useState('both')
+      const [presetId, setPresetId] = useState('')
+      const [charter, setCharter] = useState({ oldValue: '', newValue: '', affectedCharacters: '' })
+      const [batchSize, setBatchSize] = useState('auto')
+      const [stopMode, setStopMode] = useState('auto')
+      const [preview, setPreview] = useState(null)
+      const [prompt, setPrompt] = useState('')
+      const [expandedBatches, setExpandedBatches] = useState(false)
+      const [justPlanned, setJustPlanned] = useState(false)
+      const batchListRef = useRef(null)
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('revision.get', { projectId })
+          setLive({ revision: value?.revision ?? null, audit: value?.audit ?? null, summary: revisionAuditText(value) })
+          setError('')
+        } catch (err) {
+          // 后端 revision.* 可能尚未实现：保留空面板，只把错误显示成错误条，不能白屏。
+          setError(err?.message || String(err))
+        } finally {
+          setLoading(false)
+        }
+      }, [projectId])
+
+      useEffect(() => {
+        load()
+      }, [load])
+      useEffect(() => {
+        setPreview(null)
+        setPrompt('')
+        setNotice('')
+      }, [projectId])
+
+      const revision = live?.revision ?? null
+      const status = String(revision?.status ?? 'idle')
+      const statusMeta = REVISION_STATUS_META[status] ?? { label: status, tone: 'muted' }
+      const hasL3 = tiers.includes('L3')
+      const selectedTierLabel = tiers.length > 0 ? tiers.join('+') : '未选'
+      const presets = Array.isArray(bundle?.presets) ? bundle.presets : []
+      const presetExists = (id) => String(id ?? '') !== '' && presets.some((item) => String(item.id) === String(id))
+      const activePresetId = String(bundle?.project?.activePresetId ?? '')
+      const effectivePresetId = presetExists(presetId) ? String(presetId) : presetExists(activePresetId) ? activePresetId : (presets[0]?.id !== undefined ? String(presets[0].id) : '')
+      const selectedPreset = presets.find((item) => String(item.id) === effectivePresetId) ?? null
+      const previewPolicy = preview?.policy ?? null
+      const parsed = parseChapterRange(rangeText)
+      const projectChapters = revisionProjectChapters(bundle)
+      // 执行设置（开始前的选择）：只算给作者看的预览，真正重排在后端 revision.start 里做。
+      const execCount = parsed.chapters.length > 0 ? parsed.chapters.length : projectChapters.length
+      const execSize = batchSize === 'all'
+        ? Math.max(1, execCount || 1)
+        : (batchSize === 'auto' ? (hasL3 ? 1 : 5) : Math.max(1, Number(batchSize) || 1))
+      const execBatchCount = execCount > 0 ? Math.ceil(execCount / execSize) + (hasL3 ? 1 : 0) : 0
+      const execStopText = stopMode === 'auto'
+        ? '按层级默认（' + (hasL3 ? 'L3 逐章停' : 'L1 只停样张 / L2 每批停') + '）'
+        : (REVISION_STOP_LABEL[stopMode] ?? stopMode)
+      const execSummary = execCount > 0
+        ? '执行时按此重排：' + execCount + ' 章 → ' + execBatchCount + ' 批（每批 ' + execSize + ' 章' + (hasL3 ? '，另加 1 个设定层批先行' : '') + '）｜ 停顿：' + execStopText
+        : '先在「① 改动契约」里填章节范围。'
+      const batches = Array.isArray(revision?.batches) ? revision.batches : []
+      const impact = preview?.impact ?? revision?.impact ?? null
+      const previewBatches = Array.isArray(preview?.batches) ? preview.batches : []
+      const previewErrors = Array.isArray(preview?.errors) ? preview.errors : []
+      const auditSummary = live?.summary ?? ''
+      const revisionAudit = live?.audit ?? null
+      const mdArtifacts = Number(revisionAudit?.overall?.mdArtifacts) || 0
+      const mdChapters = Array.isArray(revisionAudit?.mdChapters) ? revisionAudit.mdChapters : []
+      const notes = Array.isArray(revision?.notes) ? revision.notes : []
+      const revisionTierLabel = (() => {
+        const contract = revision?.contract ?? {}
+        if (Array.isArray(contract.tiers) && contract.tiers.length > 0) return contract.tiers.join('+')
+        if (revision?.tier) return String(revision.tier)
+        if (contract.tier) return String(contract.tier)
+        return '—'
+      })()
+      const hasPlan = !!revision && ((Array.isArray(revision.batches) && revision.batches.length > 0) || !!revision.contract)
+      // 旧后端的 getRevision 白名单会吞掉 contract.batchSize/stopMode：缺这个字段说明宿主还是旧代码，
+      // 此时「④ 执行」的选择不会生效，必须重启 DSH。
+      const backendStale = !!revision && !!revision.contract && !Object.prototype.hasOwnProperty.call(revision.contract, 'batchSize')
+      const planStatusSummary = hasPlan
+        ? '当前方案：' + revisionTierLabel
+          + ' ｜ ' + batches.length + ' 批'
+          + '（批次 ' + revisionBatchLabel(revision.contract?.batchSize) + '）'
+          + ' ｜ ' + (Array.isArray(revision.contract?.chapters) ? revision.contract.chapters.length : 0) + ' 章'
+          + ' ｜ 停顿 ' + revisionStopLabel(revision.contract?.stopMode)
+          + ' ｜ 状态 ' + statusMeta.label
+        : '还没有方案'
+
+      // 出方案后把批次清单滚进视野：notice 在页面顶部，作者可能看不到。
+      useEffect(() => {
+        if (!justPlanned) return
+        setJustPlanned(false)
+        const node = batchListRef.current
+        if (node && typeof node.scrollIntoView === 'function') {
+          node.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }
+      }, [justPlanned, batches.length])
+
+      const applyRevision = (value) => {
+        if (!value) return
+        setLive((prev) => ({ revision: value, audit: prev?.audit ?? null, summary: prev?.summary ?? '' }))
+        // 批次 / 停顿以落盘的方案为准；作者还没动过控件（auto）时跟着方案走。
+        const contract = value.contract ?? {}
+        const savedBatch = contract.batchSize
+        if (savedBatch !== undefined && savedBatch !== null && savedBatch !== '' && savedBatch !== 'auto') {
+          setBatchSize((prev) => (prev === 'auto' ? String(savedBatch) : prev))
+        }
+        const savedStop = contract.stopMode
+        if (savedStop !== undefined && savedStop !== null && savedStop !== '' && savedStop !== 'auto') {
+          setStopMode((prev) => (prev === 'auto' ? String(savedStop) : prev))
+        }
+      }
+
+      const toggleTier = (id) => {
+        setPreview(null)
+        setTiers((prev) => {
+          const next = prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+          return REVISION_TIER_META.map((item) => item.id).filter((itemId) => next.includes(itemId))
+        })
+      }
+
+      const buildContract = () => {
+        if (tiers.length === 0) {
+          setError('至少选一个改动层级')
+          return null
+        }
+        if (parsed.chapters.length === 0) {
+          setError('请先填写章节范围，例如 1-52 或 5,7,9')
+          return null
+        }
+        if (parsed.invalid.length > 0) {
+          setError('章节范围里有无法解析的片段：' + parsed.invalid.join('、'))
+          return null
+        }
+        const goalText = goal.trim()
+        if (goalMode === 'custom' && !goalText) {
+          setError('目标来源是「自己填」，请填写改动目标')
+          return null
+        }
+        if (goalMode === 'preset' && !effectivePresetId) {
+          setError(presets.length === 0
+            ? '还没有写作预设：请先到「预设」页建一套，或把目标来源改成「自己填」'
+            : '目标来源选了「引用预设」，请选择一个预设')
+          return null
+        }
+        const contract = {
+          tiers: [...tiers],
+          chapters: parsed.chapters,
+          goalMode,
+          // 'all' = 一批全改；'auto' = 按分层默认；数字 = 每批 N 章
+          batchSize: batchSize === 'all' ? 'all' : (batchSize === 'auto' ? 'auto' : Number(batchSize) || 'auto'),
+          stopMode,
+        }
+        // 引用预设模式不传手填目标；两者都要时手填目标优先，留空交给后端用预设生成。
+        if (goalMode !== 'preset' && goalText) contract.goal = goalText
+        if (goalMode !== 'custom' && effectivePresetId) contract.presetId = effectivePresetId
+        if (hasL3) {
+          const oldValue = charter.oldValue.trim()
+          const newValue = charter.newValue.trim()
+          const affectedCharacters = relationshipList(charter.affectedCharacters)
+          if (!oldValue || !newValue || affectedCharacters.length === 0) {
+            setError('L3 语义层必须填全价值变更书：旧立场 / 新立场 / 受影响人物')
+            return null
+          }
+          contract.charter = { oldValue, newValue, affectedCharacters }
+        }
+        return contract
+      }
+
+      const run = async (label, action) => {
+        if (busy) return
+        setBusy(label)
+        setError('')
+        setNotice('')
+        try {
+          await action()
+        } catch (err) {
+          setError(err?.message || String(err))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const doPreview = () => {
+        const contract = buildContract()
+        if (!contract) return
+        run('preview', async () => {
+          const value = await api('revision.preview', { projectId, ...contract })
+          const returnedError = revisionErrorText(value)
+          if (returnedError) throw new Error(returnedError)
+          setPreview(value ?? null)
+          const hit = value?.impact?.chapters?.length ?? 0
+          const uncovered = value?.impact?.uncovered ?? 0
+          const batchCount = Array.isArray(value?.batches) ? value.batches.length : 0
+          setNotice('影响面已计算：命中 ' + hit + ' 章，未覆盖 ' + uncovered + ' 章，规划 ' + batchCount + ' 个批次。')
+        })
+      }
+
+      const doPlan = () => {
+        const contract = buildContract()
+        if (!contract) return
+        run('plan', async () => {
+          const value = await api('revision.plan', { projectId, ...contract })
+          const returnedError = revisionErrorText(value)
+          if (returnedError) throw new Error(returnedError)
+          const revisionValue = value?.revision ?? null
+          applyRevision(revisionValue)
+          setPreview({
+            impact: value?.impact ?? null,
+            batches: Array.isArray(revisionValue?.batches) ? revisionValue.batches : [],
+            policy: null,
+            fromPlan: true,
+          })
+          setPrompt(String(value?.prompt ?? ''))
+          setExpandedBatches(false)
+          setJustPlanned(true)
+          const batchCount = Number(value?.batchCount) || (Array.isArray(revisionValue?.batches) ? revisionValue.batches.length : 0)
+          const chapterCount = Array.isArray(revisionValue?.contract?.chapters) ? revisionValue.contract.chapters.length : 0
+          setNotice('方案已生成：' + batchCount + ' 个批次 / ' + chapterCount + ' 章。清单在「② 批次清单」；要改批次大小 / 停顿方式，去「④ 执行」选好再点「开始」。')
+        })
+      }
+
+      const doStart = () => run('start', async () => {
+        // 批次大小 / 停顿方式在「开始」这一步交给后端：先重排批次（按章保留进度），再投递工作单。
+        const value = await api('revision.start', {
+          projectId,
+          batchSize: batchSize === 'all' ? 'all' : (batchSize === 'auto' ? 'auto' : Number(batchSize) || 'auto'),
+          stopMode,
+        })
+        const returnedError = revisionErrorText(value)
+        if (returnedError) throw new Error(returnedError)
+        applyRevision(value?.revision ?? null)
+        if (value?.prompt) setPrompt(String(value.prompt))
+        setJustPlanned(false)
+        const rebatchText = value?.rebatched
+          ? '已按执行设置重排为 ' + (Array.isArray(value?.revision?.batches) ? value.revision.batches.length : 0) + ' 批（' + revisionBatchLabel(value?.revision?.contract?.batchSize) + ' / ' + revisionStopLabel(value?.revision?.contract?.stopMode) + '）。'
+          : ''
+        setNotice((value?.sessionId ? '已开始，执行会话：' + value.sessionId : '已开始。') + rebatchText)
+        onChanged?.()
+      })
+
+      const doPause = () => run('pause', async () => {
+        const value = await api('revision.pause', { projectId })
+        const returnedError = revisionErrorText(value)
+        if (returnedError) throw new Error(returnedError)
+        applyRevision(value?.revision ?? null)
+        setNotice('已暂停。')
+        onChanged?.()
+      })
+
+      const doResume = () => run('resume', async () => {
+        const value = await api('revision.resume', { projectId })
+        const returnedError = revisionErrorText(value)
+        if (returnedError) throw new Error(returnedError)
+        applyRevision(value?.revision ?? null)
+        setNotice('已继续。')
+        onChanged?.()
+      })
+
+      const doReset = () => {
+        if (busy) return
+        if (!window.confirm('重置本次全文改动？批次进度会清空，正文与备份保留。')) return
+        run('reset', async () => {
+          const value = await api('revision.reset', { projectId })
+          const returnedError = revisionErrorText(value)
+          if (returnedError) throw new Error(returnedError)
+          applyRevision(value?.revision ?? null)
+          setPreview(null)
+          setPrompt('')
+          setBatchSize('auto')
+          setStopMode('auto')
+          setNotice('已重置。')
+          onChanged?.()
+        })
+      }
+
+      const tierLine = (label, text) => h('div', { key: label, className: 'sd-rev-tier-line' },
+        h('span', { className: 'sd-rev-tier-key' }, label),
+        h('span', null, text))
+
+      const statusCard = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '状态 · 去 AI 化指标（audit）'),
+          h('div', { className: 'sd-rev-status' },
+            h(Tag, { tone: statusMeta.tone }, statusMeta.label),
+            revision?.tier ? h(Tag, { key: 'tier', tone: 'brand' }, String(revision.tier)) : null,
+            (revision?.gates ?? []).map((gate) => h(Tag, { key: 'gate-' + gate, tone: 'muted' }, String(gate))))),
+        h('div', { className: 'sd-rev-status-meta' },
+          h('span', null, '运行：' + (revision?.runId || '—')),
+          h('span', null, '批次：' + batches.length),
+          h('span', null, revision?.budget
+            ? 'token：' + (Number(revision.budget.usedTokens) || 0) + ' / ' + (Number(revision.budget.maxTokens) > 0 ? Number(revision.budget.maxTokens) : '不限')
+            : '预算未设'),
+          h('span', null, revision?.updatedAt ? '更新：' + formatDateTime(revision.updatedAt) : '尚未出方案')),
+        revision?.contract
+          ? h('div', { className: 'sd-rev-status-meta' },
+              h('span', null, '层级 ' + revisionTierLabel
+            + ' ｜ 目标来源 ' + (REVISION_GOAL_MODE_LABEL[revision.contract.goalMode] ?? revision.contract.goalMode ?? '—')
+            + ' ｜ 批次 ' + revisionBatchLabel(revision.contract?.batchSize)
+            + ' ｜ 停顿 ' + revisionStopLabel(revision.contract?.stopMode)))
+          : null,
+        h('div', { className: 'sd-rev-md' },
+          h(Tag, { tone: mdArtifacts > 0 ? 'error' : 'muted' }, 'Markdown 残留 ' + mdArtifacts + ' 处'),
+          mdChapters.length > 0
+            ? h('span', { className: 'sd-hint' }, '前 5 章：' + mdChapters.slice(0, 5).map((row) => '第 ' + (Number(row.chapter) || row.chapter) + ' 章：' + (Number(row.total) || 0) + ' 处').join(' ｜ '))
+            : h('span', { className: 'sd-hint' }, mdArtifacts > 0 ? 'audit 未返回逐章明细' : '正文干净')),
+        auditSummary
+          ? h('pre', { className: 'sd-code sd-rev-audit' }, auditSummary)
+          : h('p', { className: 'sd-hint' }, '还没有 audit 摘要：出方案或执行后，去 AI 化指标会显示在这里。'))
+
+      const contractCard = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '① 改动契约'),
+          h('span', { className: 'sd-hint' }, '分层可多选；先预览影响面，再出方案；批次与停顿在「④ 执行」选，点「开始」时生效')),
+        h(Field, { label: '改动层级（可多选，至少一个）', hint: 'L1 最安全；L2 可动场景细节；L3 改价值观（高风险）' },
+          h('div', { className: 'sd-rev-tiers' }, REVISION_TIER_META.map((item) => {
+            const checked = tiers.includes(item.id)
+            return h('label', { key: item.id, className: 'sd-rev-tier-option' + (checked ? ' sd-rev-tier-option-on' : '') },
+              h('input', { type: 'checkbox', checked, onChange: () => toggleTier(item.id) }),
+              h('span', { className: 'sd-rev-tier-option-body' },
+                h('span', { className: 'sd-rev-tier-option-head' },
+                  h('strong', null, item.id + ' · ' + item.name),
+                  h(Tag, { tone: item.tone }, REVISION_RISK_LABEL[item.risk] ?? item.risk)),
+                h('span', { className: 'sd-rev-tier-option-hint' }, '可动：' + item.mutable.join('、')),
+                h('span', { className: 'sd-rev-tier-option-hint' }, '冻结：' + item.frozen.join('、'))))
+          }))),
+        h('p', { className: 'sd-hint sd-rev-l4-note' }, 'L4 改事件与结局，请走大纲闸门/扩写'),
+        h('div', { className: 'sd-rev-tier-meta' },
+          tierLine('已选', previewPolicy && previewPolicy.tier ? String(previewPolicy.tier) : selectedTierLabel),
+          previewPolicy
+            ? h(React.Fragment, null,
+                tierLine('可动', (previewPolicy.mutable ?? []).join('、') || '—'),
+                tierLine('冻结', (previewPolicy.frozen ?? []).join('、') || '—'),
+                h('div', { className: 'sd-rev-tier-line' },
+                  h('span', { className: 'sd-rev-tier-key' }, '风险'),
+                  h('span', null,
+                    h(Tag, { tone: REVISION_RISK_TONE[previewPolicy.risk] ?? 'muted' }, REVISION_RISK_LABEL[previewPolicy.risk] ?? previewPolicy.risk ?? '—'),
+                    (previewPolicy.gates ?? []).length > 0 ? ' ｜ 闸门：' + previewPolicy.gates.join('、') : '',
+                    previewPolicy.needsValueCharter ? ' ｜ 需价值变更书' : '',
+                    previewPolicy.needsAuthorConfirmEachChapter ? ' ｜ 每章需作者确认' : '')))
+            : h('p', { className: 'sd-hint' }, '预览影响面后显示组合策略（可动取并集 / 冻结取交集 / 风险取最高；含 L3 则全局先行）。')),
+        h(Field, { label: '章节范围', hint: '支持 1-52 与 5,7,9，可混写 1-3,7' },
+          h('div', { className: 'sd-inline-row' },
+            h(TextInput, { value: rangeText, onChange: setRangeText, placeholder: '如 1-52' }),
+            projectChapters.length > 0
+              ? h(Btn, { small: true, onClick: () => setRangeText(revisionRangeText(projectChapters)) }, '全部 ' + projectChapters.length + ' 章')
+              : null)),
+        h(Field, { label: '目标来源', hint: '引用预设 / 自己填 / 两者都要；两者都要时 textarea 可留空' },
+          h('div', { className: 'sd-rev-goalmodes' }, REVISION_GOAL_MODES.map((item) => h('label', { key: item.id, className: 'sd-cb' },
+            h('input', { type: 'radio', name: 'sd-rev-goal-mode', checked: goalMode === item.id, onChange: () => setGoalMode(item.id) }),
+            item.label)))),
+        goalMode !== 'custom'
+          ? h(Field, { label: '引用预设', hint: presets.length === 0 ? '当前作品还没有预设，先去「预设」页建一套' : '用该预设的风格规则生成目标' },
+              presets.length === 0
+                ? h('p', { className: 'sd-hint' }, '还没有写作预设。')
+                : h(React.Fragment, null,
+                    h(Select, {
+                      value: effectivePresetId,
+                      onChange: setPresetId,
+                      options: presets.map((item) => ({ value: String(item.id), label: String(item.name || item.id) + (String(item.tone ?? '').trim() ? ' · ' + String(item.tone).trim() : '') })),
+                    }),
+                    selectedPreset
+                      ? h('p', { className: 'sd-hint' }, '风格规则（前 3 条）：' + (presetStyleRules(selectedPreset).slice(0, 3).join('；') || '（预设里还没写风格规则）'))
+                      : null))
+          : null,
+        goalMode !== 'preset'
+          ? h(Field, { label: goalMode === 'both' ? '自定义目标（可留空）' : '改动目标（必填）', hint: goalMode === 'both' ? '留空时由后端用预设生成目标；填写则与预设一起交给后端' : '一句可判定的目标，例如「叙述改成文白相间」' },
+              h(TextArea, { value: goal, onChange: setGoal, rows: 2, placeholder: '叙述改成文白相间' }))
+          : null,
+        hasL3
+          ? h('div', { className: 'sd-form-2' },
+              h(Field, { label: '旧立场', hint: '现在的立场，例如「为父报仇」' },
+                h(TextInput, {
+                  value: charter.oldValue,
+                  onChange: (value) => setCharter((prev) => ({ ...prev, oldValue: value })),
+                  placeholder: '为父报仇',
+                })),
+              h(Field, { label: '新立场', hint: '要改成什么，例如「为生民立命」' },
+                h(TextInput, {
+                  value: charter.newValue,
+                  onChange: (value) => setCharter((prev) => ({ ...prev, newValue: value })),
+                  placeholder: '为生民立命',
+                })),
+              h(Field, { label: '受影响人物', hint: '逗号 / 顿号分隔，影响面按人物名扫全书' },
+                h(TextInput, {
+                  value: charter.affectedCharacters,
+                  onChange: (value) => setCharter((prev) => ({ ...prev, affectedCharacters: value })),
+                  placeholder: '华羽生,沈砚',
+                })))
+          : null,
+        h('div', { className: 'sd-rev-chips' },
+          parsed.chapters.length > 0
+            ? [
+                h(Tag, { key: 'count', tone: 'brand' }, '已解析 ' + parsed.chapters.length + ' 章'),
+                h(Tag, { key: 'ids', tone: 'muted' }, parsed.chapters.length > 1 ? parsed.chapters[0] + ' … ' + parsed.chapters[parsed.chapters.length - 1] : parsed.chapters[0]),
+              ]
+            : h('span', { className: 'sd-hint' }, '尚未解析到章节范围'),
+          parsed.invalid.length > 0
+            ? h(Tag, { key: 'invalid', tone: 'error' }, '无法解析：' + parsed.invalid.join('、'))
+            : null),
+        h('div', { className: 'sd-rev-actions' },
+          h(Btn, { onClick: doPreview, disabled: !!busy }, busy === 'preview' ? '计算中…' : '预览影响面'),
+          h(Btn, { kind: 'primary', onClick: doPlan, disabled: !!busy }, busy === 'plan' ? '生成中…' : '出方案')),
+        error ? h('div', { className: 'sd-error-inline' }, error) : null,
+        notice ? h('div', { className: 'sd-notice' }, notice) : null,
+        h('p', { className: 'sd-rev-plan-summary' }, planStatusSummary))
+
+
+      // 批次大小与停顿方式属于「开始」这一步：作者选完再按开始，后端在 revision.start 里重排（按章保留进度）。
+      const execCard = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '④ 执行（开始前选批次与停顿）'),
+          h('span', { className: 'sd-hint' }, '这里的选择在点「开始」时生效；批次只决定检查点密度，每章仍是独立改写')),
+        backendStale
+          ? h('div', { className: 'sd-warn-inline' }, '⚠ 宿主还是旧版本（DSH 没重启）：批次大小 / 停顿方式现在不会生效，点「开始」仍按已存方案跑。重启 DSH 后这里的选择才生效。')
+          : null,
+        h('div', { className: 'sd-form-2' },
+          h(Field, { label: '批次大小', hint: '一次一章 / 每几章 / 整本一批' },
+            h(Select, {
+              value: batchSize,
+              onChange: setBatchSize,
+              options: REVISION_BATCH_SIZES.map((item) => ({
+                value: item.id,
+                label: item.id === 'all'
+                  ? item.label + '（' + (execCount || 0) + ' 章）'
+                  : item.id === 'auto'
+                    ? item.label + '（' + (hasL3 ? 'L3 逐章' : '每 5 章') + '）'
+                    : item.label,
+              })),
+            })),
+          h(Field, { label: '停顿方式', hint: '批次之间什么时候停下等你看' },
+            h('div', { className: 'sd-rev-goalmodes' }, REVISION_STOP_MODES.map((item) => h('label', { key: item.id, className: 'sd-cb' },
+              h('input', { type: 'radio', name: 'sd-rev-stop-mode', checked: stopMode === item.id, onChange: () => setStopMode(item.id) }),
+              item.label + '（' + item.hint + '）'))))),
+        h('p', { className: 'sd-rev-plan-summary' }, execSummary),
+        h('div', { className: 'sd-rev-actions' },
+          h(Btn, { kind: 'primary', onClick: doStart, disabled: !!busy }, busy === 'start' ? '启动中…' : '开始'),
+          h(Btn, { onClick: doPause, disabled: !!busy }, busy === 'pause' ? '暂停中…' : '暂停'),
+          h(Btn, { onClick: doResume, disabled: !!busy }, busy === 'resume' ? '继续中…' : '继续'),
+          h(Btn, { kind: 'danger', onClick: doReset, disabled: !!busy }, busy === 'reset' ? '重置中…' : '重置')),
+        hasPlan
+          ? null
+          : h('p', { className: 'sd-hint' }, '还没有方案：先在上面点「出方案」，再回来选执行设置、点「开始」。'))
+
+      const impactCard = impact || previewErrors.length > 0 || previewBatches.length > 0
+        ? h('section', { className: 'sd-section' },
+            h('div', { className: 'sd-pipe-section-head' },
+              h('h3', { className: 'sd-h3' }, '③ 影响面预览'),
+              h('span', { className: 'sd-hint' }, preview ? (preview.fromPlan ? '来自 revision.plan（已落盘）' : '来自 revision.preview（未落盘）') : '来自当前方案')),
+            previewErrors.length > 0
+              ? h('div', { className: 'sd-error-inline' }, previewErrors.map((item, index) => h('div', { key: index }, typeof item === 'string' ? item : JSON.stringify(item))))
+              : null,
+            impact
+              ? h(React.Fragment, null,
+                  h('div', { className: 'sd-rev-chips' },
+                    (impact.keywords ?? []).length > 0
+                      ? impact.keywords.map((keyword) => h(Tag, { key: 'kw-' + keyword, tone: 'brand' }, String(keyword)))
+                      : h('span', { className: 'sd-hint' }, '没有扫描关键词（L3 的受影响人物会作为关键词）')),
+                  h('p', { className: 'sd-desc' }, '命中 ' + (impact.chapters ?? []).length + ' 章；未覆盖 ' + (Number(impact.uncovered) || 0) + ' 章。'),
+                  (impact.chapters ?? []).length === 0
+                    ? h('p', { className: 'sd-hint' }, '没有命中任何章：检查人物名 / 关键词，或确认正文已经导入。')
+                    : h('div', { className: 'sd-table' }, (impact.chapters ?? []).map((row) => h('div', {
+                        key: 'impact-' + row.chapter,
+                        className: 'sd-rev-impact-row',
+                      },
+                        h('span', { className: 'sd-rev-impact-ch' }, '第 ' + (Number(row.chapter) || row.chapter) + ' 章'),
+                        h('div', { className: 'sd-rev-impact-body' },
+                          h('span', { className: 'sd-rev-impact-title' }, row.title || '未命名'),
+                          (row.matched ?? []).length > 0
+                            ? h('div', { className: 'sd-rev-chips' }, (row.matched ?? []).map((keyword) => h(Tag, { key: 'm-' + keyword, tone: 'warn' }, String(keyword))))
+                            : null)))))
+              : h('p', { className: 'sd-hint' }, '点「预览影响面」查看受牵连章。'),
+            previewBatches.length > 0
+              ? h('p', { className: 'sd-hint' }, '预览批次：' + previewBatches.length + ' 个（设定层 ' + previewBatches.filter((batch) => batch?.kind === 'settings').length + ' 个）')
+              : null,
+            preview?.policy
+              ? h('details', null,
+                  h('summary', { className: 'sd-hint' }, '查看闸门策略 policy'),
+                  h('pre', { className: 'sd-code' }, JSON.stringify(preview.policy, null, 2)))
+              : null)
+        : null
+
+      const batchCard = h('section', { className: 'sd-section', ref: batchListRef },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '② 批次清单'),
+          h('span', { className: 'sd-hint' }, batches.length > 0
+            ? batches.filter((batch) => batch?.status === 'done').length + '/' + batches.length + ' 已完成'
+            : '出方案后立即生成')),
+        batches.length === 0
+          ? h(Empty, null, '还没有批次。填好契约后点「出方案」，后端会按层级拆批（L3 的批次 0 是设定层）。点上方「出方案」会立即生成清单。')
+          : h(React.Fragment, null,
+              h('div', { className: 'sd-table sd-rev-table' },
+                h('div', { className: 'sd-rev-tr sd-rev-tr-head' },
+                  h('span', null, '批次'),
+                  h('span', null, '章节'),
+                  h('span', null, '类型'),
+                  h('span', null, '状态'),
+                  h('span', null, '保真')),
+                (expandedBatches ? batches : batches.slice(0, 12)).map((batch, index) => {
+                  const batchStatus = String(batch?.status ?? 'pending')
+                  const batchMeta = REVISION_BATCH_STATUS[batchStatus] ?? { label: batchStatus, tone: 'muted' }
+                  const fidelity = batch?.fidelity ?? {}
+                  const chapterIds = Array.isArray(batch?.chapters) ? batch.chapters : []
+                  const chapterText = String(batch?.label ?? '').trim()
+                    || (chapterIds.length > 0 ? chapterIds.map((id) => '第 ' + (Number(id) || id) + ' 章').join('、') : '—')
+                  return h('div', { key: 'batch-' + (batch?.index ?? index), className: 'sd-rev-tr' },
+                    h('span', { className: 'sd-rev-tr-num' }, '#' + (Number(batch?.index ?? index) + 1)),
+                    h('span', { className: 'sd-rev-tr-main', title: chapterIds.join(', ') }, chapterText),
+                    h('span', null, batch?.kind === 'settings' ? '设定层' : '正文'),
+                    h('span', null, h(Tag, { tone: batchMeta.tone }, batchMeta.label)),
+                    h('span', {
+                      title: Array.isArray(fidelity.missing) && fidelity.missing.length > 0 ? '缺失：' + fidelity.missing.join('、') : '保真闸门 hit / total',
+                    }, (Number(fidelity.hit) || 0) + '/' + (Number(fidelity.total) || 0)))
+                })),
+              batches.length > 12
+                ? h('div', { className: 'sd-rev-actions' },
+                    h(Btn, { small: true, onClick: () => setExpandedBatches((value) => !value) }, expandedBatches ? '收起' : '展开全部 ' + batches.length + ' 批'))
+                : null))
+
+
+      const promptCard = prompt
+        ? h('section', { className: 'sd-section' },
+            h('h3', { className: 'sd-h3' }, '执行 prompt'),
+            h('details', null,
+              h('summary', { className: 'sd-hint' }, '展开查看 / 复制'),
+              h('pre', { className: 'sd-code' }, prompt)))
+        : null
+
+      const notesCard = notes.length > 0
+        ? h('section', { className: 'sd-section' },
+            h('h3', { className: 'sd-h3' }, '记录'),
+            notes.slice(-20).reverse().map((note, index) => h('div', { key: 'note-' + index, className: 'sd-pipe-note' },
+              h('span', { className: 'sd-pipe-note-time' }, formatDateTime(note?.at)),
+              h('span', { className: 'sd-pipe-note-text' }, String(note?.text ?? '')))))
+        : null
+
+      return h('div', { className: 'sd-rev-page' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('div', null,
+            h('h3', { className: 'sd-h3' }, '🩹 全文改动'),
+            h('p', { className: 'sd-desc' }, '把已有正文「换皮」：L1 改文风（情节不动）、L2 改场景与对白、L3 改价值观（先设定层、再按批次级联）。先预览影响面，再出方案、再开始。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: load, disabled: loading }, loading ? '刷新中…' : '刷新'))),
+        error ? h('div', { className: 'sd-error-inline' }, error) : null,
+        notice ? h('div', { className: 'sd-notice' }, notice) : null,
+        statusCard,
+        contractCard,
+        batchCard,
+        impactCard,
+        execCard,
+        promptCard,
+        notesCard)
+    }
+
+
+    // ── 审阅：去 AI 化 + 全文重新审阅 ──────────────────────────
+    function splitReviewFocus(text) {
+      return String(text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    }
+
+    function reviewAuditParts(audit) {
+      const overall = audit?.overall ?? {}
+      const flags = Array.isArray(audit?.flags) ? audit.flags : []
+      return {
+        mdArtifacts: Number(overall.mdArtifacts) || 0,
+        mdChapters: Array.isArray(audit?.mdChapters) ? audit.mdChapters : [],
+        flags,
+        blockers: flags.filter((flag) => flag?.severity === 'blocker'),
+        majors: flags.filter((flag) => flag?.severity === 'major'),
+      }
+    }
+
+    function ReviewPanel({ bundle, projectId, onChanged }) {
+      const [data, setData] = useState(null)
+      const [loading, setLoading] = useState(false)
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+      const [focusText, setFocusText] = useState('')
+      const [deaiSession, setDeaiSession] = useState('')
+      const [deaiWorkspace, setDeaiWorkspace] = useState('')
+      const [fullSession, setFullSession] = useState('')
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('aistyle.audit', { projectId })
+          setData({ audit: value?.audit ?? null, summary: String(value?.summary ?? ''), prompt: String(value?.prompt ?? '') })
+          setError('')
+        } catch (err) {
+          // 后端可能尚未实现 aistyle.audit：保留两个入口卡片，只显示错误条，不能白屏。
+          setError(err?.message || String(err))
+        } finally {
+          setLoading(false)
+        }
+      }, [projectId])
+
+      useEffect(() => {
+        load()
+      }, [load])
+      useEffect(() => {
+        setDeaiSession('')
+        setDeaiWorkspace('')
+        setFullSession('')
+        setNotice('')
+      }, [projectId])
+
+      const run = async (label, action) => {
+        if (busy) return
+        setBusy(label)
+        setError('')
+        setNotice('')
+        try {
+          await action()
+        } catch (err) {
+          setError(err?.message || String(err))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const startDeai = () => run('deai', async () => {
+        const value = await api('review.startDeai', { projectId })
+        const returnedError = revisionErrorText(value)
+        if (returnedError) throw new Error(returnedError)
+        setDeaiSession(String(value?.sessionId ?? ''))
+        setDeaiWorkspace(String(value?.workspacePath ?? ''))
+        if (value?.audit) {
+          setData((prev) => ({
+            audit: value.audit,
+            summary: String(value.summary ?? prev?.summary ?? ''),
+            prompt: String(value.prompt ?? prev?.prompt ?? ''),
+          }))
+        } else if (value?.prompt) {
+          setData((prev) => ({ ...(prev ?? { audit: null, summary: '' }), prompt: String(value.prompt) }))
+        }
+        setNotice('已在新独立会话启动去 AI 化审阅（隔离工作区只含本书章节副本，禁止跨作品对比）。结果会写到审稿页。')
+        onChanged?.()
+      })
+
+      const startFull = () => run('full', async () => {
+        const focus = splitReviewFocus(focusText)
+        const value = await api('review.startFull', { projectId, focus })
+        const returnedError = revisionErrorText(value)
+        if (returnedError) throw new Error(returnedError)
+        setFullSession(String(value?.sessionId ?? ''))
+        if (value?.prompt) setData((prev) => ({ ...(prev ?? { audit: null, summary: '' }), prompt: String(value.prompt) }))
+        setNotice(value?.workspacePath
+          ? '已在隔离工作区新建独立会话开始全文审阅（只审本书，禁止跨作品对比）：' + String(value.workspacePath)
+          : '已在隔离工作区新建独立会话开始全文审阅（只审本书，禁止跨作品对比），结果会写到审稿页。')
+        onChanged?.()
+      })
+
+      const parts = reviewAuditParts(data?.audit)
+      const focusLines = splitReviewFocus(focusText)
+      const chaptersCount = (bundle?.chapters ?? []).length
+
+      const flagRow = (flag, index) => h('div', { key: 'flag-' + (flag?.key || index), className: 'sd-rev-flag' },
+        h(Tag, { tone: flag?.severity === 'blocker' ? 'error' : 'warn' }, flag?.severity === 'blocker' ? 'blocker' : 'major'),
+        h('span', { className: 'sd-rev-flag-key' }, String(flag?.label || flag?.key || '')),
+        h('span', { className: 'sd-rev-flag-val' }, '实测 ' + String(flag?.value) + ' ｜ 阈值 ' + String(flag?.threshold)))
+
+      const deaiCard = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '🤖 去 AI 化审阅'),
+          h('span', { className: 'sd-hint' }, '独立会话 · 零上下文 · 只读本书副本')),
+        parts.mdArtifacts > 0
+          ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-danger' }, '正文里有 ' + parts.mdArtifacts + ' 处 Markdown 符号（## / ** / --- 等），这是成品稿最明显的机器痕迹，必须清零')
+          : null,
+        parts.mdChapters.length > 0
+          ? h('div', { className: 'sd-rev-md' },
+              h('span', { className: 'sd-hint' }, '残留章节（前 5 章）：'),
+              parts.mdChapters.slice(0, 5).map((row) => h(Tag, { key: 'mdch-' + row.chapter, tone: 'error' }, '第 ' + (Number(row.chapter) || row.chapter) + ' 章：' + (Number(row.total) || 0) + ' 处')))
+          : null,
+        h('div', { className: 'sd-rev-deai-boundary' },
+          h('div', { className: 'sd-hint' }, '本次审阅在新建的独立空会话里跑：隔离工作区只复制本书章节正文，禁止读其他作品/历史报告，禁止跨作品对比与「人类对照」。'),
+          h('a', { className: 'sd-rev-link', href: DEAI_AUDIT_URL, target: '_blank', rel: 'noreferrer noopener' }, '朱雀 AI 检测 ↗')),
+        data?.summary
+          ? h('pre', { className: 'sd-code sd-rev-audit' }, data.summary)
+          : h('p', { className: 'sd-hint' }, loading ? '正在统计去 AI 化指标…' : (error ? '审计未加载：先看上方错误条。' : '暂无审计摘要。')),
+        parts.flags.length > 0
+          ? h('div', { className: 'sd-rev-flags' },
+              h('div', { className: 'sd-hint' }, '偏差 ' + parts.flags.length + ' 条（blocker ' + parts.blockers.length + ' / major ' + parts.majors.length + '）'),
+              parts.flags.slice(0, 8).map(flagRow))
+          : (data ? h('p', { className: 'sd-hint' }, '未发现明显机器痕迹。') : null),
+        h('div', { className: 'sd-rev-actions' },
+          h(Btn, { kind: 'primary', onClick: startDeai, disabled: !!busy }, busy === 'deai' ? '启动中…' : '开始去 AI 化审阅'),
+          deaiSession ? h('span', { className: 'sd-hint' }, '会话：' + deaiSession) : null,
+          deaiWorkspace ? h('span', { className: 'sd-hint' }, '隔离工作区：' + deaiWorkspace) : null))
+
+      const fullCard = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '📖 全文重新审阅'),
+          h('span', { className: 'sd-hint' }, '整本重读，结果写到审稿页')),
+        h(Field, { label: '审阅重点（每行一条）', hint: '可留空：后端会按默认口径全审' },
+          h(TextArea, {
+            value: focusText,
+            onChange: setFocusText,
+            rows: 5,
+            placeholder: '节奏是否均匀\n对白是否千篇一律\n主角动机是否可信\n结局是否仓促',
+          })),
+        h('div', { className: 'sd-rev-actions' },
+          h(Btn, { kind: 'primary', onClick: startFull, disabled: !!busy }, busy === 'full' ? '启动中…' : '开始全文重新审阅'),
+          fullSession ? h('span', { className: 'sd-hint' }, '会话：' + fullSession) : null),
+        h('p', { className: 'sd-hint' }, focusLines.length > 0
+          ? '将按上面的 ' + focusLines.length + ' 条重点审阅。'
+          : '未填重点：将按默认口径审阅（情节因果 / 人物动机 / 连续性 / 节奏 / 对白 / 结局）。'))
+
+      const promptCard = data?.prompt
+        ? h('section', { className: 'sd-section' },
+            h('h3', { className: 'sd-h3' }, '审阅 prompt'),
+            h('details', null,
+              h('summary', { className: 'sd-hint' }, '展开查看 / 复制'),
+              h('pre', { className: 'sd-code' }, data.prompt)))
+        : null
+
+      return h('div', { className: 'sd-rev-page' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('div', null,
+            h('h3', { className: 'sd-h3' }, '🔍 审阅'),
+            h('p', { className: 'sd-desc' }, '两个入口：先「去 AI 化审阅」清掉机器痕迹，再「全文重新审阅」按重点把 ' + (chaptersCount || 0) + ' 章重读一遍。结果都会写到审稿页。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { onClick: load, disabled: loading }, loading ? '刷新中…' : '刷新'))),
+        error ? h('div', { className: 'sd-error-inline' }, error) : null,
+        notice ? h('div', { className: 'sd-notice' }, notice) : null,
+        deaiCard,
+        fullCard,
+        promptCard)
+    }
+
+    // ── 版本：整本快照 + 回滚（snapshot.*）─────────────────────
+    const SNAPSHOT_TRIGGER_LABEL = {
+      manual: '手动',
+      'pre-restore': '回滚前自动',
+      'run-start': '开工前自动',
+      'restore-chapter': '单章回滚前',
+    }
+
+    function snapshotTriggerLabel(trigger) {
+      const value = String(trigger ?? '').trim()
+      return SNAPSHOT_TRIGGER_LABEL[value] || value || '—'
+    }
+
+    function snapshotPathOf(item) {
+      return String(item?.path ?? item ?? '').trim()
+    }
+
+    function snapshotChapterIdOf(path) {
+      const match = String(path ?? '').match(/^chapters\/(.+)\.md$/i)
+      return match ? match[1] : ''
+    }
+
+    function snapshotRunText(snapshot) {
+      return [snapshot?.runStatus, snapshot?.tier]
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)
+        .join(' · ')
+    }
+
+    function snapshotCount(value) {
+      const number = Number(value)
+      return Number.isFinite(number) ? String(number) : '0'
+    }
+
+    function VersionsPanel({ projectId, onChanged }) {
+      const [snapshots, setSnapshots] = useState([])
+      const [loading, setLoading] = useState(false)
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      const [notice, setNotice] = useState('')
+      const [diff, setDiff] = useState(null)
+
+      const load = useCallback(async () => {
+        setLoading(true)
+        try {
+          const value = await api('snapshot.list', { projectId })
+          setSnapshots(Array.isArray(value?.snapshots) ? value.snapshots : [])
+          setError('')
+        } catch (err) {
+          setError(err?.message || String(err))
+        } finally {
+          setLoading(false)
+        }
+      }, [projectId])
+
+      useEffect(() => {
+        load()
+      }, [load])
+      useEffect(() => {
+        setDiff(null)
+        setNotice('')
+        setError('')
+      }, [projectId])
+
+      const run = async (label, action) => {
+        if (busy) return
+        setBusy(label)
+        setError('')
+        setNotice('')
+        try {
+          await action()
+        } catch (err) {
+          setError(err?.message || String(err))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const createSnapshot = () => run('create', async () => {
+        if (typeof window === 'undefined' || typeof window.prompt !== 'function') throw new Error('当前环境不支持输入快照标签')
+        const label = window.prompt('给这份快照起个名字（可留空，自动用「手动快照」）', '')
+        if (label === null) return
+        const value = await api('snapshot.create', { projectId, label: String(label).trim() || '手动快照' })
+        setNotice('已创建快照：' + (value?.snapshot?.label || String(label).trim() || '手动快照'))
+        await load()
+      })
+
+      const showDiff = (snapshot) => run('diff:' + snapshot.id, async () => {
+        const value = await api('snapshot.diff', { projectId, snapshotId: snapshot.id })
+        const document = value?.diff && !Array.isArray(value?.changed) ? value.diff : value
+        setDiff({ snapshotId: snapshot.id, snapshot, value: document ?? {} })
+      })
+
+      const restoreAll = (snapshot) => run('restore:' + snapshot.id, async () => {
+        if (typeof window === 'undefined' || typeof window.confirm !== 'function') throw new Error('当前环境不支持确认操作')
+        let diffValue = diff?.snapshotId === snapshot.id ? diff.value : null
+        if (!diffValue) {
+          const fetched = await api('snapshot.diff', { projectId, snapshotId: snapshot.id })
+          diffValue = (fetched?.diff && !Array.isArray(fetched?.changed) ? fetched.diff : fetched) ?? {}
+        }
+        const changedCount = Number.isFinite(Number(diffValue?.counts?.changed))
+          ? Number(diffValue.counts.changed)
+          : (Array.isArray(diffValue?.changed) ? diffValue.changed.length : 0)
+        const when = formatDateTime(snapshot?.createdAt) || String(snapshot?.createdAt ?? '')
+        if (!window.confirm('确定回滚整本到 ' + when + '（' + (snapshot?.label || '未命名快照') + '）？会改动 ' + snapshotCount(changedCount) + ' 个文件；回滚前会自动再打一份快照，可撤回。')) return
+        const value = await api('snapshot.restore', { projectId, snapshotId: snapshot.id })
+        setNotice('已回滚到 ' + when + '，回滚前快照：' + (value?.safetySnapshotId || '—'))
+        setDiff(null)
+        await load()
+        onChanged?.()
+      })
+
+      const restoreChapter = (snapshot, path) => run('chapter:' + snapshot.id + ':' + path, async () => {
+        const chapterId = snapshotChapterIdOf(path)
+        if (!chapterId) throw new Error('无法从路径识别章节：' + path)
+        const value = await api('snapshot.restoreChapter', { projectId, snapshotId: snapshot.id, chapterId })
+        const chapterNumber = Number(chapterId)
+        const title = String(value?.chapter?.title ?? '').trim()
+        setNotice('已回滚第 ' + (Number.isFinite(chapterNumber) ? chapterNumber : chapterId) + ' 章' + (title ? '《' + title + '》' : '') + '。')
+        setDiff(null)
+        await load()
+        onChanged?.()
+      })
+
+      const removeSnapshot = (snapshot) => run('delete:' + snapshot.id, async () => {
+        if (typeof window === 'undefined' || typeof window.confirm !== 'function') throw new Error('当前环境不支持确认操作')
+        const when = formatDateTime(snapshot?.createdAt) || String(snapshot?.createdAt ?? '')
+        if (!window.confirm('删除快照「' + (snapshot?.label || '未命名') + '」（' + when + '）？删除后不能再用它回滚。')) return
+        await api('snapshot.delete', { projectId, snapshotId: snapshot.id })
+        setNotice('已删除快照：' + (snapshot?.label || snapshot.id))
+        if (diff?.snapshotId === snapshot.id) setDiff(null)
+        await load()
+      })
+
+      const diffValue = diff?.value ?? null
+      const diffCounts = diffValue?.counts ?? {}
+      const changedList = Array.isArray(diffValue?.changed) ? diffValue.changed.map(snapshotPathOf).filter(Boolean) : []
+      const missingList = Array.isArray(diffValue?.missingNow) ? diffValue.missingNow.map(snapshotPathOf).filter(Boolean) : []
+      const newList = Array.isArray(diffValue?.newSince) ? diffValue.newSince.map(snapshotPathOf).filter(Boolean) : []
+
+      const diffPathRow = (path, key, extra) => h('div', { key, className: 'sd-snap-path' },
+        h('span', { className: 'sd-snap-path-text', title: path }, path),
+        extra ?? null)
+
+      const diffBlock = (title, paths, actionOf) => {
+        if (paths.length === 0) return null
+        const shown = paths.slice(0, 20)
+        return h('div', { className: 'sd-snap-diff-block' },
+          h('div', { className: 'sd-snap-diff-title' }, title + '（' + paths.length + '）'),
+          shown.map((path, index) => diffPathRow(path, 'snap-path-' + index + '-' + path, actionOf ? actionOf(path) : null)),
+          paths.length > shown.length ? h('p', { className: 'sd-hint' }, '…还有 ' + (paths.length - shown.length) + ' 个') : null)
+      }
+
+      const snapshotRow = (snapshot) => {
+        const id = String(snapshot?.id ?? '')
+        const counts = snapshot?.counts ?? {}
+        const runText = snapshotRunText(snapshot)
+        return h('div', { key: 'snap-' + id, className: 'sd-snap-tr' + (diff?.snapshotId === id ? ' sd-snap-tr-active' : '') },
+          h('span', { title: String(snapshot?.createdAt ?? '') }, formatDateTime(snapshot?.createdAt) || '—'),
+          h('span', { title: String(snapshot?.label ?? '') }, snapshot?.label || '未命名'),
+          h('span', null, h(Tag, { tone: 'muted' }, snapshotTriggerLabel(snapshot?.trigger))),
+          h('span', { className: 'sd-snap-num' }, snapshotCount(counts.chapters)),
+          h('span', { className: 'sd-snap-num' }, snapshotCount(counts.words)),
+          h('span', { className: 'sd-snap-run' }, runText ? h(Tag, { tone: 'brand' }, runText) : '—'),
+          h('div', { className: 'sd-snap-row-actions' },
+            h(Btn, { small: true, onClick: () => showDiff(snapshot), disabled: !!busy }, busy === 'diff:' + id ? '对比中…' : '对比'),
+            h(Btn, { small: true, onClick: () => restoreAll(snapshot), disabled: !!busy }, busy === 'restore:' + id ? '回滚中…' : '回滚整本'),
+            h(Btn, { small: true, kind: 'danger', onClick: () => removeSnapshot(snapshot), disabled: !!busy }, busy === 'delete:' + id ? '删除中…' : '删除')))
+      }
+
+      const diffCard = diff ? h('section', { className: 'sd-section sd-snap-diff' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '快照对比'),
+          h('span', { className: 'sd-hint' }, (diff.snapshot?.label || '未命名') + ' · ' + (formatDateTime(diff.snapshot?.createdAt) || '—')),
+          h(Btn, { small: true, onClick: () => setDiff(null) }, '收起')),
+        h('p', { className: 'sd-snap-overview' }, '改动 ' + snapshotCount(diffCounts.changed ?? changedList.length) + ' 个文件 ｜ 快照里有但当前没有 ' + snapshotCount(diffCounts.missingNow ?? missingList.length) + ' ｜ 当前多出 ' + snapshotCount(diffCounts.newSince ?? newList.length)),
+        changedList.length === 0 ? h('p', { className: 'sd-hint' }, '没有改动的文件。') : diffBlock('改动文件', changedList, (path) => {
+          const chapterId = snapshotChapterIdOf(path)
+          if (!chapterId) return null
+          const label = 'chapter:' + diff.snapshot.id + ':' + path
+          return h(Btn, { small: true, onClick: () => restoreChapter(diff.snapshot, path), disabled: !!busy }, busy === label ? '恢复中…' : '恢复此章')
+        }),
+        diffBlock('快照里有但当前没有', missingList),
+        diffBlock('当前多出', newList)) : null
+
+      const listSection = h('section', { className: 'sd-section' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('h3', { className: 'sd-h3' }, '快照列表'),
+          h('span', { className: 'sd-hint' }, loading ? '加载中…' : snapshots.length + ' 份快照')),
+        h('div', { className: 'sd-table sd-snap-table' },
+          h('div', { className: 'sd-snap-tr sd-snap-tr-head' },
+            h('span', null, '时间'),
+            h('span', null, '标签'),
+            h('span', null, '触发'),
+            h('span', null, '章节数'),
+            h('span', null, '字数'),
+            h('span', null, '运行状态'),
+            h('span', null, '操作')),
+          snapshots.map(snapshotRow)))
+
+      return h('div', { className: 'sd-rev-page sd-snap-page' },
+        h('div', { className: 'sd-pipe-section-head' },
+          h('div', null,
+            h('h3', { className: 'sd-h3' }, '🕘 版本'),
+            h('p', { className: 'sd-desc' }, '整本快照包含全部章节与全部 json 账本；回滚会先自动打一份回滚前快照，所以回滚本身也能撤回。')),
+          h('div', { className: 'sd-pagehead-actions' },
+            h(Btn, { kind: 'primary', onClick: createSnapshot, disabled: !!busy }, busy === 'create' ? '创建中…' : '创建快照'),
+            h(Btn, { onClick: load, disabled: loading || !!busy }, loading ? '刷新中…' : '刷新'))),
+        error ? h('div', { className: 'sd-error-inline' }, error) : null,
+        notice ? h('div', { className: 'sd-notice' }, notice) : null,
+        snapshots.length === 0
+          ? (loading
+              ? h(Empty, null, '正在加载快照…')
+              : h(Empty, null, '还没有快照。开工前会自动打点，也可以点「创建快照」手动存一份。'))
+          : listSection,
+        diffCard)
     }
 
     // ══ v0.4 新增：工具函数 ═══════════════════════════════════
@@ -5266,6 +6909,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const [editing, setEditing] = useState(null)
       const [selected, setSelected] = useState([])
       const [severityFilter, setSeverityFilter] = useState('all')
+      const [originFilter, setOriginFilter] = useState('all')
       const [bulkBusy, setBulkBusy] = useState(false)
       const [showDone, setShowDone] = useState(false)
       const all = bundle.reviews ?? []
@@ -5273,7 +6917,8 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const severityRank = { blocker: 0, major: 1, minor: 2, suggestion: 3 }
       const bySeverity = (a, b) => (severityRank[a.severity] ?? 9) - (severityRank[b.severity] ?? 9) || (Number(a.chapter) || 0) - (Number(b.chapter) || 0)
       const pendingAll = all.filter((review) => !isDone(review))
-      const pending = pendingAll.filter((review) => severityFilter === 'all' || review.severity === severityFilter).sort(bySeverity)
+      const recheckOpen = pendingAll.filter((review) => reviewOriginKey(review) === 'recheck').length
+      const pending = pendingAll.filter((review) => (severityFilter === 'all' || review.severity === severityFilter) && (originFilter === 'all' || reviewOriginKey(review) === originFilter)).sort(bySeverity)
       const done = all.filter(isDone).sort((a, b) => (Number(b.chapter) || 0) - (Number(a.chapter) || 0))
       const selectedRows = all.filter((review) => selected.includes(review.id))
       const selectedPending = selectedRows.filter((review) => !isDone(review))
@@ -5393,17 +7038,21 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         h('div', { className: 'sd-bulkbar' },
           h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allPendingSelected, onChange: toggleAllPending }), '全选待处理'),
           h('span', { className: 'sd-hint' }, `待处理 ${pendingAll.length} 条，当前显示 ${pending.length} 条，已选 ${selectedPending.length} 条`),
+          recheckOpen > 0 ? h('span', { className: 'sd-hint sd-recheck-hint' }, '复核发现的问题在这里：勾选 → 加入清单（清单里生成修订提案）') : null,
           linkedReviewCount > 0 ? h('span', { className: 'sd-hint' }, `${linkedReviewCount} 条审阅对应的提案已采纳，正在自动归档…`) : null,
           h('select', { className: 'sd-input sd-select-inline', value: severityFilter, onChange: (e) => setSeverityFilter(e.target.value) },
             h('option', { value: 'all' }, '全部严重度'),
             [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']].map(([value, label]) => h('option', { key: value, value }, label))),
+          h('select', { className: 'sd-input sd-select-inline', value: originFilter, onChange: (e) => setOriginFilter(e.target.value), title: '按来源筛选审稿' },
+            h('option', { value: 'all' }, '全部来源'),
+            REVIEW_ORIGIN_OPTIONS.map(([value, label]) => h('option', { key: value, value }, label))),
           h('div', { className: 'sd-bulkbar-actions' },
             h(Btn, { small: true, kind: 'primary', disabled: selectedPending.length === 0 || !onAddCart, onClick: () => addToCart(selectedPending) }, `加入清单（${selectedPending.length}）`),
             h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('fixed', selectedPending) }, `标记已修（${selectedPending.length}）`),
             h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('wontfix', selectedPending) }, '忽略'))),
         pending.length > 0
           ? renderRows(pending)
-          : h('div', { className: 'sd-empty' }, pendingAll.length === 0 ? '待处理审稿已清空 🎉' : '当前严重度筛选下没有待处理审稿。'),
+          : h('div', { className: 'sd-empty' }, pendingAll.length === 0 ? '待处理审稿已清空 🎉' : recheckOpen > 0 ? '复核发现的问题在这里：勾选 → 加入清单（清单里生成修订提案）。当前筛选下还有 ' + recheckOpen + ' 条复核来源待处理。' : '当前严重度 / 来源筛选下没有待处理审稿。'),
         done.length > 0 ? h('div', { className: 'sd-section sd-mt' },
           h('div', { className: 'sd-bulkbar' },
             h('span', { className: 'sd-hint' }, `已处理（${done.length}）：已修 + 忽略，默认归档收起`),
@@ -5413,7 +7062,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           showDone ? h('div', { className: 'sd-mini-list' }, done.map((review) => h('div', { key: review.id, className: 'sd-mini-row' },
             h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) }),
             h(Tag, { tone: 'muted' }, review.status === 'fixed' ? '已修' : '忽略'),
-            h('span', { className: 'sd-mini-title' }, `第${review.chapter}章 · ${review.dimension ?? ''} · ${(review.issue ?? '').slice(0, 70)}`),
+            h('span', { className: 'sd-mini-title' }, `${Number(review.chapter) === 0 ? '全书' : '第' + review.chapter + '章'} · ${review.dimension ?? ''} · ${(review.issue ?? '').slice(0, 70)}`),
             h(Btn, { small: true, disabled: bulkBusy, onClick: () => batchStatus('open', [review]) }, '重新打开')))) : null,
         ) : null,
         editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
@@ -5503,35 +7152,114 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       )
     }
 
-    function AttentionStatsBar({ stats }) {
+    /** 🎯 提分工作台：闭环说明 + 全书/选中/复测三个总动作 + 按提分空间降序的可勾选章节行。 */
+    function AttentionFixBoard({ bundle, projectId, onGoTab }) {
+      const [busy, setBusy] = useState('')
+      const [selected, setSelected] = useState(() => new Set())
+      const board = attentionFixBoard(bundle)
+      const deltaText = board.avgDelta === null ? '—' : attentionDeltaText(board.avgDelta)
+      const rows = board.rows
+      const recheckReviewCount = attentionRecheckReviews(bundle).length
+      const selectedChapters = rows.map((item) => item.chapter).filter((chapter) => selected.has(chapter))
+      const allSelected = rows.length > 0 && selectedChapters.length === rows.length
+      const toggleAll = (on) => setSelected(on ? new Set(rows.map((item) => item.chapter)) : new Set())
+      const toggleOne = (chapter) => setSelected((prev) => {
+        const next = new Set(prev)
+        if (next.has(chapter)) next.delete(chapter)
+        else next.add(chapter)
+        return next
+      })
+      const send = async (payload, key) => {
+        if (!projectId || busy) return
+        setBusy(key)
+        try {
+          await sendToChat(Object.assign({ projectId, newSession: true }, payload))
+        } catch (error) {
+          window.alert('发送到对话失败：' + error.message)
+        } finally {
+          setBusy('')
+        }
+      }
+      return h('section', { className: 'sd-att-fix' },
+        h('div', { className: 'sd-att-fix-head' },
+          h('div', { className: 'sd-att-fix-intro' },
+            h('h3', { className: 'sd-h3' }, '🎯 提分工作台'),
+            h('p', { className: 'sd-att-fix-hint' }, ATTENTION_FIX_HINT),
+            h('p', { className: 'sd-hint' }, '提分空间 = 目标分 − 实测分（目标分缺省 = 全书均值 +8，兜底 80）；设计没兑现 +' + ATTENTION_FIX.designGapBonus + '、有弃读点 +' + ATTENTION_FIX.dropPointBonus + '。只列已打分且 <' + ATTENTION_FIX.skipScore + ' 的章，空间大的在前；勾选章节可只给选中的出方案。')),
+          h('div', { className: 'sd-att-fix-actions' },
+            h(Btn, { small: true, kind: 'primary', disabled: !!busy || !projectId || rows.length === 0, onClick: () => send({ task: ATTENTION_FIX_TASK, scope: 'all' }, 'all') }, busy === 'all' ? '发送中…' : '生成全部提分方案（' + rows.length + ' 章）'),
+            h(Btn, { small: true, disabled: !!busy || !projectId || selectedChapters.length === 0, onClick: () => send({ task: ATTENTION_FIX_TASK, scope: 'selected', chapters: selectedChapters.slice().sort((a, b) => a - b) }, 'selected') }, busy === 'selected' ? '发送中…' : '生成选中方案（' + selectedChapters.length + ' 章）'),
+            h(Btn, { small: true, disabled: !!busy || !projectId || board.pendingRecheck === 0, onClick: () => send({ task: ATTENTION_RECHECK_TASK, scope: 'all' }, 'recheck') }, busy === 'recheck' ? '发送中…' : '复测全部待复测（' + board.pendingRecheck + ' 章）'),
+            recheckReviewCount > 0 && onGoTab ? h(Btn, { small: true, disabled: !!busy, onClick: () => onGoTab('reviews') }, '看复核审稿（' + recheckReviewCount + '）') : null),
+          h('p', { className: 'sd-att-fix-note' }, REVIEW_RECHECK_HINT)),
+        h('div', { className: 'sd-att-fix-meta' },
+          h('span', null, '待复测 ' + board.pendingRecheck),
+          h('span', null, '已复测 ' + board.verified + ' 章'),
+          h('span', null, '平均 Δ ' + deltaText),
+          h('span', null, '待采纳方案 ' + board.pendingFixProposals + ' 条'),
+          h('span', null, '累计补丁 ' + board.fixCount + ' 条')),
+        rows.length === 0
+          ? h('div', { className: 'sd-att-fix-empty' }, board.scored === 0
+              ? '还没有实测分：先在分工页让独立审稿人冷读，或点「生成全部提分方案」让 AI 先冷读再出方案。'
+              : '当前没有可提分的章：已打分且 <' + ATTENTION_FIX.skipScore + ' 的章都补完了。')
+          : h('div', { className: 'sd-att-fix-table' },
+              h('div', { className: 'sd-att-fix-row sd-att-fix-row-head' },
+                h('span', { className: 'sd-att-fix-check' }, h('input', { type: 'checkbox', checked: allSelected, disabled: !!busy || rows.length === 0, 'aria-label': '全选章节', onChange: (event) => toggleAll(!!event.target.checked) })),
+                h('span', null, '章'),
+                h('span', null, '实测'),
+                h('span', null, '目标'),
+                h('span', null, '提分空间'),
+                h('span', null, '最弱拍'),
+                h('span', null, '状态'),
+                h('span', null, '')),
+              rows.map((item) => h('div', { key: 'fix-' + (item.row.id || item.chapter), className: 'sd-att-fix-row' + (selected.has(item.chapter) ? ' is-selected' : '') },
+                h('span', { className: 'sd-att-fix-check' }, h('input', { type: 'checkbox', checked: selected.has(item.chapter), disabled: !!busy, 'aria-label': '选择第' + item.chapter + '章', onChange: () => toggleOne(item.chapter) })),
+                h('span', { className: 'sd-att-fix-num' }, '第 ' + item.chapter + ' 章'),
+                h('span', { className: 'sd-att-fix-num sd-att-fix-score' + attentionScoreTone(item.score) }, String(item.score)),
+                h('span', { className: 'sd-att-fix-num' }, String(item.target)),
+                h('span', { className: 'sd-att-fix-gain' }, '+' + item.potential),
+                h('span', { className: 'sd-att-fix-weak' }, item.weakLabel),
+                h('span', null, h(Tag, { tone: item.status.tone }, item.status.label)),
+                h('span', { className: 'sd-att-fix-row-actions' }, h(Btn, { small: true, disabled: !!busy, onClick: () => send({ task: ATTENTION_FIX_TASK, scope: 'chapter', chapter: item.chapter }, 'ch-' + item.chapter) }, busy === 'ch-' + item.chapter ? '…' : '生成方案')))))
+      )
+    }
+
+
+    function AttentionStatsBar({ stats, fix }) {
+      const fixStats = fix ?? { pendingRecheck: 0, verified: 0, avgDelta: null }
+      const deltaText = fixStats.avgDelta === null ? '—' : attentionDeltaText(fixStats.avgDelta)
       return h(React.Fragment, null,
         h('div', { className: 'sd-att-stats' },
           h('div', { className: 'sd-att-stat' },
             h('div', { className: 'sd-att-stat-label' }, '全书平均分'),
-            h('div', { className: `sd-att-stat-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
-            h('div', { className: 'sd-hint' }, `${stats.scored.length} 章有实测分`)),
+            h('div', { className: 'sd-att-stat-big' + attentionScoreTone(stats.average) }, stats.average === null ? '—' : String(stats.average)),
+            h('div', { className: 'sd-hint' }, stats.scored.length + ' 章有实测分')),
           h('div', { className: 'sd-att-stat' },
             h('div', { className: 'sd-att-stat-label' }, '最低三章'),
             stats.lowest.length === 0
               ? h('div', { className: 'sd-hint' }, '还没有实测分')
-              : h('div', { className: 'sd-att-stat-list' }, stats.lowest.map((row) => h('div', { key: row.id ?? `low-${row.chapter}`, className: 'sd-att-lowrow' },
-                  h('span', null, `第 ${Number(row.chapter)} 章`),
-                  h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`))))),
+              : h('div', { className: 'sd-att-stat-list' }, stats.lowest.map((row) => h('div', { key: row.id || 'low-' + row.chapter, className: 'sd-att-lowrow' },
+                  h('span', null, '第 ' + Number(row.chapter) + ' 章'),
+                  h('span', { className: 'sd-att-lowscore' + attentionScoreTone(row.score) }, Number(row.score) + ' 分'))))),
           h('div', { className: 'sd-att-stat' },
             h('div', { className: 'sd-att-stat-label' }, '未标章数'),
             h('div', { className: 'sd-att-stat-big' }, String(stats.unmarked.length)),
             h('div', { className: 'sd-hint' }, '有正文但无注意力记录')),
           h('div', { className: 'sd-att-stat' },
-            h('div', { className: `sd-att-stat-label` }, '疲劳 / 骤降预警'),
-            h('div', { className: `sd-att-stat-big${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
-            h('div', { className: 'sd-hint' }, '同类型连续 >3 章、相邻章降 ≥15'))),
+            h('div', { className: 'sd-att-stat-label' }, '疲劳 / 骤降预警'),
+            h('div', { className: 'sd-att-stat-big' + (stats.warnings.length > 0 ? ' sd-att-tone-mid' : '') }, String(stats.warnings.length)),
+            h('div', { className: 'sd-hint' }, '同类型连续 >3 章、相邻章降 ≥15')),
+          h('div', { className: 'sd-att-stat' },
+            h('div', { className: 'sd-att-stat-label' }, '提分闭环'),
+            h('div', { className: 'sd-att-stat-big' + (fixStats.pendingRecheck > 0 ? ' sd-att-tone-mid' : '') }, String(fixStats.pendingRecheck)),
+            h('div', { className: 'sd-hint' }, '待复测 · 已复测 ' + fixStats.verified + ' 章 · 平均 Δ ' + deltaText))),
         stats.warnings.length > 0
-          ? h('div', { className: 'sd-att-warns' }, stats.warnings.map((warning, index) => h('div', { key: `warn-${index}`, className: 'sd-att-warn' }, `⚠ ${warning.text}`)))
+          ? h('div', { className: 'sd-att-warns' }, stats.warnings.map((warning, index) => h('div', { key: 'warn-' + index, className: 'sd-att-warn' }, '⚠ ' + warning.text)))
           : null,
       )
     }
 
-    function AttentionCard({ row, bundle, onEdit, onGoTab }) {
+    function AttentionCard({ row, bundle, projectId, onEdit, onGoTab }) {
       const chapter = Number(row.chapter)
       const subs = attentionSubItems(bundle, chapter)
       const score = attentionHasScore(row) ? Number(row.score) : null
@@ -5541,34 +7269,79 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const verdictTone = ATTENTION_VERDICT_TONE[row.verdict] ?? ''
       const state = attentionStatusOf(row)
       const needsDesign = state.key === 'nodesign' || state.key === 'blank'
+      const breakdown = attentionBreakdownOf(row)
+      const latestHistory = attentionLatestHistory(row)
+      const fixLog = Array.isArray(row.fixLog) ? row.fixLog : []
+      const dropPoints = Array.isArray(row.dropPoints) ? row.dropPoints : []
+      const fixPlan = row.fixPlan && typeof row.fixPlan === 'object' ? row.fixPlan : null
+      const [fixBusy, setFixBusy] = useState('')
+      const sendFix = async (mode) => {
+        if (!projectId || fixBusy) return
+        setFixBusy(mode)
+        try {
+          await sendToChat(mode === 'recheck'
+            ? { projectId, task: ATTENTION_RECHECK_TASK, chapter, newSession: true }
+            : { projectId, task: ATTENTION_FIX_TASK, scope: 'chapter', chapter, newSession: true })
+        } catch (error) {
+          window.alert('发送到对话失败：' + error.message)
+        } finally {
+          setFixBusy('')
+        }
+      }
       const aggRow = (key, title, meta) => h('div', { key, className: 'sd-att-agg-row' },
         h('span', { className: 'sd-att-agg-title', title }, title),
         meta ? h('span', { className: 'sd-att-agg-meta' }, meta) : null)
-      return h('article', { id: `sd-att-card-${chapter}`, className: 'sd-att-card' },
+      return h('article', { id: 'sd-att-card-' + chapter, className: 'sd-att-card' },
         h('div', { className: 'sd-att-card-head' },
           h('div', { className: 'sd-att-chapter' },
-            `第 ${chapter} 章`,
+            '第 ' + chapter + ' 章',
             chapterTitle ? h('span', { className: 'sd-att-chapter-title' }, chapterTitle) : null),
-          h('span', { className: `sd-att-type ${ATTENTION_TYPE_CLASS[row.type] ?? ''}` },
+          h('span', { className: 'sd-att-type ' + (ATTENTION_TYPE_CLASS[row.type] ?? '') },
             h('span', { className: 'sd-att-swatch' }),
             ATTENTION_TYPE_LABEL[row.type] ?? '未分型'),
-          h('span', { className: `sd-att-state sd-att-state-${state.key}`, title: '已闭环 = 设计 + 实测都有；待冷读 = 有设计没实测；缺设计 = 有实测没设计；空白 = 都没有' }, state.label),
+          h('span', { className: 'sd-att-state sd-att-state-' + state.key, title: '已闭环 = 设计 + 实测都有；待冷读 = 有设计没实测；缺设计 = 有实测没设计；空白 = 都没有' }, state.label),
           needsDesign ? h('span', { className: 'sd-att-design-hint' }, '补设计：点页面顶部「＋ 加入清单：AI 补齐注意力机制」') : null,
           score !== null
-            ? h('span', { className: `sd-att-score${attentionScoreTone(score)}` }, String(score), h('span', { className: 'sd-att-score-unit' }, '/100'))
+            ? h('span', { className: 'sd-att-score' + attentionScoreTone(score) }, String(score), h('span', { className: 'sd-att-score-unit' }, '/100'))
             : h('span', { className: 'sd-att-score sd-att-tone-missing' }, '未测'),
-          design !== null ? h('span', { className: 'sd-att-design', title: '设计时定下的目标分' }, `目标 ${design}`) : null,
+          design !== null ? h('span', { className: 'sd-att-design', title: '设计时定下的目标分' }, '目标 ' + design) : null,
           gap !== null && Math.abs(gap) >= 20
-            ? h('span', { className: `sd-att-gap${gap < 0 ? ' sd-att-gap-bad' : ''}`, title: '目标分与实测分差 ≥20：设计可能没兑现，值得复读这一章' }, `Δ ${gap > 0 ? '+' : ''}${gap}`)
+            ? h('span', { className: 'sd-att-gap' + (gap < 0 ? ' sd-att-gap-bad' : ''), title: '目标分与实测分差 ≥20：设计可能没兑现，值得复读这一章' }, 'Δ ' + (gap > 0 ? '+' : '') + gap)
             : null,
-          row.verdict ? h(Tag, { tone: verdictTone }, `下一章：${row.verdict}`) : null,
-          row.weakest ? h('span', { className: 'sd-att-meta' }, `最弱：${ATTENTION_WEAKEST_LABEL[row.weakest] ?? row.weakest}`) : null,
+          row.verdict ? h(Tag, { tone: verdictTone }, '下一章：' + row.verdict) : null,
+          row.weakest ? h('span', { className: 'sd-att-meta' }, '最弱：' + (ATTENTION_WEAKEST_LABEL[row.weakest] ?? row.weakest)) : null,
           row.status ? h(Tag, { tone: 'muted' }, ATTENTION_STATUS_LABEL[row.status] ?? row.status) : null,
-          h('div', { className: 'sd-att-card-actions' }, h(Btn, { small: true, onClick: () => onEdit(row) }, '编辑'))),
+          latestHistory ? h('span', { className: 'sd-att-fixhist', title: '最近一次冷读 / 复测的分数变化' }, attentionHistoryText(latestHistory)) : null,
+          row.recheckPending ? h(Tag, { tone: 'warn' }, '改了待复测') : null,
+          h('div', { className: 'sd-att-card-actions' },
+            projectId ? h(Btn, { small: true, disabled: !!fixBusy, onClick: () => sendFix('fix') }, fixBusy === 'fix' ? '…' : '提分方案') : null,
+            projectId ? h(Btn, { small: true, disabled: !!fixBusy, onClick: () => sendFix('recheck') }, fixBusy === 'recheck' ? '…' : '复测') : null,
+            h(Btn, { small: true, onClick: () => onEdit(row) }, '编辑'))),
         row.dropRisk ? h('div', { className: 'sd-att-drop' }, h('strong', null, '弃读点'), h('span', null, row.dropRisk)) : null,
+        dropPoints.length > 0 ? h('div', { className: 'sd-att-dropquotes' }, dropPoints.slice(0, 3).map((item, index) => h('div', { key: 'drop-' + index, className: 'sd-att-dropquote' },
+          h('div', { className: 'sd-att-dropquote-quote' }, '「' + String(item.quote ?? '') + '」'),
+          item.why ? h('div', { className: 'sd-att-dropquote-why' }, item.why) : null))) : null,
+        breakdown ? h('div', { className: 'sd-att-bd' },
+          h('div', { className: 'sd-att-bd-title' }, '四拍实测（0–25，<' + ATTENTION_BEAT_WEAK + ' 标红）'),
+          h('div', { className: 'sd-att-bd-grid' }, ATTENTION_BEAT_ORDER.map((key) => {
+            const value = breakdown[key]
+            if (value === null) return null
+            const pct = Math.max(3, Math.round((value / ATTENTION_BEAT_MAX) * 100))
+            return h('div', { key, className: 'sd-att-bd-item' + (value < ATTENTION_BEAT_WEAK ? ' sd-att-bd-weak' : '') },
+              h('div', { className: 'sd-att-bd-top' },
+                h('span', { className: 'sd-att-bd-label' }, ATTENTION_BEAT_LABEL[key] ?? key),
+                h('span', { className: 'sd-att-bd-num' }, value + '/' + ATTENTION_BEAT_MAX)),
+              h('div', { className: 'sd-att-bd-track' }, h('div', { className: 'sd-att-bd-fill', style: { width: pct + '%' } })))
+          }))) : null,
         h('div', { className: 'sd-att-beats' }, ATTENTION_BEATS.map(([key, label, placeholder]) => h('div', { key, className: 'sd-att-beat' },
           h('div', { className: 'sd-att-beat-label' }, label),
-          h('div', { className: `sd-att-beat-text${String(row[key] ?? '').trim() ? '' : ' sd-att-beat-empty'}` }, String(row[key] ?? '').trim() || placeholder)))),
+          h('div', { className: 'sd-att-beat-text' + (String(row[key] ?? '').trim() ? '' : ' sd-att-beat-empty') }, String(row[key] ?? '').trim() || placeholder)))),
+        fixLog.length > 0 || fixPlan || latestHistory
+          ? h('div', { className: 'sd-att-fixmeta' },
+              fixLog.length > 0 ? h('span', { className: 'sd-att-fixmeta-item' }, '已提分 ' + fixLog.length + ' 次' + (row.lastFixAt ? ' · 最近 ' + relativeTime(row.lastFixAt) : '')) : null,
+              fixPlan && Number(fixPlan.expectedGainTotal) ? h('span', { className: 'sd-att-fixmeta-item' }, '上轮方案预计 +' + Number(fixPlan.expectedGainTotal) + (Number(fixPlan.fixCount) ? '（' + Number(fixPlan.fixCount) + ' 条）' : '')) : null,
+              latestHistory ? h('span', { className: 'sd-att-fixmeta-item' }, attentionHistoryText(latestHistory)) : null)
+          : null,
         String(row.emotion ?? '').trim() ? h('div', { className: 'sd-att-emotion' }, h('strong', null, '情绪'), h('span', null, row.emotion)) : null,
         String(row.question ?? '').trim() ? h('div', { className: 'sd-att-question' }, h('strong', null, '读者最想知道'), h('span', null, row.question)) : null,
         String(row.detail ?? '').trim()
@@ -5578,22 +7351,22 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
           : null,
         h('div', { className: 'sd-att-aggs' },
           h('details', { className: 'sd-att-agg' },
-            h('summary', null, `🧩 本章伏笔 · 埋 ${subs.plants.length} / 收 ${subs.payoffs.length}`),
+            h('summary', null, '🧩 本章伏笔 · 埋 ' + subs.plants.length + ' / 收 ' + subs.payoffs.length),
             h('div', { className: 'sd-att-agg-body' },
-              subs.plants.map((item, index) => aggRow(`plant-${index}`, `埋：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '未回收')),
-              subs.payoffs.map((item, index) => aggRow(`payoff-${index}`, `收：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '计划回收')),
+              subs.plants.map((item, index) => aggRow('plant-' + index, '埋：' + (item.title ?? '未命名'), item.status === 'paid' ? '已回收' : '未回收')),
+              subs.payoffs.map((item, index) => aggRow('payoff-' + index, '收：' + (item.title ?? '未命名'), item.status === 'paid' ? '已回收' : '计划回收')),
               subs.plants.length + subs.payoffs.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有埋设或回收伏笔') : null,
               onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('foreshadow') }, '去伏笔页维护')) : null)),
           h('details', { className: 'sd-att-agg' },
-            h('summary', null, `⚔️ 本章冲突 · 引爆 ${subs.conflicts.length}`),
+            h('summary', null, '⚔️ 本章冲突 · 引爆 ' + subs.conflicts.length),
             h('div', { className: 'sd-att-agg-body' },
-              subs.conflicts.map((item, index) => aggRow(`conflict-${index}`, item.title ?? '未命名', CONFLICT_STATUS[item.status] ?? item.status ?? '—')),
+              subs.conflicts.map((item, index) => aggRow('conflict-' + index, item.title ?? '未命名', CONFLICT_STATUS[item.status] ?? item.status ?? '—')),
               subs.conflicts.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有计划引爆 / 解决的冲突') : null,
               onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('conflicts') }, '去冲突页维护')) : null)),
           h('details', { className: 'sd-att-agg' },
-            h('summary', null, `✨ 本章高光 · ${subs.highlights.length} 条`),
+            h('summary', null, '✨ 本章高光 · ' + subs.highlights.length + ' 条'),
             h('div', { className: 'sd-att-agg-body' },
-              subs.highlights.map((item, index) => aggRow(`highlight-${index}`, String(item.text ?? '未命名').slice(0, 120), displayValue('type', item.type))),
+              subs.highlights.map((item, index) => aggRow('highlight-' + index, String(item.text ?? '未命名').slice(0, 120), displayValue('type', item.type))),
               subs.highlights.length === 0 ? h('div', { className: 'sd-hint' }, '本章还没有记录高光') : null,
               onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('highlights') }, '去高光页维护')) : null))),
       )
@@ -5612,6 +7385,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       const meta = KIND_META.attention
       const [editing, setEditing] = useState(null)
       const stats = attentionStats(bundle)
+      const fix = attentionFixStats(bundle)
       const rows = stats.rows
       const ordered = rows.slice().reverse() // 最新章在前
       const unmarked = stats.unmarked
@@ -5632,13 +7406,14 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
             onAddCart ? h(Btn, { onClick: () => onAddCart(ATTENTION_DESIGN_CART) }, '＋ 加入清单：AI 补齐注意力机制') : null,
             onGoTab ? h(Btn, { onClick: () => onGoTab('agents') }, '去分工页冷读') : null,
             h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        h(AttentionStatsBar, { stats }),
+        h(AttentionStatsBar, { stats, fix }),
+        h(AttentionFixBoard, { bundle, projectId, onGoTab }),
         h(AttentionChart, { rows }),
         rows.length === 0
           ? h(Empty, null, emptyCopy)
           : h('section', { className: 'sd-att-cards' },
               h('h3', { className: 'sd-h3' }, `章节诊断（${rows.length}）· 最新章在前`),
-              ordered.map((row) => h(AttentionCard, { key: row.id ?? `att-${row.chapter}`, row, bundle, onEdit: setEditing, onGoTab }))),
+              ordered.map((row) => h(AttentionCard, { key: row.id ?? `att-${row.chapter}`, row, bundle, projectId, onEdit: setEditing, onGoTab }))),
         unmarked.length > 0
           ? h('section', { className: 'sd-section sd-mt' },
               h('h3', { className: 'sd-h3' }, `未标注意力的章节（${unmarked.length}）`),
@@ -5649,10 +7424,12 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       )
     }
 
-    /** 总览页的注意力卡：平均分（大字）+ 最低三章 + 未标章数 + 预警数 + 补齐设计入口。 */
+    /** 总览页的注意力卡：平均分（大字）+ 最低三章 + 未标章数 + 预警数 + 提分闭环 + 补齐设计入口。 */
     function AttentionOverviewCard({ bundle, onGoTab, onAddCart }) {
       const stats = attentionStats(bundle)
+      const fix = attentionFixStats(bundle)
       const hasAny = stats.rows.length > 0
+      const deltaText = fix.avgDelta === null ? '—' : attentionDeltaText(fix.avgDelta)
       return h('section', { className: 'sd-section sd-mt' },
         h('div', { className: 'sd-att-ov-head' },
           h('h3', { className: 'sd-h3 sd-att-ov-title' }, '⚡ 注意力'),
@@ -5662,26 +7439,30 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         hasAny
           ? h('div', { className: 'sd-att-ov' },
               h('div', { className: 'sd-att-ov-bigwrap' },
-                h('div', { className: `sd-att-ov-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
+                h('div', { className: 'sd-att-ov-big' + attentionScoreTone(stats.average) }, stats.average === null ? '—' : String(stats.average)),
                 h('div', { className: 'sd-att-ov-label' }, '全书平均分')),
               h('div', { className: 'sd-att-ov-mini' },
                 h('div', { className: 'sd-att-ov-mini-label' }, '最低三章'),
                 stats.lowest.length === 0
                   ? h('div', { className: 'sd-hint' }, '还没有实测分')
-                  : stats.lowest.map((row) => h('div', { key: row.id ?? `ov-low-${row.chapter}`, className: 'sd-att-ov-row' },
-                      h('span', null, `第 ${Number(row.chapter)} 章`),
-                      h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`)))),
+                  : stats.lowest.map((row) => h('div', { key: row.id || 'ov-low-' + row.chapter, className: 'sd-att-ov-row' },
+                      h('span', null, '第 ' + Number(row.chapter) + ' 章'),
+                      h('span', { className: 'sd-att-lowscore' + attentionScoreTone(row.score) }, Number(row.score) + ' 分')))),
               h('div', { className: 'sd-att-ov-mini' },
                 h('div', { className: 'sd-att-ov-mini-label' }, '未标章数'),
                 h('div', { className: 'sd-att-ov-num' }, String(stats.unmarked.length)),
                 h('div', { className: 'sd-hint' }, '有正文但没标')),
               h('div', { className: 'sd-att-ov-mini' },
                 h('div', { className: 'sd-att-ov-mini-label' }, '疲劳 / 骤降预警'),
-                h('div', { className: `sd-att-ov-num${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
+                h('div', { className: 'sd-att-ov-num' + (stats.warnings.length > 0 ? ' sd-att-tone-mid' : '') }, String(stats.warnings.length)),
                 stats.warnings.length > 0
                   ? h('div', { className: 'sd-hint', title: stats.warnings.map((warning) => warning.text).join('\n') }, stats.warnings[0].text)
-                  : h('div', { className: 'sd-hint' }, '暂无')))
-          : h('p', { className: 'sd-desc' }, '还没有注意力记录：老作品点上方「＋ 加入清单：AI 补齐注意力机制」补齐，写下一章方案时 AI 也会自动带设计；冷读打分在分工页的独立审稿人卡片。有了分数，这里会显示平均分、最低三章、未标章数和疲劳 / 骤降预警。'),
+                  : h('div', { className: 'sd-hint' }, '暂无')),
+              h('div', { className: 'sd-att-ov-mini' },
+                h('div', { className: 'sd-att-ov-mini-label' }, '提分闭环'),
+                h('div', { className: 'sd-att-ov-num' }, String(fix.pendingRecheck)),
+                h('div', { className: 'sd-hint' }, '待复测 · 平均 Δ ' + deltaText)))
+          : h('p', { className: 'sd-desc' }, '还没有注意力记录：老作品点上方「＋ 加入清单：AI 补齐注意力机制」补齐，写下一章方案时 AI 也会自动带设计；冷读打分在分工页的独立审稿人卡片。有了分数，这里会显示平均分、最低三章、未标章数、疲劳 / 骤降预警和提分闭环。'),
       )
     }
 
@@ -5910,9 +7691,9 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                   h('option', { value: '__new__' }, '＋ 在本工作区新开对话'))),
               h('p', { className: 'sd-hint' }, isNewTarget ? '会新开一个对话并在里面执行，不影响你正在用的对话。' : `会发到你选中的「${chosenLabel || '会话'}」，不会改到别的对话。`),
               reviewOnly ? h('div', null,
-                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'proposals', onChange: () => setReviewMode('proposals') }), '这批审稿项：批量生成修订提案（逐条出一个 chapter 提案，正文不直接改）'),
+                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'proposals', onChange: () => setReviewMode('proposals') }), '这批审稿项：批量生成修订提案（注意力类出段落补丁提案，其余出整章提案；都不直接改正文）'),
                 h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'generic', onChange: () => setReviewMode('generic') }), '按普通清单处理（交对话逐项处理）')) : null,
-              toProposals ? h('span', { className: 'sd-hint' }, '提案会进「提案」页等你验收；这条链路不做多 Agent 派单。') : h('div', null,
+              toProposals ? h('span', { className: 'sd-hint' }, '提案会进「提案」页等你验收；注意力类问题会合并成 attention-fix 段落补丁提案（带 reviewIds，采纳后关联审稿自动标记已修）；这条链路不做多 Agent 派单。') : h('div', null,
                 h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
                 h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: multiAgent, onChange: (e) => setMultiAgent(e.target.checked) }), '按分工派子 Agent（总编拆单 / 多角色执行）'))),
             h('div', { className: 'sd-form-actions' },
@@ -6292,7 +8073,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
                   tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
                   tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
                   tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onGoTab: setTab, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
-                  tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
+                  tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onGoTab: setTab, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
                   tab === 'settings' ? h(SettingsTab, { bundle, projectId, onChanged: () => refresh(projectId), onProjectDeleted: () => { setProjectId(''); refresh('') } }) : null,
                 ),
               ),
@@ -6488,6 +8269,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-inline-row{display:flex;gap:8px;align-items:center}
 .sd-inline-row .sd-input{flex:1}
 .sd-error-inline{margin:8px 0;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b);font-size:12px}
+.sd-warn-inline{margin:8px 0;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-warning-primary,#b7791f) 12%,transparent);color:var(--dsw-alias-state-warning-primary,#b7791f);font-size:12px}
 .sd-notice{padding:7px 10px;border-radius:8px;margin-bottom:10px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent);color:var(--dsw-alias-state-success-primary,#1e8449);font-size:11.5px}
 .sd-autosave{color:var(--dsw-alias-brand-primary,#247bbf)}
 .sd-preset-current{border-color:var(--dsw-alias-brand-primary,#247bbf)}
@@ -6747,7 +8529,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-att-ov-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .sd-att-ov-head{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
 .sd-att-ov-title{margin:0}
-.sd-att-ov{display:grid;grid-template-columns:auto repeat(3,minmax(0,1fr));gap:16px;align-items:start;margin-top:6px}
+.sd-att-ov{display:grid;grid-template-columns:auto repeat(4,minmax(0,1fr));gap:16px;align-items:start;margin-top:6px}
 .sd-att-ov-bigwrap{display:flex;flex-direction:column;gap:2px;padding-right:16px;border-right:1px solid var(--dsw-alias-border-l2,#eee)}
 .sd-att-ov-big{font-size:38px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
 .sd-att-ov-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
@@ -6755,6 +8537,59 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 .sd-att-ov-mini-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
 .sd-att-ov-num{font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
 .sd-att-ov-row{display:flex;justify-content:space-between;gap:8px}
+/* 🎯 提分工作台 + 四拍实测条 + 提案 before/after 对照 */
+.sd-att-fix{padding:12px 14px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 30%,transparent);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 6%,transparent),transparent 70%),var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:9px}
+.sd-att-fix-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.sd-att-fix-intro{min-width:0;flex:1 1 320px}
+.sd-att-fix-intro .sd-h3{margin:0 0 4px}
+.sd-att-fix-hint{margin:0 0 2px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-primary,#333)}
+.sd-att-fix-actions{display:flex;gap:8px;flex-wrap:wrap}
+.sd-att-fix-meta{display:flex;gap:6px 14px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);font-variant-numeric:tabular-nums}
+.sd-att-fix-empty{padding:10px 12px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:9px;font-size:12px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-att-fix-table{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;overflow:hidden;overflow-x:auto;background:var(--dsw-alias-bg-base,#fff)}
+.sd-att-fix-row{display:grid;grid-template-columns:28px 78px 56px 56px 84px minmax(96px,1fr) 112px 96px;gap:10px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px;min-width:640px}
+.sd-att-fix-row:last-child{border-bottom:0}
+.sd-att-fix-row.is-selected{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent)}
+.sd-att-fix-row-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
+.sd-att-fix-num{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-att-fix-check{display:flex;align-items:center;justify-content:center}
+.sd-att-fix-check input{margin:0;cursor:pointer;accent-color:var(--dsw-alias-brand-primary,#247bbf)}
+.sd-att-fix-score{font-weight:700;color:var(--dsw-alias-label-primary,#222);font-size:13px}
+.sd-att-fix-gain{font-weight:700;color:var(--dsw-alias-state-warn-primary,#d68910);font-variant-numeric:tabular-nums;white-space:nowrap}
+.sd-att-fix-weak{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#555)}
+.sd-att-fix-row-actions{display:flex;justify-content:flex-end}
+.sd-att-bd{display:flex;flex-direction:column;gap:5px}
+.sd-att-bd-title{font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666)}
+.sd-att-bd-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:6px 12px}
+.sd-att-bd-item{min-width:0}
+.sd-att-bd-top{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
+.sd-att-bd-label{font-size:11px;color:var(--dsw-alias-label-secondary,#555)}
+.sd-att-bd-num{font-size:10.5px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary,#888)}
+.sd-att-bd-track{height:6px;margin-top:3px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
+.sd-att-bd-fill{height:100%;border-radius:4px;background:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-att-bd-weak .sd-att-bd-label,.sd-att-bd-weak .sd-att-bd-num{color:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-att-bd-weak .sd-att-bd-fill{background:var(--dsw-alias-state-error-primary,#c0392b)}
+.sd-att-dropquotes{display:flex;flex-direction:column;gap:5px}
+.sd-att-dropquote{padding:6px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 7%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 22%,transparent);font-size:11.5px;line-height:1.6}
+.sd-att-dropquote-quote{color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
+.sd-att-dropquote-why{margin-top:3px;color:var(--dsw-alias-label-secondary,#666);white-space:pre-wrap;word-break:break-word}
+.sd-att-fixmeta{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-secondary,#666);font-variant-numeric:tabular-nums}
+.sd-att-fixhist{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);color:var(--dsw-alias-state-success-primary,#1e8449);font-variant-numeric:tabular-nums}
+.sd-att-patchbody{display:flex;flex-direction:column;gap:8px}
+.sd-att-patchintro{margin:0}
+.sd-att-patch{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:8px 10px;background:var(--dsw-alias-bg-base,#fff);display:flex;flex-direction:column;gap:6px}
+.sd-att-patch-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sd-att-patch-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.sd-att-patch-side{border-radius:7px;padding:6px 8px;min-width:0}
+.sd-att-patch-before{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 6%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 22%,transparent)}
+.sd-att-patch-after{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 7%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 24%,transparent)}
+.sd-att-patch-label{font-size:10px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:3px}
+.sd-att-patch-text{font-family:var(--dsw-font-mono,ui-monospace,Menlo,monospace);font-size:11.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto}
+.sd-att-patch-why{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);white-space:pre-wrap;word-break:break-word}
+.sd-att-fix-note{margin:6px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666)}
+.sd-att-review-links{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0}
+.sd-recheck-hint{color:var(--dsw-alias-state-warn-primary,#d68910)}
+@media (max-width:760px){.sd-att-patch-grid{grid-template-columns:1fr}.sd-att-fix-actions{width:100%}.sd-att-fix-actions .sd-btn{flex:1 1 auto}}
 /* v0.6：人物详情弹窗 */
 .sd-modal-head .sd-char-name{flex:0 0 auto;font-size:14px}
 .sd-char-actions{display:flex;align-items:center;gap:6px;margin-left:auto}
@@ -7223,6 +9058,109 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
 @media (max-width: 900px){.sd-att-ov{grid-template-columns:1fr 1fr}.sd-att-ov-bigwrap{grid-column:1/-1;border-right:0;padding-right:0;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);padding-bottom:8px}}
 @media (max-width: 760px){.sd-att-ov{grid-template-columns:1fr}.sd-att-card-actions{margin-left:0}}
 @media (max-width: 760px){.sd-fresh-actions{flex-direction:column;align-items:stretch}.sd-fresh-pick{flex-direction:column;align-items:flex-start}.sd-fresh-select{width:100%;max-width:none}.sd-fresh-compact .sd-btn{margin-left:0;width:100%}}
+/* 全文改动（revision） */
+.sd-rev-page{display:flex;flex-direction:column;gap:14px}
+.sd-rev-status{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sd-rev-status-meta{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px}
+.sd-rev-audit{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;line-height:1.65}
+.sd-rev-tier-meta{display:flex;flex-direction:column;gap:5px;margin:2px 0 12px;padding:10px 12px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
+.sd-rev-tier-line{display:flex;gap:8px;font-size:11.5px;line-height:1.65;color:var(--dsw-alias-label-secondary,#555);word-break:break-word}
+.sd-rev-tier-key{flex:0 0 34px;color:var(--dsw-alias-label-tertiary,#888);font-weight:600}
+.sd-rev-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.sd-rev-chips{display:flex;gap:5px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.sd-rev-impact-row{display:grid;grid-template-columns:76px minmax(0,1fr);gap:10px;align-items:start;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee)}
+.sd-rev-impact-row:last-child{border-bottom:0}
+.sd-rev-impact-ch{font-size:11.5px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.sd-rev-impact-body{min-width:0;display:flex;flex-direction:column;gap:2px}
+.sd-rev-impact-title{font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#222);word-break:break-word}
+.sd-rev-table{overflow-x:auto}
+.sd-rev-tr{display:grid;grid-template-columns:46px minmax(150px,1fr) 66px 92px 84px;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px;min-width:540px}
+.sd-rev-tr:last-child{border-bottom:0}
+.sd-rev-tr-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
+.sd-rev-tr-num{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#666)}
+.sd-rev-tr-main{min-width:0;word-break:break-word}
+.sd-rev-deai-boundary{display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:8px 12px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#f6f6f6)}
+.sd-rev-link{align-self:flex-start;font-size:11.5px;color:var(--dsw-alias-brand-primary,#247bbf);text-decoration:none}
+.sd-rev-link:hover{text-decoration:underline}
+.sd-rev-md{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.sd-rev-flags{display:flex;flex-direction:column;gap:4px;margin-top:10px}
+.sd-rev-flag{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555)}
+.sd-rev-flag-key{flex:0 0 150px;color:var(--dsw-alias-label-primary,#333);font-weight:600;word-break:break-word}
+.sd-rev-flag-val{font-variant-numeric:tabular-nums;word-break:break-word}
+.sd-rev-tiers{display:flex;flex-direction:column;gap:6px;margin:2px 0 4px}
+.sd-rev-tier-option{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-layer-2,#fff);cursor:pointer}
+.sd-rev-tier-option-on{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 5%,transparent)}
+.sd-rev-tier-option input{width:14px;height:14px;margin-top:2px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer}
+.sd-rev-tier-option-body{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sd-rev-tier-option-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-primary,#222)}
+.sd-rev-tier-option-hint{font-size:11px;line-height:1.55;color:var(--dsw-alias-label-secondary,#666);word-break:break-word}
+.sd-rev-goalmodes{display:flex;gap:14px;flex-wrap:wrap;padding:4px 0}
+.sd-rev-l4-note{margin:2px 0 10px}
+.sd-rev-plan-summary{margin:8px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666)}
+/* 版本（snapshot） */
+.sd-snap-page{display:flex;flex-direction:column;gap:14px}
+.sd-snap-table{overflow-x:auto}
+.sd-snap-tr{display:grid;grid-template-columns:116px minmax(110px,1fr) 92px 56px 72px minmax(90px,1fr) 196px;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px;min-width:760px}
+.sd-snap-tr:last-child{border-bottom:0}
+.sd-snap-tr>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-snap-tr-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
+.sd-snap-tr-active{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 5%,transparent)}
+.sd-snap-num{font-variant-numeric:tabular-nums;text-align:right;color:var(--dsw-alias-label-secondary,#666)}
+.sd-snap-run{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-snap-row-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap}
+.sd-snap-overview{margin:8px 0 10px;font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary,#555);font-variant-numeric:tabular-nums}
+.sd-snap-diff-block{margin-top:10px;padding-top:8px;border-top:1px dashed var(--dsw-alias-border-l2,#ddd)}
+.sd-snap-diff-title{font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:4px}
+.sd-snap-path{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0;border-bottom:1px solid var(--dsw-alias-border-l2,#f0f0f0);min-width:0}
+.sd-snap-path:last-child{border-bottom:0}
+.sd-snap-path-text{min-width:0;font-family:var(--dsw-font-mono,ui-monospace,Menlo,monospace);font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555);word-break:break-all}
+.sd-snap-path .sd-btn{flex:0 0 auto}
+/* ── 版本对齐 ─────────────────────────────────────────────── */
+.sd-veralign-page{display:flex;flex-direction:column;gap:10px}
+.sd-veralign-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px}
+.sd-veralign-card{padding:9px 11px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);min-width:0}
+.sd-veralign-card-label{font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:3px}
+.sd-veralign-card-value{font-size:19px;font-weight:650;line-height:1.25;color:var(--dsw-alias-label-primary,#1a1a1a);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-veralign-card-value-sm{font-size:13px;font-weight:600}
+.sd-veralign-warn{color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-veralign-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.sd-veralign-notice{margin:2px 0;padding:8px 11px;border-radius:8px;font-size:12.5px;line-height:1.6;border:1px solid var(--dsw-alias-border-l2,#dbe6f5);background:var(--dsw-alias-bg-layer-2,#f1f6fd);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.sd-veralign-fallback{padding:16px 14px;border:1px dashed var(--dsw-alias-border-l1,#d8d8d8);border-radius:8px;font-size:13px;line-height:1.7;color:var(--dsw-alias-label-secondary,#555);display:flex;flex-direction:column;gap:6px}
+.sd-veralign-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
+.sd-veralign-table{min-width:1080px}
+.sd-veralign-tr{display:grid;grid-template-columns:minmax(140px,150px) 96px 78px 78px 64px minmax(180px,1fr) 62px minmax(140px,1fr) 150px;gap:8px;align-items:center;padding:7px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#f0f0f0);font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.sd-veralign-tr:last-child{border-bottom:0}
+.sd-veralign-tr:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.03))}
+.sd-veralign-tr-head{font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-alias-bg-layer-2,#f7f7f7);position:sticky;top:0;z-index:1}
+.sd-veralign-tr-head:hover{background:var(--dsw-alias-bg-layer-2,#f7f7f7)}
+.sd-veralign-domain{display:flex;align-items:center;gap:6px;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sd-veralign-icon{flex:0 0 auto;font-size:13px}
+.sd-veralign-num{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#555)}
+.sd-veralign-row-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:nowrap}
+.sd-veralign-row-actions .sd-btn{flex:0 0 auto}
+.sd-veralign-badge{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;line-height:1.7;white-space:nowrap;border:1px solid transparent}
+.sd-veralign-badge-aligned{color:var(--dsw-alias-state-success-primary,#1e8449);background:var(--dsw-alias-bg-layer-2,#eaf7ef);border-color:var(--dsw-alias-state-success-primary,#1e8449)}
+.sd-veralign-badge-behind{color:var(--dsw-alias-state-warn-primary,#d68910);background:var(--dsw-alias-bg-layer-2,#fdf4e5);border-color:var(--dsw-alias-state-warn-primary,#d68910)}
+.sd-veralign-badge-pending{color:var(--dsw-alias-brand-primary,#2d6cdf);background:var(--dsw-alias-bg-layer-2,#eef4ff);border-color:var(--dsw-alias-brand-primary,#2d6cdf)}
+.sd-veralign-badge-untracked{color:var(--dsw-alias-label-tertiary,#8a8a8a);background:var(--dsw-alias-bg-layer-2,#f4f4f4);border-color:var(--dsw-alias-border-l1,#d8d8d8)}
+.sd-veralign-badge-idle{color:var(--dsw-alias-label-tertiary,#8a8a8a);background:var(--dsw-alias-bg-layer-2,#f7f7f7);border-color:var(--dsw-alias-border-l2,#e6e6e6)}
+.sd-veralign-log{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fff)}
+.sd-veralign-logrow{display:grid;grid-template-columns:54px 78px 72px minmax(0,1fr) 96px;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#f0f0f0);font-size:12px;line-height:1.5}
+.sd-veralign-logrow:last-child{border-bottom:0}
+.sd-veralign-logversion{font-weight:650;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.sd-veralign-logkind{color:var(--dsw-alias-label-secondary,#666)}
+.sd-veralign-logchapter{color:var(--dsw-alias-brand-primary,#2d6cdf);font-variant-numeric:tabular-nums}
+.sd-veralign-logtitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.sd-veralign-logtime{color:var(--dsw-alias-label-tertiary,#8a8a8a);text-align:right;font-variant-numeric:tabular-nums}
+.sd-veralign-fold{margin:4px 0 0;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:8px;padding:8px 11px;background:var(--dsw-alias-bg-layer-1,#fff)}
+.sd-veralign-fold>summary{cursor:pointer;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#555);list-style:none}
+.sd-veralign-fold>summary::-webkit-details-marker{display:none}
+.sd-veralign-fold>summary::before{content:'▸ ';color:var(--dsw-alias-label-tertiary,#999)}
+.sd-veralign-fold[open]>summary::before{content:'▾ '}
+.sd-veralign-fold[open]>summary{margin-bottom:8px}
+.sd-veralign-plan-cards{margin:8px 0}
+@media (max-width:760px){.sd-veralign-tr{grid-template-columns:minmax(120px,140px) 92px 70px 70px 58px minmax(150px,1fr) 56px minmax(120px,1fr) 128px}.sd-veralign-row-actions .sd-btn{flex:1 1 auto}.sd-veralign-logrow{grid-template-columns:48px 72px minmax(0,1fr)}.sd-veralign-logchapter,.sd-veralign-logtime{display:none}.sd-veralign-actions .sd-btn{flex:1 1 auto}}
+@media (max-width:760px){.sd-rev-tr{grid-template-columns:40px minmax(110px,1fr) 74px 78px;min-width:0}.sd-rev-tr>:nth-child(3){display:none}.sd-rev-actions .sd-btn{flex:1 1 auto}.sd-rev-tier-key{flex-basis:40px}}
 @media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
 `
 
