@@ -1085,7 +1085,7 @@ window.__ModuleLoader__.load({
         )
       } else if (step === 2) {
         body = h(Fragment, null,
-          h('p', { className: 'nd-hint' }, '再选写作口径：章数、字数、视角、风格规则、禁忌、审稿重点都会写进预设，AI 生成与审稿都按它来。没想好就选「自定义（让 AI 定）」，方案交给 AI——但它必须先出「注意力总设计」（核心钩子 / 前 3 章留人 / 主类型轮换 / 兑现节奏 / cliff 规则），大纲每章也带四拍设计。之后还能在「设置」里改。'),
+          h('p', { className: 'nd-hint' }, '再选写作口径：章数、字数、视角、风格规则、禁忌、审稿重点都会写进预设，AI 生成与审稿都按它来。没想好就选「自定义（让 AI 定）」。勾住读者的标准只有一条：读者会不会继续读；写完由冷读独立打分。之后还能在「设置」里改。'),
           presets.length === 0
             ? (error ? null : h(Loading, null, '正在读取预设…'))
             : h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 } }, options.map(presetCard)),
@@ -1449,7 +1449,7 @@ window.__ModuleLoader__.load({
           ),
           h('div', { className: 'nd-principle-bar', title: '创作第一原则：所有写/改正文的工作单首行都注入它' },
             h('span', { className: 'nd-principle-slogan' }, '⚡ ATTENTION IS ALL YOU NEED'),
-            h('span', { className: 'nd-principle-text' }, '怎么吸引读者怎么来，一切为读者服务；事实自洽是底线，不是目标。写/改正文前先定本章注意力设计（四拍 + designScore）。'),
+            h('span', { className: 'nd-principle-text' }, '怎么吸引读者怎么来，一切为读者服务；事实自洽是底线，不是目标。写/改正文前先写一句本章的注意力目标：这一章靠什么把读者拽着往下读。注意力唯一的验收是冷读。'),
           ),
           storage.data && storage.data.engine && storage.data.engine !== 'sqlite'
             ? h('div', { className: 'nd-storage-warn', title: '存储降级提示：可在设置页查看详情' },
@@ -2558,11 +2558,10 @@ window.__ModuleLoader__.load({
       const score = attentionScore(row)
       const canEdit = !!(projectId && chapter)
       const startEdit = () => {
-        const next = {}
-        for (const beat of ATTENTION_BEATS) next[beat.id] = String(toNumber(beats[beat.id], 0))
-        setDraft(next)
+        // 冷读只记一个分数：四拍不再是评价标准
+        setDraft({ score: String(score == null ? '' : score) })
         setVerdict(String((row && row.verdict) || ''))
-        setWeakest(String((row && row.weakest) || ''))
+        setWeakest('')
         setError('')
         setEditing(true)
       }
@@ -2571,9 +2570,7 @@ window.__ModuleLoader__.load({
         setSaving(true)
         setError('')
         try {
-          const breakdown = {}
-          for (const beat of ATTENTION_BEATS) breakdown[beat.id] = clamp(toNumber(draft[beat.id], 0), 0, beat.max)
-          await api('attention.merge', scope(projectId, { chapter, patch: { breakdown, verdict: verdict.trim(), weakest: weakest.trim() } }))
+          await api('attention.merge', scope(projectId, { chapter, patch: { score: clamp(toNumber(draft.score, 0), 0, 100), verdict: verdict.trim() } }))
           setEditing(false)
           if (onSaved) onSaved()
         } catch (err) {
@@ -2585,19 +2582,17 @@ window.__ModuleLoader__.load({
 
       if (editing) {
         return h('div', { className: 'nd-att' },
-          ATTENTION_BEATS.map((beat) => h('div', { className: 'nd-att-row', key: beat.id },
-            h('span', { className: 'nd-att-label' }, beat.label),
+          h('div', { className: 'nd-att-row' },
+            h('span', { className: 'nd-att-label' }, '注意力'),
             h(TextInput, {
               type: 'number',
-              min: 0,
-              max: beat.max,
-              value: draft[beat.id],
-              onChange: (value) => setDraft((state) => ({ ...state, [beat.id]: value })),
+              value: draft.score,
+              onChange: (value) => setDraft({ score: value }),
             }),
-            h('span', { className: 'nd-att-val' }, `/ ${beat.max}`),
-          )),
-          h(TextInput, { value: verdict, placeholder: '下一章意愿（会 / 不会）', onChange: setVerdict }),
-          h(TextInput, { value: weakest, placeholder: '最弱一环', onChange: setWeakest }),
+            h('span', { className: 'nd-att-val' }, '/ 100'),
+          ),
+          h(TextInput, { value: verdict, placeholder: '下一章意愿：会 / 犹豫 / 不会', onChange: setVerdict }),
+          h('p', { className: 'nd-hint' }, '冷读只记一个分数 + 地址评价；四拍不再评价正文。'),
           error ? h(Msg, { tone: 'error' }, error) : null,
           h('div', { className: 'nd-actions' },
             h(Btn, { small: true, kind: 'primary', onClick: save, disabled: saving }, saving ? '保存中…' : '保存实测'),
@@ -2613,20 +2608,19 @@ window.__ModuleLoader__.load({
               null,
               h('div', { className: 'nd-att-score' },
                 h('strong', null, score == null ? '—' : score),
-                h('span', null, '/ 100 总分'),
-                row.designScore != null ? h('span', { className: 'nd-muted' }, `设计分 ${row.designScore}`) : null,
+                h('span', null, '/ 100 注意力（冷读）'),
               ),
-              ATTENTION_BEATS.map((beat) => {
-                const value = toNumber(beats[beat.id], 0)
-                const ratio = clamp(value / beat.max, 0, 1)
-                return h('div', { className: 'nd-att-row', key: beat.id },
-                  h('span', { className: 'nd-att-label' }, beat.label),
-                  h('div', { className: 'nd-bar nd-att-bar' }, h('div', { className: `nd-bar-fill${ratio >= 0.8 ? ' nd-bar-ok' : ratio < 0.5 ? ' nd-bar-warn' : ''}`, style: { width: `${Math.round(ratio * 100)}%` } })),
-                  h('span', { className: 'nd-att-val' }, `${value}/${beat.max}`),
-                )
-              }),
               row.verdict ? h('p', { className: 'nd-hint' }, `下一章意愿：${row.verdict}`) : null,
-              row.weakest ? h('p', { className: 'nd-hint' }, `最弱一环：${row.weakest}`) : null,
+              Array.isArray(row.points) && row.points.length
+                ? h('div', { className: 'nd-att-points' },
+                    row.points.map((point, index) => h('div', { className: 'nd-att-point', key: index },
+                      h(Tag, { tone: point.kind === 'highlight' ? 'ok' : 'warn' }, point.kind === 'highlight' ? '高光' : '不足'),
+                      h('span', { className: 'nd-hint' }, point.para == null ? '' : `第 ${Number(point.para) + 1} 段`),
+                      h('p', { className: 'nd-att-point-text' }, String(point.comment || '')),
+                      point.quote ? h('p', { className: 'nd-hint' }, `原文：${String(point.quote).slice(0, 40)}`) : null,
+                    )),
+                  )
+                : h('p', { className: 'nd-hint' }, '还没有地址评价（冷读只给分数与亮点/不足）。'),
             )
           : h('p', { className: 'nd-muted nd-att-empty' }, '本章还没有注意力记录'),
         canEdit ? h('div', { className: 'nd-actions' }, h(Btn, { small: true, onClick: startEdit }, row ? '改实测分' : '记录实测分')) : null,
@@ -3151,7 +3145,7 @@ window.__ModuleLoader__.load({
                   className: 'nd-input nd-textarea',
                   rows: 3,
                   value: launcher.focus,
-                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章的章末牵引是否失效。留空则按四拍完整复测。' : '例：这一章读者容易弃读，重点看章末牵引；或：注意华羽生和小蝶的关系变化是否突兀。留空则按四路口径完整审。',
+                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章有没有让人想继续读。留空则按标准冷读。' : '例：这一章读者容易弃读，重点看章末牵引；或：注意华羽生和小蝶的关系变化是否突兀。留空则按四路口径完整审。',
                   onChange: (e) => setLauncher((prev) => (prev ? { ...prev, focus: e.target.value } : prev)),
                 }),
               ),
@@ -3838,7 +3832,7 @@ window.__ModuleLoader__.load({
         ),
         h('div', { className: 'nd-attention-note' },
           h('strong', null, '⚡ 第一步永远是注意力设计'),
-          h('span', null, '开工前先给本次范围每章提交四拍 + designScore（novel_desk_attention op="design"）；没有设计不许写/改正文，阶段 1 就是「先定注意力设计」。'),
+          h('span', null, '开工前先写一句本章的注意力目标（靠什么把读者拽着往下读）；不要求四拍。写完后冷读独立打分。'),
         ),
         notice && !run ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         runRes.loading && !runRes.data ? h(Loading, null, '正在读取全文动作…') : runRes.error ? h(ErrorBox, { error: runRes.error, onRetry: runRes.reload }) : content,
@@ -6154,6 +6148,7 @@ window.__ModuleLoader__.load({
       }
 
       const storageRes = useAsync(() => (projectId ? api('storage.status', scope(projectId)) : Promise.resolve(null)), [projectId])
+      const rolesRes = useAsync(() => api('roles.list'), [])
 
       const rootValue =
         (settingsRes.data && (settingsRes.data.dataRoot || settingsRes.data.root || settingsRes.data.dataDir)) ||
@@ -6176,6 +6171,19 @@ window.__ModuleLoader__.load({
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         settingsRes.error ? h(ErrorBox, { error: settingsRes.error, onRetry: () => settingsRes.reload() }) : null,
+        rolesRes.data && Array.isArray(rolesRes.data.roles)
+          ? h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' }, h('h3', null, '🧑‍🤝‍🧑 分工（7 角色）')),
+              h('p', { className: 'nd-hint' }, '每次派单指定一个角色、由子 agent 完成；主对话（编辑）只验收地址与格式，不重读正文。'),
+              h('div', { className: 'nd-role-list' },
+                rolesRes.data.roles.map((role) => h('div', { className: 'nd-role', key: role.id },
+                  h('strong', null, role.name),
+                  h('span', { className: 'nd-hint' }, ` ｜ ${role.when} ｜ 输出上限：${role.limit}`),
+                  h('p', { className: 'nd-hint' }, role.duty),
+                )),
+              ),
+            )
+          : null,
         storageRes.data
           ? h('section', { className: 'nd-card' },
               h('div', { className: 'nd-card-head' }, h('h3', null, '🗄️ 数据存储')),
@@ -6329,7 +6337,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}

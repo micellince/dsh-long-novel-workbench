@@ -24,6 +24,7 @@ import * as prompts from './lib/prompts.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
 import * as bookdb from './lib/bookdb.js'
 import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
+import { ROLES } from './lib/roles.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
@@ -62,6 +63,7 @@ export const READ_OPS = [
   'chat.sessions',
   'export.book',
   'storage.status',
+  'roles.list',
   'chapter.index',
   'opinions.list',
   'ledger.digest',
@@ -1285,6 +1287,8 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       if (version === undefined || version === null || String(version).trim() === '') throw invalid('缺少参数 version')
       return s.readChapterVersion(root, projectId, needNumber(payload, 'chapter'), String(version))
     }
+    case 'roles.list':
+      return { roles: ROLES }
     case 'storage.status': {
       const projectId = String(payload.projectId ?? '').trim()
       const dir = projectId ? await s.projectDir(root, projectId) : ''
@@ -1429,6 +1433,16 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const dir = await s.projectDir(root, projectId)
       const opinion = await bookdb.getOpinion(dir, id)
       if (!opinion) throw invalid('意见不存在')
+      if (opinion.kind === 'highlight') {
+        await bookdb.addHighlight(dir, {
+          chapter: opinion.chapter,
+          para: opinion.para,
+          quote: '',
+          comment: opinion.text,
+          sourceOpinionId: opinion.id,
+        })
+        return bookdb.patchOpinion(dir, id, { status: 'accepted' })
+      }
       if (!String(opinion.after || '').trim()) {
         return bookdb.patchOpinion(dir, id, { status: 'accepted' })
       }
@@ -2033,12 +2047,15 @@ const reviewTool = {
             chapter: { type: 'number', description: '章号；0=全书级' },
             source: { type: 'string', enum: ['logic', 'attention', 'ai-style', 'reader'] },
             severity: { type: 'string', enum: ['blocker', 'major', 'minor', 'suggestion'] },
-            quote: { type: 'string', description: '逐字原文（≥4 字，该章只出现一次）' },
+            quote: { type: 'string', description: '逐字原文（尽量照抄；对不上只标记，不丢）' },
+            para: { type: 'number', description: '段号（正文段落，从 0 开始；标题意见用 anchor=title）' },
+            anchor: { type: 'string', enum: ['paragraph', 'title', 'chapter', 'quote'], description: '地址类型' },
+            after: { type: 'string', description: '该段替换成文（整段）；有改法就写，采纳即替换' },
             issue: { type: 'string' },
             suggestion: { type: 'string' },
             dimension: { type: 'string', description: '中文维度标签（可省略，服务端按 source 派生）' },
           },
-          required: ['chapter', 'source', 'quote', 'issue'],
+          required: ['chapter', 'source', 'issue'],
           additionalProperties: true,
         },
       },
@@ -2124,7 +2141,7 @@ const proposeTool = {
 
 const attentionTool = {
   name: 'novel_desk_attention',
-  description: '注意力四拍：design=写设计（type/四拍/designScore）/ measured=零上下文实测分（breakdown 20/20/30/30）/ workorder=设计工作单 / recheck=冷读打分工作单。design/measured 建议一次只交 1 章、用扁平参数（chapter/score/…），避免 JSON 解析失败。',
+  description: '注意力=冷读：measured=提交冷读结果（score + points 指定地址的评价，亮点/不足）；recheck=冷读工作单；design=写前设计（可选，不进评价）。标准只有一条：ATTENTION IS ALL YOU NEED。一次只交 1 章。',
   parameters: {
     type: 'object',
     properties: {
@@ -2152,14 +2169,17 @@ const attentionTool = {
           cliff: { type: 'number' },
         },
       },
-      dropPoints: {
+      points: {
         type: 'array',
-        description: 'measured：1–3 条弃读点',
+        description: 'measured：指定地址的评价（数量不限）。每条 para 段号（正文段落，从 0 开始）、quote 逐字引文、kind=highlight|weakness、comment≤80字、weakness 必须带 after（整段替换成文）',
         items: {
           type: 'object',
           properties: {
-            quote: { type: 'string', description: '逐字引文' },
-            why: { type: 'string' },
+            para: { type: 'number', description: '正文段号，从 0 开始（标题不算段）' },
+            quote: { type: 'string', description: '该段逐字原文，用于核对地址' },
+            kind: { type: 'string', enum: ['highlight', 'weakness'] },
+            comment: { type: 'string', description: '≤80 字：为什么' },
+            after: { type: 'string', description: 'weakness：该段替换成文（整段）；highlight 不写' },
           },
         },
       },
@@ -2182,7 +2202,7 @@ const attentionTool = {
     const op = String(args.op ?? '')
     const projectRow = { id: projectId, name: project.name ?? project.title ?? '' }
     if (op === 'design' || op === 'measured') {
-      const flatKeys = ['type', 'hook', 'tension', 'payoff', 'cliff', 'question', 'designScore', 'status', 'score', 'breakdown', 'dropPoints', 'verdict', 'weakest', 'detail']
+      const flatKeys = ['type', 'hook', 'tension', 'payoff', 'cliff', 'question', 'designScore', 'status', 'score', 'breakdown', 'dropPoints', 'points', 'verdict', 'weakest', 'detail']
       let items = Array.isArray(args.items) ? args.items.filter((item) => item && typeof item === 'object') : []
       // 推荐写法：一次一章，chapter + 扁平字段（比多对象嵌套 JSON 更不容易解析失败）
       if (items.length === 0 && chapterNumber(args.chapter)) {
@@ -2218,6 +2238,19 @@ const attentionTool = {
           }
         }
         merged.push(await s.mergeAttention(root, projectId, chapter, patch))
+        // 冷读的地址评价 → 自动生成意见（weakness 带改法；highlight 等作者决定是否入高光）
+        const points = Array.isArray(patch.points) ? patch.points.filter((point) => point && String(point.comment ?? '').trim()) : []
+        if (op === 'measured' && points.length) {
+          try {
+            const dir = await s.projectDir(root, projectId)
+            const doc = await s.readChapter(root, projectId, chapter)
+            const index = buildIndex(doc.text, chapter)
+            const withBody = { ...index, body: splitTitle(doc.text).body }
+            await bookdb.addColdReadOpinions({ dir, chapter, points, index: withBody })
+          } catch {
+            /* 意见生成失败不影响分数落库 */
+          }
+        }
       }
       return `已合并 ${merged.length} 章注意力（op=${op}）。`
     }
