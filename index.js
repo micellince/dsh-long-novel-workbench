@@ -2406,7 +2406,7 @@ const writeTool = {
     const designed = Boolean(record) && String(record.type ?? '').trim() !== '' && String(record.hook ?? '').trim() !== '' && Number.isFinite(Number(record.designScore))
     const hint = designed
       ? ''
-      : `\n⚠ 注意力提醒：第${chapter}章没有注意力设计记录（ATTENTION IS ALL YOU NEED）。请补 novel_desk_attention op="design"（四拍 + designScore），并在写下一章前先设计再动笔。`
+      : `\n⚠ 注意力提醒：第${chapter}章还没有注意力记录（ATTENTION IS ALL YOU NEED）。动笔前先写一句本章靠什么抓人（开头怎么抓、章末留什么未决问题）；冷读会独立打分。`
     return `已写入第${chapter}章。${formatGateLine(result.gates)}${hint}`
   },
 }
@@ -2498,7 +2498,7 @@ const runTool = {
     const attentionRows = listOf(await s.getAttention(root, projectId).catch(() => []))
     const designed = attentionRows.filter((row) => String(row?.type ?? '').trim() !== '' && String(row?.hook ?? '').trim() !== '' && Number.isFinite(Number(row?.designScore)))
     const reminder = designed.length === 0
-      ? '⚠ 全局提醒（ATTENTION IS ALL YOU NEED）：本书还没有任何注意力设计。本 run 第一步必须是注意力设计：先提交四拍 + designScore（novel_desk_attention op="design"），没有设计不要写正文。'
+      ? '⚠ 全局提醒（ATTENTION IS ALL YOU NEED）：本书还没有注意力记录。本 run 每章动笔前先写一句抓人目标；不需要四拍，注意力由冷读独立打分。'
       : `注意力提醒（ATTENTION IS ALL YOU NEED）：已有 ${designed.length} 章设计。开工前先给本次范围补齐注意力设计（novel_desk_attention op="design"），再写/改正文。`
     return `${text}\n\n${reminder}`
   },

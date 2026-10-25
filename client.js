@@ -1029,7 +1029,7 @@ window.__ModuleLoader__.load({
     const AI_CUSTOM_PRESET = {
       id: 'preset-ai-custom',
       name: '自定义（让 AI 定）',
-      desc: '只给书名和想法：类型、基调、篇幅、结构、风格规则先由 AI 出方案；方案必须带「注意力总设计」，再按方案生成世界/人物/大纲（大纲每章带四拍设计）。',
+      desc: '只给书名和想法：类型、基调、篇幅、结构、风格规则先由 AI 出方案；方案必须带「读者牵引」思路，再按方案生成世界/人物/大纲（大纲每章写一句抓人目标）。',
       custom: true,
       genre: '',
       plannedChapters: 0,
@@ -3030,11 +3030,11 @@ window.__ModuleLoader__.load({
           const payload = {
             workorder: 'reviewWorkorder',
             chapters,
-            ...(source === 'all' ? {} : { sources: [source] }),
+            sources: source === 'all' ? ['logic', 'ai-style', 'reader'] : [source],
             focus: String(launcher.focus || '').trim() || undefined,
           }
           const value = await api('chat.send', { projectId, ...payload, dryRun: true })
-          setWorkorder({ title: `${source === 'all' ? '四路' : ROUTE_LABEL[source] || ''}审阅工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
+          setWorkorder({ title: `${source === 'all' ? '三路' : ROUTE_LABEL[source] || ''}审阅工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
           setLauncher(null)
         } catch (err) {
           setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
@@ -3176,15 +3176,15 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'nd-page' },
         h('div', { className: 'nd-pagehead' },
           h('h2', null, '审阅收件箱'),
-          h('span', { className: 'nd-hint' }, '四路同权：逻辑 / 注意力 / AI 味 / 读者；chapter 0 为全书级条目。'),
+          h('span', { className: 'nd-hint' }, '三路审阅（逻辑 / AI 味 / 读者）+ 冷读（注意力）；chapter 0 为全书级条目。注意力不再单独审阅，只看冷读分数。'),
         ),
         h('div', { className: 'nd-review-launchers' },
           [
             { source: 'ai-style', icon: '🤖', title: 'AI 味审阅', hint: '机器痕迹 / 套话 / 节奏单一 / 文笔' },
             { source: 'logic', icon: '⚖️', title: '事实逻辑审阅', hint: '因果 / 动机 / 连续性 / 事实自洽' },
-            { source: 'attention', icon: '⚡', title: '注意力审阅', hint: '钩子 / 张力 / 回报 / 章末牵引 / 弃读点' },
+            { source: 'attention', moood: '', mode: 'recheck', icon: '❄️', title: '冷读（注意力）', hint: '读者会不会继续读：分数 + 地址评价（亮点 / 不足）' },
           ].map((item) =>
-            h('button', { key: item.source, type: 'button', className: 'nd-launch-card', onClick: () => openLauncher(item.source) },
+            h('button', { key: item.source + (item.mode || ''), type: 'button', className: 'nd-launch-card', onClick: () => openLauncher(item.source, item.mode || 'review') },
               h('span', { className: 'nd-launch-icon' }, item.icon),
               h('span', { className: 'nd-launch-main' }, h('strong', null, item.title), h('span', { className: 'nd-hint' }, item.hint)),
               h('span', { className: 'nd-launch-go' }, '开始 →'),
@@ -3192,13 +3192,13 @@ window.__ModuleLoader__.load({
           ),
           h('button', { type: 'button', className: 'nd-launch-card nd-launch-mini', onClick: () => openLauncher('all'), disabled: busy },
             h('span', { className: 'nd-launch-icon' }, '🧪'),
-            h('span', { className: 'nd-launch-main' }, h('strong', null, '四路一起审'), h('span', { className: 'nd-hint' }, '一次把四路口径都交给 AI')),
+            h('span', { className: 'nd-launch-main' }, h('strong', null, '三路一起审'), h('span', { className: 'nd-hint' }, '逻辑 / AI 味 / 读者 一次交给 AI；注意力走冷读')),
             h('span', { className: 'nd-launch-go' }, '工作单 →'),
           ),
         ),
         launcher
           ? h(Modal, {
-              title: launcher.mode === 'recheck' ? '冷读打分（注意力复测）' : `${launcher.source === 'all' ? '四路' : ROUTE_LABEL[launcher.source] || ''}审阅`,
+              title: launcher.mode === 'recheck' ? '冷读（注意力）' : `${launcher.source === 'all' ? '三路' : ROUTE_LABEL[launcher.source] || ''}审阅`,
               onClose: () => setLauncher(null),
               footer: h(Fragment, null,
                 h(Btn, { onClick: () => setLauncher(null) }, '取消'),
@@ -3222,7 +3222,7 @@ window.__ModuleLoader__.load({
                   className: 'nd-input nd-textarea',
                   rows: 3,
                   value: launcher.focus,
-                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章有没有让人想继续读。留空则按标准冷读。' : '例：这一章读者容易弃读，重点看章末牵引；或：注意华羽生和小蝶的关系变化是否突兀。留空则按四路口径完整审。',
+                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章有没有让人想继续读。留空则按标准冷读。' : '例：这一章读者容易弃读，重点看章末；或：注意华羽生和小蝶的关系变化是否突兀。留空则按三路口径完整审。',
                   onChange: (e) => setLauncher((prev) => (prev ? { ...prev, focus: e.target.value } : prev)),
                 }),
               ),
@@ -3256,7 +3256,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'nd-hint' }, `已选 ${selected.length} 条${selectedGlobalCount ? `（全书级 ${selectedGlobalCount} 条）` : ''}`),
           h(Btn, { small: true, kind: 'primary', onClick: launchProposalWorkorder, disabled: busy }, busy ? '生成中…' : '生成修改提案'),
           h(Btn, { small: true, onClick: launchGlobalWorkorder, disabled: busy }, '全局修改意见'),
-          h(Btn, { small: true, onClick: () => openLauncher('all'), disabled: busy }, 'AI 审阅工作单'),
+          h(Btn, { small: true, onClick: () => openLauncher('all'), disabled: busy }, '三路审阅工作单'),
           h(Btn, { small: true, onClick: () => openLauncher('all', 'recheck'), disabled: busy }, '冷读打分 / 复测'),
           h(Btn, { small: true, onClick: () => go('proposals') }, '去提案页'),
         ),
@@ -6022,7 +6022,7 @@ window.__ModuleLoader__.load({
   "taboo": ["套话式总结", "现代网络用语", "Markdown 强调与标题"],
 
   // ── 审阅重点（四路审阅时优先看什么） ──────────────
-  "reviewFocus": ["事实与连续性", "注意力四拍", "去 AI 味", "读者体验"],
+  "reviewFocus": ["事实与连续性", "读者牵引（冷读）", "去 AI 味", "读者体验"],
 
   // ── 人物功能（不是人物卡，是「这类角色必须承担什么」） ──
   "characters": {
