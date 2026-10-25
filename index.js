@@ -71,10 +71,12 @@ export const READ_OPS = [
   'update.check',
   'update.install',
   'update.rollback',
+  'migrate.titles',
   'diagnostics',
   'chapter.index',
   'opinions.list',
   'ledger.digest',
+  'ledger.entities',
   'ledger.unknown',
 ]
 
@@ -1342,6 +1344,13 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         status: payload.status ? String(payload.status) : null,
       })
     }
+    case 'ledger.entities': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const items = await bookdb.entityCounts(dir).catch(() => [])
+      const status = await bookdb.storageStatus(dir).catch(() => null)
+      return { items, stats: status && status.ledger ? status.ledger : null }
+    }
     case 'ledger.digest': {
       const projectId = String(need(payload, 'projectId'))
       const dir = await s.projectDir(root, projectId)
@@ -1459,6 +1468,30 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const id = String(need(payload, 'id'))
       const dir = await s.projectDir(root, projectId)
       return bookdb.patchOpinion(dir, id, payload.patch ?? omit(payload, ['projectId', 'id']))
+    }
+    case 'migrate.titles': {
+      const projectId = String(need(payload, 'projectId'))
+      const apply = Boolean(payload.apply)
+      const chapters = listOf(await s.listChapters(root, projectId))
+      const planned = []
+      let done = 0
+      for (const row of chapters) {
+        const chapter = Number(row?.chapter ?? row?.id ?? 0)
+        if (!chapter) continue
+        let doc
+        try { doc = await s.readChapter(root, projectId, chapter) } catch { continue }
+        if (doc.format !== 'txt') continue
+        const parsed = splitTitle(String(doc.text ?? ''))
+        if (parsed.title) continue
+        const title = String(doc.meta?.title ?? '').trim()
+        if (!title) continue
+        planned.push({ chapter, title })
+        if (!apply) continue
+        const nextText = `${title}\n\n${String(doc.text ?? '').replace(/^\n+/, '')}`
+        await s.saveChapter(root, projectId, chapter, nextText, {}, { baseHash: doc.meta?.contentHash, source: 'title-migration' })
+        done += 1
+      }
+      return { apply, planned: planned.length, done, items: planned.slice(0, 200) }
     }
     case 'opinions.accept': {
       const projectId = String(need(payload, 'projectId'))

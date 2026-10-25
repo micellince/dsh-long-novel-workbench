@@ -829,6 +829,31 @@ window.__ModuleLoader__.load({
         options.map((opt) => h('option', { key: String(opt.value), value: String(opt.value) }, opt.label)),
       )
     }
+    // 标题迁移：把 meta.json 的标题写进 .txt 首行（标题属于正文、可被选中批注）
+    function TitleMigrationCard({ projectId }) {
+      const [state, setState] = useState({ busy: '', result: null, error: '' })
+      const run = async (apply) => {
+        if (apply && !window.confirm('把标题写进正文首行？会逐章备份，之后标题可被选中批注。')) return
+        setState({ busy: apply ? 'apply' : 'dry', result: null, error: '' })
+        try {
+          const result = await api('migrate.titles', scope(projectId, { apply }))
+          setState({ busy: '', result: { ...result, apply }, error: '' })
+        } catch (error) {
+          setState({ busy: '', result: null, error: friendlyError(error) })
+        }
+      }
+      return h('section', { className: 'nd-card' },
+        h('div', { className: 'nd-card-head' }, h('h3', null, '📝 标题进正文')),
+        h('p', { className: 'nd-hint' }, '0.7 起正文 .txt 首行就是回目标题（可直接发人、可被选中批注）。旧章标题还在 meta.json 里，先预演再应用；逐章自动备份。'),
+        state.result ? h('p', { className: 'nd-hint' }, state.result.apply ? `已迁移 ${state.result.done} 章。` : `计划迁移 ${state.result.planned} 章（dry-run，未写盘）。${state.result.items && state.result.items.length ? '例如：' + state.result.items.slice(0, 3).map((row) => `第${row.chapter}章「${row.title}」`).join('、') : ''}`) : null,
+        state.error ? h(Msg, { tone: 'error' }, state.error) : null,
+        h('div', { className: 'nd-actions' },
+          h(Btn, { small: true, onClick: () => run(false), disabled: Boolean(state.busy) }, state.busy === 'dry' ? '预演中…' : '预演（不写盘）'),
+          h(Btn, { small: true, kind: 'primary', onClick: () => run(true), disabled: Boolean(state.busy) }, state.busy === 'apply' ? '迁移中…' : '把标题写进正文'),
+        ),
+      )
+    }
+
     // 插件更新卡：检查 npm +（非 git 副本时）一键安装/回退；不静默升级
     function UpdateCard() {
       const [state, setState] = useState({ loading: false, installing: false, data: null, error: '' })
@@ -5282,6 +5307,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState(null)
       const [syncDialog, setSyncDialog] = useState(null)
       const syncRes = useAsync(() => (projectId ? api('ledger.sync', scope(projectId)) : Promise.resolve({ pending: [] })), [projectId])
+      const dbRes = useAsync(() => (projectId ? api('ledger.entities', scope(projectId)) : Promise.resolve(null)), [projectId])
       const pending = syncRes.data && Array.isArray(syncRes.data.pending) ? syncRes.data.pending : []
       const full = syncRes.data && syncRes.data.full ? syncRes.data.full : null
       const chapters = (syncRes.data && syncRes.data.chapters) || 0
@@ -5485,6 +5511,22 @@ window.__ModuleLoader__.load({
           ),
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        dbRes.data && dbRes.data.stats
+          ? h('div', { className: 'nd-card nd-ledger-db' },
+              h('div', { className: 'nd-card-head' },
+                h('h3', null, '🗄️ 账本数据库'),
+                h(Btn, { small: true, onClick: () => dbRes.reload() }, '刷新'),
+              ),
+              h('p', { className: 'nd-hint' }, `实体 ${dbRes.data.stats.entities} ｜ 提及 ${dbRes.data.stats.mentions} ｜ 事实 ${dbRes.data.stats.facts} ｜ 事件 ${dbRes.data.stats.events} ｜ 高光 ${dbRes.data.stats.highlights} ｜ 待确认专名 ${dbRes.data.stats.unknown}`),
+              Array.isArray(dbRes.data.items) && dbRes.data.items.length
+                ? h('div', { className: 'nd-db-entities' },
+                    dbRes.data.items.slice(0, 18).map((item) => h('span', { className: 'nd-db-entity', key: `${item.kind}:${item.entityId}` },
+                      `${item.name}×${item.mentions}`,
+                    )),
+                  )
+                : h('p', { className: 'nd-hint' }, '数据库还没有实体：先跑一次「全书同步」建账，之后改正文只做本地增量同步。'),
+            )
+          : null,
         pending.length > 0
           ? h('div', { className: 'nd-banner nd-banner-warn' },
               h('span', null, `⚠ 第 ${pending.map((row) => row.chapter).join('、')} 章正文改到了账本里的名字/数字，可能需要同步`),
@@ -6224,6 +6266,7 @@ window.__ModuleLoader__.load({
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         settingsRes.error ? h(ErrorBox, { error: settingsRes.error, onRetry: () => settingsRes.reload() }) : null,
+        h(TitleMigrationCard, { projectId }),
         storageRes.data
           ? h('section', { className: 'nd-card' },
               h('div', { className: 'nd-card-head' }, h('h3', null, '🧾 账本数据库')),
@@ -6410,7 +6453,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
