@@ -24,7 +24,8 @@ import * as prompts from './lib/prompts.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
 import * as bookdb from './lib/bookdb.js'
 import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
-import { ROLES } from './lib/roles.js'
+import { ROLES, ROLE_BY_ID, roleForSource } from './lib/roles.js'
+import { issueTicket, requireTicket, dispatchPrompt } from './lib/dispatch.js'
 import * as ledgerdb from './lib/ledgerdb.js'
 import { scanChapterLocal } from './lib/localchecks.js'
 import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
@@ -80,6 +81,7 @@ export const READ_OPS = [
   'opinions.list',
   'ledger.digest',
   'ledger.entities',
+  'outline.list',
   'ledger.unknown',
 ]
 
@@ -111,6 +113,8 @@ export const WRITE_OPS = [
   'opinions.accept',
   'opinions.reject',
   'ledger.confirm',
+  'outline.upsert',
+  'outline.delete',
 ]
 
 /** 全部 RPC op（测试与 boot 显示用；顺序 = 读在前写在后）。 */
@@ -776,6 +780,9 @@ async function chatSend(ctx, s, root, payload) {
   let prompt = String(payload?.prompt ?? '').trim()
   if (!prompt) {
     if (payload?.workorder && typeof prompts[payload.workorder] === 'function') {
+      const outlineRows = Array.isArray(payload?.outline)
+        ? payload.outline
+        : (projectId ? ((await s.getLedger(root, projectId).catch(() => ({})))?.outlines || []) : [])
       // 允许 UI 传 {workorder:'attentionRecheckWorkorder', ...} 走工作单
       // 范围只认用户选择：显式 chapters；scope='book' 才展开全书；绝不默认最近 3 章
       let workorderChapters = Array.isArray(payload?.chapters) ? payload.chapters : []
@@ -790,6 +797,7 @@ async function chatSend(ctx, s, root, payload) {
           groups: payload.groups,
           scope: payload.scope,
           attention: payload.attention ?? context?.attention ?? [],
+          outline: outlineRows,
           chapter: payload.chapter,
           reviews: payload.reviews,
           run: payload.run,
@@ -1372,6 +1380,11 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         status: payload.status ? String(payload.status) : null,
       })
     }
+    case 'outline.list': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      return { outlines: await bookdb.listOutlines(dir) }
+    }
     case 'ledger.entities': {
       const projectId = String(need(payload, 'projectId'))
       const dir = await s.projectDir(root, projectId)
@@ -1520,6 +1533,24 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         done += 1
       }
       return { apply, planned: planned.length, done, items: planned.slice(0, 200) }
+    }
+    case 'outline.upsert': {
+      const projectId = String(need(payload, 'projectId'))
+      const item = payload.item && typeof payload.item === 'object' ? payload.item : omit(payload, ['projectId', 'item'])
+      if (!Number(item.chapter)) throw invalid('大纲缺少章号 chapter')
+      await s.upsertLedgerItem(root, projectId, 'outlines', item)
+      const dir = await s.projectDir(root, projectId)
+      return { outlines: await bookdb.listOutlines(dir) }
+    }
+    case 'outline.delete': {
+      const projectId = String(need(payload, 'projectId'))
+      const chapter = needNumber(payload, 'chapter')
+      const ledger = await s.getLedger(root, projectId)
+      const row = (Array.isArray(ledger.outlines) ? ledger.outlines : []).find((item) => Number(item.chapter) === chapter)
+      if (row && row.id) await s.deleteLedgerItem(root, projectId, 'outlines', row.id)
+      const dir = await s.projectDir(root, projectId)
+      await bookdb.deleteOutline(dir, chapter).catch(() => {})
+      return { outlines: await bookdb.listOutlines(dir) }
     }
     case 'opinions.accept': {
       const projectId = String(need(payload, 'projectId'))
@@ -2135,6 +2166,7 @@ const reviewTool = {
     type: 'object',
     properties: {
       projectId: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      dispatchId: { type: 'string', description: '派单票据（先 novel_desk_dispatch）' },
       origin: { type: 'string', description: '来源标记，如 review/cold-read/recheck/ai' },
       reviews: {
         type: 'array',
@@ -2158,7 +2190,7 @@ const reviewTool = {
         },
       },
     },
-    required: ['reviews'],
+    required: ['dispatchId', 'reviews'],
     additionalProperties: false,
   },
   output: textOutput,
@@ -2169,6 +2201,11 @@ const reviewTool = {
     const project = await resolveProject(s, root, args.projectId)
     const reviews = Array.isArray(args.reviews) ? args.reviews : []
     if (reviews.length === 0) throw new Error('reviews 不能为空')
+    const ticket = requireTicket(args.dispatchId, { projectId: project.id })
+    for (const row of reviews) {
+      const needRole = roleForSource(row?.source).id
+      if (ticket.role !== needRole) throw new Error(`票据角色 ${ticket.role} 与意见来源 ${row?.source} 需要的角色 ${needRole} 不符：每条路请单独 dispatch。`)
+    }
     if (reviews.length > 5) throw new Error(`一次最多提交 5 条意见（收到 ${reviews.length} 条）：分多次调用，避免一个大 JSON 解析失败。`)
     for (const row of reviews) {
       if (String(row?.issue ?? '').length > 200) throw new Error('issue 超过 200 字：写清问题即可，不要长篇分析。')
@@ -2182,6 +2219,7 @@ const reviewTool = {
       origin: String(row?.origin ?? args.origin ?? 'review'),
     }))
     const result = await s.addReviews(root, String(project.id), items)
+    requireTicket(args.dispatchId, { projectId: project.id, consume: true })
     const count = Number(result?.added) || 0
     const skipped = Number(result?.skipped) || 0
     const reasons = Array.isArray(result?.skippedReasons) ? result.skippedReasons : []
@@ -2191,7 +2229,7 @@ const reviewTool = {
     const tail = skipped > 0
       ? `，跳过 ${skipped} 条（引文未逐字命中、无法唯一定位或重复${reasons.length > 0 ? `：${reasons.slice(0, 3).join('；')}` : ''}）`
       : ''
-    return `已提交 ${count} 条审阅${tail}（作品《${project.name ?? project.title ?? project.id}》）。作者在「审阅」页逐条处理。`
+    return `已提交 ${count} 条审阅${tail}（作品《${project.name ?? project.title ?? project.id}》）。作者在「意见」页逐条处理。`
   },
 }
 
@@ -2243,6 +2281,34 @@ const proposeTool = {
   },
 }
 
+const dispatchTool = {
+  name: 'novel_desk_dispatch',
+  description: '派单票据：主对话必须先调用本工具，拿到 dispatchId，再起子 agent 执行；子 agent 提交 AI 意见/冷读时必须带 dispatchId。角色：editor/publisher/author/stylist/continuity/cold-reader/ai-auditor。',
+  parameters: {
+    type: 'object',
+    properties: {
+      projectId: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      role: { type: 'string', enum: ROLES.map((role) => role.id), description: '派给哪个角色（子 agent）' },
+      task: { type: 'string', description: '本子 agent 要做的事（一句话）' },
+      materials: { type: 'string', description: '只给它哪些材料（段落切片/整章路径/可疑点）；不要贴全书' },
+    },
+    required: ['role', 'task'],
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args = {}) {
+    const s = store
+    const root = s.defaultRoot()
+    await s.ensureRoot(root)
+    const project = await resolveProject(s, root, args.projectId)
+    const role = String(args.role ?? '')
+    const roleInfo = ROLE_BY_ID[role]
+    if (!roleInfo) throw new Error(`未知角色：${role || '(空)'}；可选：${ROLES.map((row) => row.id).join(' / ')}`)
+    const ticket = issueTicket({ role, projectId: String(project.id), task: String(args.task ?? '') })
+    return dispatchPrompt({ ticket, roleInfo, task: String(args.task ?? ''), materials: String(args.materials ?? '') })
+  },
+}
+
 const attentionTool = {
   name: 'novel_desk_attention',
   description: '注意力=冷读：measured=提交冷读结果（score + points 指定地址的评价，亮点/不足）；recheck=冷读工作单；design=写前设计（可选，不进评价）。标准只有一条：ATTENTION IS ALL YOU NEED。一次只交 1 章。',
@@ -2250,6 +2316,7 @@ const attentionTool = {
     type: 'object',
     properties: {
       projectId: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      dispatchId: { type: 'string', description: '冷读必须带派单票据（先 novel_desk_dispatch role=cold-reader）' },
       op: { type: 'string', enum: ['design', 'measured', 'workorder', 'recheck'] },
       chapter: { type: 'number', description: 'design/measured：要提交的章号（推荐单章扁平写法）' },
       chapters: { type: 'array', items: { type: 'number' }, description: '章号数组（workorder/recheck 用）' },
@@ -2305,6 +2372,10 @@ const attentionTool = {
     const projectId = String(project.id)
     const op = String(args.op ?? '')
     const projectRow = { id: projectId, name: project.name ?? project.title ?? '' }
+    if (op === 'measured') {
+      const ticket = requireTicket(args.dispatchId, { projectId: projectId })
+      if (ticket.role !== 'cold-reader') throw new Error(`冷读必须由冷读审稿人子 agent 提交：请 novel_desk_dispatch(role="cold-reader") 拿 dispatchId。`)
+    }
     if (op === 'design' || op === 'measured') {
       const flatKeys = ['type', 'hook', 'tension', 'payoff', 'cliff', 'question', 'designScore', 'status', 'score', 'breakdown', 'dropPoints', 'points', 'verdict', 'weakest', 'detail']
       let items = Array.isArray(args.items) ? args.items.filter((item) => item && typeof item === 'object') : []
@@ -2361,6 +2432,7 @@ const attentionTool = {
           }
         }
       }
+      if (op === 'measured') requireTicket(args.dispatchId, { projectId, consume: true })
       return `已合并 ${merged.length} 章注意力（op=${op}）。`
     }
     const chapterRows = listOf(await s.listChapters(root, projectId))
@@ -2605,7 +2677,7 @@ const mapTool = {
   },
 }
 
-export const TOOLS = [readTool, reviewTool, proposeTool, attentionTool, writeTool, runTool, mapTool]
+export const TOOLS = [readTool, dispatchTool, reviewTool, proposeTool, attentionTool, writeTool, runTool, mapTool]
 
 // ── 入口 ────────────────────────────────────────────────────
 

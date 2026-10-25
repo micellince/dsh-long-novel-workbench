@@ -26,6 +26,7 @@ window.__ModuleLoader__.load({
 
     const PAGES = [
       { id: 'read', label: '正文', icon: '📖', group: '正文' },
+      { id: 'outlines', label: '大纲', icon: '🧭', group: '正文' },
       { id: 'reviews', label: '意见', icon: '📝', group: '正文' },
       { id: 'proposals', label: '提案', icon: '📋', group: '正文' },
       { id: 'run', label: '全文动作', icon: '🛠️', group: '正文' },
@@ -1489,6 +1490,7 @@ window.__ModuleLoader__.load({
         }
         let pageNode
         if (page === 'read') pageNode = h(ReadingTab, { ...common, key: `read:${projectId}` })
+        else if (page === 'outlines') pageNode = h(OutlinesPage, { ...common, key: `outlines:${projectId}` })
         else if (page === 'reviews') pageNode = h(OpinionsPage, { ...common, key: `opinions:${projectId}` })
         else if (page === 'proposals') pageNode = h(ProposalsTab, { ...common, key: `proposals:${projectId}` })
         else if (page === 'run') pageNode = h(RunTab, { ...common, key: `run:${projectId}` })
@@ -2808,6 +2810,78 @@ window.__ModuleLoader__.load({
     }
 
     // ── 意见页 ────────────────────────────────────────────────
+    // ── 大纲页：用户可改；AI 通过 ledger-fix 提案改，批准后入库 ──
+    function OutlinesPage({ projectId, onChanged }) {
+      const res = useAsync(() => api('outline.list', scope(projectId)), [projectId])
+      const rows = res.data && Array.isArray(res.data.outlines) ? res.data.outlines : []
+      const [form, setForm] = useState(null)
+      const [notice, setNotice] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const save = async () => {
+        if (!form || busy) return
+        setBusy(true); setNotice(null)
+        try {
+          await api('outline.upsert', scope(projectId, { item: form }))
+          setForm(null)
+          res.reload()
+          if (onChanged) onChanged()
+          setNotice({ tone: 'ok', text: '大纲已保存' })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy(false) }
+      }
+      const remove = async (chapter) => {
+        if (!window.confirm(`删除第 ${chapter} 章大纲？正文不受影响。`)) return
+        setNotice(null)
+        try { await api('outline.delete', scope(projectId, { chapter })); res.reload(); if (onChanged) onChanged(); setNotice({ tone: 'ok', text: '已删除' }) }
+        catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+      }
+      const nextChapter = () => {
+        const used = new Set(rows.map((row) => Number(row.chapter)))
+        let n = 1
+        while (used.has(n)) n += 1
+        return n
+      }
+      return h('div', { className: 'nd-page' },
+        h('div', { className: 'nd-page-head' },
+          h('div', null,
+            h('h2', null, '大纲'),
+            h('p', { className: 'nd-hint' }, '大纲存在数据库里，是全文写作、章节写作、章节改写、全文改写的输入。你可以直接改；AI 只能通过账本修订（ledger-fix）提案改，批准后才入库。')),
+          h('div', { className: 'nd-page-actions' },
+            h(Btn, { small: true, onClick: res.reload, disabled: res.loading }, '刷新'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => setForm({ chapter: nextChapter(), title: '', summary: '', status: 'planned' }) }, '＋ 新增大纲'),
+          ),
+        ),
+        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        res.error ? h(ErrorBox, { error: res.error, onRetry: res.reload }) : null,
+        !rows.length && !res.loading ? h('p', { className: 'nd-hint' }, '还没有大纲。可以手写一行，或在「账本 → 全书同步」让 AI 根据正文补；新书生成的大纲也会落到这里。') : null,
+        h('div', { className: 'nd-outline-list' },
+          rows.map((row) => h('div', { className: 'nd-outline-row', key: row.chapter },
+            h('div', { className: 'nd-outline-head' },
+              h('strong', null, `第 ${row.chapter} 章`),
+              h('span', { className: 'nd-outline-title' }, row.title || '（未命名）'),
+              h(Tag, { tone: 'muted' }, row.status || '—'),
+              h(Btn, { small: true, onClick: () => setForm({ ...row }) }, '编辑'),
+              h(Btn, { small: true, onClick: () => remove(row.chapter) }, '删除'),
+            ),
+            row.summary ? h('p', { className: 'nd-hint nd-outline-summary' }, row.summary) : null,
+          )),
+        ),
+        form ? h(Modal, {
+          title: form.chapter ? `第 ${form.chapter} 章大纲` : '新增大纲',
+          onClose: () => setForm(null),
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setForm(null) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存'),
+          ),
+        },
+          h(Field, { label: '章号' }, h(TextInput, { type: 'number', value: form.chapter, onChange: (v) => setForm({ ...form, chapter: toNumber(v, 0) }) })),
+          h(Field, { label: '标题' }, h(TextInput, { value: form.title, onChange: (v) => setForm({ ...form, title: v }) })),
+          h(Field, { label: '状态' }, h(TextInput, { value: form.status, onChange: (v) => setForm({ ...form, status: v }), placeholder: 'planned / draft / done' })),
+          h(Field, { label: '摘要' }, h(TextArea, { rows: 5, value: form.summary, onChange: (v) => setForm({ ...form, summary: v }) })),
+        ) : null,
+      )
+    }
+
     // ── 意见页：AI 意见 / 作者意见 分开；AI 意见分 去AI化 / 事实逻辑 / 注意力（冷读）──
     function OpinionsPage({ projectId, toc, pageArg, openChapter, onChanged }) {
       const [notice, setNotice] = useState(null)
@@ -4955,7 +5029,6 @@ window.__ModuleLoader__.load({
       { id: 'highlights', label: '✨ 高光' },
       { id: 'conflicts', label: '⚔️ 冲突' },
       { id: 'foreshadow', label: '🧩 伏笔' },
-      { id: 'outlines', label: '🧭 大纲' },
     ]
     function LedgerTab({ projectId, go, openChapter, pageArg, onChanged }) {
       const ledgerRes = useAsync(() => api('ledger.get', scope(projectId)), [projectId])
@@ -6117,7 +6190,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-outline-list{display:flex;flex-direction:column;gap:6px}.nd-outline-row{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-outline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-outline-title{font-weight:600}.nd-outline-summary{margin:4px 0 0}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
