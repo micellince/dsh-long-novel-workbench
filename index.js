@@ -1347,10 +1347,10 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         if (!chapter) continue
         let doc
         try { doc = await s.readChapter(root, projectId, chapter) } catch { continue }
-        const index = buildIndex(doc.text, chapter)
-        const body = splitTitle(doc.text).body
-        const unknownNames = ledgerdb.unknownCandidates(body, aliases, { limit: 5 })
-        items.push(...scanChapterLocal({ chapter, text: doc.text, index: { ...index, body }, unknownNames, facts }))
+        const index = buildIndex(doc.text, chapter, String(doc.meta?.title ?? ''))
+        const body = splitTitle(doc.text, String(doc.meta?.title ?? '')).body
+        // 未登记专名启发式噪音大：只由作者/AI 确认后入账，不在本地检查里刷候选
+        items.push(...scanChapterLocal({ chapter, text: doc.text, index: { ...index, body }, unknownNames: [], facts }))
         scanned += 1
       }
       const counts = { logic: 0, deai: 0 }
@@ -1361,8 +1361,8 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const projectId = String(need(payload, 'projectId'))
       const chapter = needNumber(payload, 'chapter')
       const doc = await s.readChapter(root, projectId, chapter)
-      const index = buildIndex(doc.text, chapter)
-      return { index, title: splitTitle(doc.text).title, bodyHash: index.bodyHash }
+      const index = buildIndex(doc.text, chapter, String(doc.meta?.title ?? ''))
+      return { index, title: index.title, bodyHash: index.bodyHash }
     }
     case 'opinions.list': {
       const projectId = String(need(payload, 'projectId'))

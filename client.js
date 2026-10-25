@@ -546,13 +546,14 @@ window.__ModuleLoader__.load({
     }
     // 回目标题识别与拆行：正文 .txt 首行就是标题（0.7 起）；旧章没有标题行时走 meta 只读兜底。
     const CHAPTER_TITLE_RE = /^(第\s*[0-9零〇一二三四五六七八九十百千两]{1,8}\s*[回章节卷部篇]|序章|楔子|引子|尾声|终章|番外)/
-    function splitChapterText(text) {
+    function splitChapterText(text, titleHint = '') {
       const value = String(text || '').replace(/\r\n?/g, '\n')
       const lines = value.split('\n')
       let i = 0
       while (i < lines.length && !lines[i].trim()) i += 1
       const first = (lines[i] || '').trim()
-      if (first && first.length <= 60 && CHAPTER_TITLE_RE.test(first)) {
+      const hint = String(titleHint || '').trim()
+      if (first && first.length <= 60 && (CHAPTER_TITLE_RE.test(first) || (hint && first === hint))) {
         const body = lines.slice(i + 1).join('\n').replace(/^\n+/, '')
         const at = body ? value.indexOf(body) : value.length
         return { title: first, body, bodyStart: at < 0 ? value.length : at }
@@ -2705,14 +2706,13 @@ window.__ModuleLoader__.load({
     // 全本连续渲染：memo 避免滚动切换当前章时重渲染所有章节
     const ChapterBlock = memo(function ChapterBlock({ doc, info, attention, highlight, registerRef, focusOffset, focusRef }) {
       // 0.7：编辑器只渲染 .txt 原文。首行标题原样显示；不再由代码拼「第 N 章」、状态、注意力、字数。
-      const parsed = useMemo(() => splitChapterText(doc.text), [doc.text])
+      const meta = doc.meta || {}
+      const metaTitle = (info && chapterTitle(info)) || (meta.title ? String(meta.title) : '')
+      const parsed = useMemo(() => splitChapterText(doc.text, metaTitle), [doc.text, metaTitle])
       const paragraphs = useMemo(() => splitParagraphs(parsed.body), [parsed.body])
       const spans = useMemo(() => paragraphSpans(parsed.body), [parsed.body])
       const localOffset = focusOffset == null ? -1 : Number(focusOffset) - parsed.bodyStart
       const target = localOffset < 0 ? -1 : spans.findIndex((span) => localOffset >= span.start && localOffset < span.end)
-      const meta = doc.meta || {}
-      // 旧章标题还在 meta.json 里：只做只读兜底（不可选中），迁移进正文后就能直接批注。
-      const metaTitle = (info && chapterTitle(info)) || (meta.title ? String(meta.title) : '')
       return h(
         'section',
         {

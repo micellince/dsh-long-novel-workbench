@@ -52,7 +52,7 @@ async function main() {
       const chapter = Number(row.chapter)
       let doc
       try { doc = await store.readChapter(root, projectId, chapter) } catch { continue }
-      const summary = await bookdb.onChapterSaved({ dir, chapter, text: doc.text, words: Number(doc.meta?.words) || 0 })
+      const summary = await bookdb.onChapterSaved({ dir, chapter, text: doc.text, words: Number(doc.meta?.words) || 0, titleHint: String(doc.meta?.title ?? '') })
       if (summary.dbOk) done += 1
       if (done % 10 === 0) console.log(`  · 已导入 ${done}/${txChapters.length} 章`)
     }
