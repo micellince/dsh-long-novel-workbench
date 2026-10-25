@@ -1,7 +1,7 @@
 {
   "name": "dsh-long-novel-workbench",
-  "version": "0.6.11",
-  "description": "长篇中文小说工作台（DSH 插件）：正文页优先的「读—批注—审—改」工作台。连续阅读 / 页内编辑 / 沉浸模式 / 仿纸正文底 / 阅读位置三模式同步，四路同权审阅（逻辑·注意力·AI 味·读者），AI 只出提案、人逐条批，全文动作 run 与全书账本同步；ATTENTION IS ALL YOU NEED 注入所有写/改工作单。",
+  "version": "0.7.0-dev.0",
+  "description": "长篇中文小说工作台（DSH 插件）0.7 开发版：编辑器原文优先、段落级意见与合并审阅、冷读=注意力、SQLite 账本本地增量同步。",
   "type": "module",
   "main": "index.js",
   "scripts": {

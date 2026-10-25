@@ -1,5 +1,5 @@
 /**
- * dsh-long-novel-workbench 0.6.4 — 宿主层入口（ATTENTION IS ALL YOU NEED 注入）。
+ * dsh-long-novel-workbench 0.7.0-dev.0 — 宿主层入口（ATTENTION IS ALL YOU NEED）。
  *
  * 职责（全部在这一层收口）：
  *   1) 路由 /novel-desk/api：鉴权 → RPC 分发（40 op：读 20 + 写 20）→ {ok,value|error}
@@ -22,11 +22,13 @@ import { normalizeProse } from './lib/prose.js'
 import { writeChapterWithGates, formatGateLine, formatFailures } from './lib/gates.js'
 import * as prompts from './lib/prompts.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
+import * as bookdb from './lib/bookdb.js'
+import { buildIndex, splitTitle } from './lib/paras.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
 
-export const VERSION = '0.6.11'
+export const VERSION = '0.7.0-dev.0'
 
 /** API 前缀路由（客户端 fetch 相对路径）。 */
 export const ROUTE = '/novel-desk/api'
@@ -59,6 +61,11 @@ export const READ_OPS = [
   'settings.get',
   'chat.sessions',
   'export.book',
+  'storage.status',
+  'chapter.index',
+  'opinions.list',
+  'ledger.digest',
+  'ledger.unknown',
 ]
 
 /** 写操作 21 个（app.open = 在默认浏览器打开工作台，不写数据）。 */
@@ -84,6 +91,9 @@ export const WRITE_OPS = [
   'map.background',
   'import.scan',
   'import.run',
+  'opinions.merge',
+  'opinions.patch',
+  'ledger.confirm',
 ]
 
 /** 全部 RPC op（测试与 boot 显示用；顺序 = 读在前写在后）。 */
@@ -1273,6 +1283,38 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       if (version === undefined || version === null || String(version).trim() === '') throw invalid('缺少参数 version')
       return s.readChapterVersion(root, projectId, needNumber(payload, 'chapter'), String(version))
     }
+    case 'storage.status': {
+      const projectId = String(payload.projectId ?? '').trim()
+      const dir = projectId ? await s.projectDir(root, projectId) : ''
+      return bookdb.storageStatus(dir)
+    }
+    case 'chapter.index': {
+      const projectId = String(need(payload, 'projectId'))
+      const chapter = needNumber(payload, 'chapter')
+      const doc = await s.readChapter(root, projectId, chapter)
+      const index = buildIndex(doc.text, chapter)
+      return { index, title: splitTitle(doc.text).title, bodyHash: index.bodyHash }
+    }
+    case 'opinions.list': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.listOpinions(dir, {
+        chapter: payload.chapter == null || payload.chapter === '' ? null : Number(payload.chapter),
+        status: payload.status ? String(payload.status) : null,
+      })
+    }
+    case 'ledger.digest': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.ledgerDigest(dir)
+    }
+    case 'ledger.unknown': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const { listUnknown } = await import('./lib/ledgerdb.js')
+      return { items: listUnknown(db, { status: String(payload.status ?? 'pending') }) }
+    }
     case 'chapter.search': {
       const projectId = String(need(payload, 'projectId'))
       const query = String(need(payload, 'query')).trim()
@@ -1361,6 +1403,34 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const projectId = String(need(payload, 'projectId'))
       const chapter = needNumber(payload, 'chapter')
       return s.deleteChapter(root, projectId, chapter)
+    }
+    case 'opinions.merge': {
+      const projectId = String(need(payload, 'projectId'))
+      const ids = Array.isArray(payload.ids) ? payload.ids : [payload.ids]
+      if (!ids.filter(Boolean).length) throw invalid('缺少 ids')
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.mergeOpinions(dir, ids.filter(Boolean), {
+        text: String(payload.text ?? ''),
+        after: String(payload.after ?? ''),
+        role: String(payload.role ?? ''),
+      })
+    }
+    case 'opinions.patch': {
+      const projectId = String(need(payload, 'projectId'))
+      const id = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.patchOpinion(dir, id, payload.patch ?? omit(payload, ['projectId', 'id']))
+    }
+    case 'ledger.confirm': {
+      const projectId = String(need(payload, 'projectId'))
+      const name = String(need(payload, 'name'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.confirmUnknown(dir, name, {
+        kind: String(payload.kind ?? 'character'),
+        entityId: payload.entityId ? String(payload.entityId) : null,
+        aliasOf: payload.aliasOf ? String(payload.aliasOf) : null,
+        chapter: payload.chapter ?? null,
+      })
     }
     case 'review.add': {
       const projectId = String(need(payload, 'projectId'))

@@ -1277,6 +1277,7 @@ window.__ModuleLoader__.load({
 
       const projects = useAsync(() => api('projects.list'), [])
       const projectList = useMemo(() => toList(projects.data, 'projects'), [projects.data])
+      const storage = useAsync(() => (projectId ? api('storage.status', scope(projectId)) : Promise.resolve(null)), [projectId])
 
       useEffect(() => {
         if (!projectList.length) return
@@ -1432,6 +1433,10 @@ window.__ModuleLoader__.load({
             h('span', { className: 'nd-principle-slogan' }, '⚡ ATTENTION IS ALL YOU NEED'),
             h('span', { className: 'nd-principle-text' }, '怎么吸引读者怎么来，一切为读者服务；事实自洽是底线，不是目标。写/改正文前先定本章注意力设计（四拍 + designScore）。'),
           ),
+          storage.data && storage.data.engine && storage.data.engine !== 'sqlite'
+            ? h('div', { className: 'nd-storage-warn', title: '存储降级提示：可在设置页查看详情' },
+                `⚠ 当前环境不支持 SQLite（${storage.data.reason || '未知原因'}），账本与意见已降级为 JSON。升级 DSH/Node 后可恢复。`)
+            : null,
           body,
           // 手机兜底关闭：顶栏溢出/被裁时也一定能退出工作台回到 DSH。
           h('button', { type: 'button', className: 'nd-mobile-close', onClick: () => setOpen(false), title: '关闭工作台', 'aria-label': '关闭工作台' }, '✕'),
@@ -2117,6 +2122,7 @@ window.__ModuleLoader__.load({
           dimension: '读者',
           severity: cur.severity,
           quote: cur.quote,
+          anchor: cur.anchor === 'chapter' ? 'chapter' : (cur.anchor === 'title' ? 'title' : 'paragraph'),
           issue: cur.issue.trim(),
           suggestion: '',
           status: 'open',
@@ -2129,7 +2135,7 @@ window.__ModuleLoader__.load({
             setPop(null)
             if (window.getSelection) window.getSelection().removeAllRanges()
             reviews.reload()
-            setNotice('已提交读者批注')
+            setNotice(value && value.added ? (item.anchor === 'chapter' ? '已提交整章意见' : '已提交读者批注') : '已提交')
           } else {
             // 没落盘就不许丢输入：保留弹窗与已写的内容，把原因写在弹窗里
             const why = value && Array.isArray(value.skippedReasons) && value.skippedReasons.length
@@ -2142,6 +2148,22 @@ window.__ModuleLoader__.load({
           // 网络 / 服务端错误同样保留输入，作者可以直接再点一次提交
           setPop((p) => (p ? { ...p, saving: false, error: `提交失败（内容已保留）：${friendlyError(err)}` } : p))
         }
+      }
+
+      // 整章意见：不需要选中文字，直接对本章提一条意见
+      const openChapterOpinion = () => {
+        if (!(Number(active) > 0)) return
+        setPop({
+          quote: '',
+          chapter: Number(active),
+          anchor: 'chapter',
+          x: Math.max(12, Math.round((window.innerWidth || 1200) / 2 - 160)),
+          y: Math.max(12, Math.round((window.innerHeight || 800) / 2 - 160)),
+          issue: '',
+          severity: 'minor',
+          saving: false,
+          error: '',
+        })
       }
 
       // 派生数据
@@ -2331,6 +2353,7 @@ window.__ModuleLoader__.load({
                 h(Btn, { small: true, onClick: () => bumpPref('size', 1, 13, 28) }, 'A+'),
                 h(Btn, { small: true, onClick: () => bumpPref('lead', 0.15, 1.6, 2.4) }, '行距'),
               ),
+              h(Btn, { small: true, onClick: openChapterOpinion, title: '整章意见：不用选中文字，直接对本章提意见' }, '📄 整章意见'),
               h(Btn, { small: true, onClick: () => active > 0 && setHistoryChapter(active) }, '历史版本'),
               immersive
                 ? null
@@ -2452,8 +2475,8 @@ window.__ModuleLoader__.load({
                 ? { left: '10px', right: '10px', bottom: 'calc(10px + env(safe-area-inset-bottom,0px))', top: 'auto', width: 'auto' }
                 : { left: `${pop.x}px`, top: `${pop.y}px` },
             },
-              h('div', { className: 'nd-note-pop-head' }, `第 ${pop.chapter} 章 · 加批注`),
-              h('div', { className: 'nd-note-quote' }, String(pop.quote).slice(0, 90)),
+              h('div', { className: 'nd-note-pop-head' }, `第 ${pop.chapter} 章 · ${pop.anchor === 'chapter' ? '整章意见' : '加批注'}`),
+              pop.quote ? h('div', { className: 'nd-note-quote' }, String(pop.quote).slice(0, 90)) : null,
               h(TextArea, {
                 value: pop.issue,
                 rows: 3,
@@ -5986,6 +6009,8 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const storageRes = useAsync(() => (projectId ? api('storage.status', scope(projectId)) : Promise.resolve(null)), [projectId])
+
       const rootValue =
         (settingsRes.data && (settingsRes.data.dataRoot || settingsRes.data.root || settingsRes.data.dataDir)) ||
         (project && (project.root || project.dataDir)) ||
@@ -6007,6 +6032,17 @@ window.__ModuleLoader__.load({
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         settingsRes.error ? h(ErrorBox, { error: settingsRes.error, onRetry: () => settingsRes.reload() }) : null,
+        storageRes.data
+          ? h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' }, h('h3', null, '🗄️ 数据存储')),
+              h('p', { className: 'nd-hint' },
+                storageRes.data.engine === 'sqlite'
+                  ? `SQLite（Node ${storageRes.data.node}）：账本、意见、段落索引按库查询；正文保存后本地增量同步，不消耗 AI。`
+                  : `当前环境不支持 SQLite，已降级为 JSON（${storageRes.data.reason || '原因未知'}）。功能可用，账本同步变慢；可升级 DSH/Node 恢复。`),
+              h('p', { className: 'nd-hint' },
+                `库文件：${storageRes.data.dbPath || '—'} ｜ 意见：${Object.entries(storageRes.data.opinions || {}).map(([k, v]) => `${k} ${v}`).join('，') || '暂无'} ｜ 账本：${storageRes.data.ledger ? `实体 ${storageRes.data.ledger.entities} / 提及 ${storageRes.data.ledger.mentions} / 待确认 ${storageRes.data.ledger.unknown}` : '—'}`),
+            )
+          : null,
         !form && settingsRes.loading ? h(Loading, null, '正在读取设置…') : null,
         form
           ? h('div', { className: 'nd-two-col' },
@@ -6149,7 +6185,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
