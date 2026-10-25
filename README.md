@@ -1,153 +1,279 @@
-# 长篇中文小说工作台 0.6.11
+# 📖 长篇中文小说工作台
 
-DSH 插件。给「读—批注—审—改」这套真实写作循环用的工作台：**打开就能看全文**，人工随时能参与；AI 只负责写和审，改不改由人逐条批。
+[![npm version](https://img.shields.io/npm/v/dsh-long-novel-workbench.svg)](https://www.npmjs.com/package/dsh-long-novel-workbench)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4b6bfb)](https://github.com/micellince/dsh-long-novel-workbench)
+[![Node](https://img.shields.io/badge/node-%5E22.19.0%20%7C%7C%20%3E%3D24.0.0-brightgreen)](package.json)
 
-## 它做什么
+一个装在 **DeepSeek Harness（DSH）** 里的长篇中文小说工作台：**打开就能看全文，AI 只负责写和审，改不改由你逐条批**。
 
-- **ATTENTION IS ALL YOU NEED（0.6.2 恢复一号原则）**：工作台顶部常驻原则条，总览页置顶 hero（平均注意力 / 最低三章 / 未测章数）；工作台转交与上下文也先给原则和全书注意力简报。所有写/改工作单（从头写 / 扩写 / 改写、单章重写、全文提案、开新书）**第一行**都是 `> ATTENTION IS ALL YOU NEED……先提交本章注意力设计（四拍 + designScore），再动笔`，并附最近 6 章曲线、疲劳预警、目标分、强制补强；run 的第一个阶段固定是「先定注意力设计」。写前没有注意力设计，`novel_desk_attention op="design"` 会硬校验四拍 + designScore；写正文与 run 开工都会返回全局提醒。冷读复测（`op=recheck`）不注入原则，保持读者视角纯净。
-- **全书账本同步（0.6.3）**：正文写完后账本可能还停在写作中途（AI 用 run 写完整本时尤其明显）。账本页「📚 全书同步」把正文按批（默认每批 6 章，可选 4 / 6 / 8 / 10）切开，每批生成一份【全书账本同步工作单】发给 AI 读正文补账本；进度写 `ledger-sync.json`，作者批准提案后点「本批已同步」记进度，可「重新制定计划」（章号范围相同的已完成批保留）或「清除计划」；计划建立后新写的章会单独提示未覆盖。AI 只能提 `ledger-fix` 提案改账本，改动仍要作者逐条批准。
-- **正文页优先**：连续阅读全本、目录（可新建/删除章节）、全文搜索（点结果精确跳到命中段落）、阅读位置记忆；设置页「📥 导入旧稿」（与导出并列）可扫描 + 导入任意目录或单个 .md / .txt（不要求 0001.md 命名；新建一部作品，原目录不动）；字号（13–28px）与行距可调；三种模式共用阅读位置（切编辑不丢段）；页内编辑（纯文本）；读者模式选中文本即可加批注；**沉浸模式**（只留阅读/编辑/审阅三颗按钮、正文接近全屏）与**仿纸正文底**（阅读/编辑同一张纸，宽窄屏一致）。
-- **四路审阅同权**：逻辑与事实 / 注意力 / 去 AI 味 / 读者批注。审阅只产「审阅条目」，不直接改正文。
-- **注意力可人工校准**：右栏直接改本章四拍实测分（钩子/张力/爽点/钩尾，合计即总分），改动写 `scoreHistory`。
-- **版本历史与回滚**：每次保存内容有变化自动备份，编辑栏「历史」可预览旧版并载回编辑器（载回后仍要保存才写盘）。
-- **开新书**：总览页或空库页「＋ 开新书」→ **只填书名/工作区名** → 选预设（4 套内置口径 + 「自定义（让 AI 定）」）→ 写一段想法 → 自动创建作品、**给这本书建一个独立 DSH 工作区，并在里面新开一个对话**把「方案 / 世界 / 地点 / 人物 / 全书大纲 / 伏笔」工作单发进去；AI 以提案提交，批准后进账本。选「自定义」时 AI 先出一份类型/篇幅/结构/风格 + **注意力总设计（attentionPlan）**的方案提案，批准后自动成为本书当前预设；大纲每章必须带四拍注意力设计（服务端硬校验，批准后自动写入注意力账本）。
-- **提案批次**：审阅条目 → AI 修改方案 → 段落级 before/after 提案；人逐条批准，批准才落盘。待批准提案支持全选与批量批准 / 批量驳回（驳回原因会写到每一条）。
-- **全文动作**（三个）：**从头写**（按大纲接着写新章，过闸门直接落盘）/ **扩写** / **改写**（改写再细分 文风 / 逻辑与事实 / 结构与节奏）；跑成 run，开工前先定注意力设计，点「开工」把工作单发进本书对话。除「从头写」外，产物只进提案。
-- **章节删除**：目录行「✕」或正文页「删除本章」；正文与本章审阅/批注/待批准提案一起清掉，已采纳/已驳回提案留作历史。
-- **用量按会话日志统计**：`usage.summary` 读本书工作区的 DSH 会话日志（含子代理会话族），按 `data.usage` 累计 tokens 并用 models.dev 价目估算人民币，不再只依赖工作台自己的记账文件。
-- **单一写入闸门**：任何正文写入都经过 `normalizeProse → 保真 → 残留扫描 → 去 AI 味 → 落盘`，不过闸不落盘；闸门会保留调用方传入的章节 meta（标题 / 状态 / 摘要），AI 写的新章标题不会丢。
-- **纯文本正文**：`chapters/NNNN.txt` 正文 + `NNNN.meta.json` 元数据；Markdown 只做导入导出与 AI 交换格式。旧项目的 `.md`（frontmatter）继续可读、原地写回。
-- **导出正文**：顶栏「⬇ 导出」或设置页「📤 导出正文」可把全本导成 **TXT / Markdown / EPUB 3 / DOCX**（可选附章节提要）。成品会洗掉写作期残留的 Markdown 标记；`※` 在 TXT 里留着，在 Markdown 里转成 `***`。零依赖，EPUB / DOCX 在内存里拼 ZIP 生成。
+> 当前版本 **0.6.11**（2026-10-26 发布）。这是 0.6 重写后的第一次公开发布——npm 上此前的 latest 是 0.5.1。
 
-## 数据
+## 它解决什么痛点
 
-沿用 `~/StoryDesk/projects/<id>/`：`project.json`、`chapters/`、`reviews.json`、`attention.json`、`proposals.json`、`runs.json` 与账本 JSON。与旧版 `dsh-long-novel-workbench` 共存读写，不迁移也能打开。
+写长篇的人都懂那种感觉：写到第三十章，突然想不起第三章里那个配角姓什么；伏笔埋了三十万字，自己先忘了埋在哪；设定越写越多，正文、大纲、笔记各说各话。更麻烦的是 AI——它会陪你聊，但要它先读完你的账本再动手，很难；它改起正文来又太快，你不敢直接让它改。
 
-## 世界地图
+这个插件把写作台搭在数据上面：章节、人物、事实、时间线、地点、世界、伏笔、冲突、高光、大纲都收在同一本书的账本里；AI 通过工具读这些账本，**只出审阅条目和提案**，正文只有你批准之后才会改（唯一的正文落盘入口是写入闸门）。日常只做一件事——**读、批注、审、改**，循环着往前走。
 
-账本「世界地图」页只有一件事：**照你自己的地点坐标画一张能用的地图**——没有 AI 生成、没有随机底图，打开就是结果。
+不限文体：武侠、悬疑、科幻、言情、文学现实都可以。四套内置写作预设（标准长篇 / 冷峻悬疑 / 家国武侠 / 文学现实）加一套自定义模板，也可以让 AI 先出一套方案。
 
-- **坐标即位置**：X/Y 直接用，不拉伸、不挪点、不做疏密变形；长安在洛阳西边，就画在西边。
-- **分区**：`world.json` 的 `mapStyle.aiPlan` 里若存过【区域】行（`地名区｜x 250–420，y 495–630｜地貌`），就按它画分区底纹；没存过就按地点的 `region` 归并兜底。
-- **路线**：`aiPlan` 里的【路线】行能落到真实地点的，画成虚线驿道；没有就按事件里的 `location` 顺序串一条行程线。
-- **山水**：水点（type 或名字带 江/河/湖/渡/渡口…）按最近邻连成水线并标名（如「渭水」）；山形来自 mountain/pass/关/山 这类地点沿地名的走向撒点。没有水点就不画河。
-- **地名避让**：按重要性排序找空位，放不下就等放大后再出（带引线）；宁可少一个字，也不压在地名上。
-- 工具栏四个开关：区域 / 山水 / 路线 / 地名；全屏地图支持滚轮缩放、拖动平移、重置、Esc 关闭，点地点出地点卡。
+> **⚡ ATTENTION IS ALL YOU NEED**
+>
+> 怎么吸引读者怎么来，一切为读者服务。先抓人，再自洽：每章必须有核心注意力；事实自洽是底线，不是目标。
 
-想换样子就改 `world.json` 的 `mapStyle.palette`（`ink` 水墨绢本 / `ochre` 赭石古卷 / `jade` 青绿山河 / `sepia` 羊皮纸 / `steel` 冷灰史诗 / `wine` 暗红纪事）。0.6.1 起不再提供「生成底图 / 换画风 / 让 AI 出方案」按钮：那些只会多花 token，画出来的东西还和地点对不上。
+- **注意力原则**：每章动笔前先提交**注意力设计**——主类型（事件 / 情感 / 文字 / 悬念 / 关系）、四拍（钩子 20 / 张力 20 / 回报 30 / 章末牵引 30）和设计分（0–100）。没有设计，工作单不会让你动笔：`design` 提交缺四拍或 `designScore` 直接拒绝，写正文与开工 run 也会收到注意力提醒。
+- 写完用**零上下文冷读**打实测分：不告诉 AI 旧分、梗概和账本，只给正文，按同一套四拍打分，结果写回注意力曲线。
+- 设计分与实测分差 ≥20，或实测低于全书均分 10 分，下一章的工作单会点名补强最弱的那一拍。
+- 这条原则是所有写 / 改工作单的第一行；**审阅工作单与冷读复测不注入它**，保持读者视角纯净。
 
-## 开发
+## 30 秒安装
 
-```bash
-node --test                          # 163 个测试
-node scripts/preflight.mjs           # 体检：装上没、有没有流水线在跑、还有多少 .md 待迁、自检
-node scripts/ui-smoke.mjs            # 界面冒烟：复制一份数据（含 chapters）→ 造 fixtures → 无头 Chrome 截图 12 个页面/页签
-node scripts/ui-smoke.mjs --size 500x844 --out /tmp/nd-mobile   # 手机宽度截图（验证远程/窄屏布局）
-node scripts/ui-e2e.mjs              # 界面端到端 116 条：真实 handler + store + CDP（编辑保存 / 过期提案 / 批准 / 审阅转提案 / 读者批注 / 手机长按选字 / 新建章节 / 全文动作 / 沉浸模式 / 仿纸底 / 导出 EPUB 与 TXT 真下载 / 无标记页不被覆盖 / 显式链接自动打开）
-node scripts/migrate.js --dry-run    # 旧 .md → .txt + meta，默认只打印计划
-node scripts/migrate.js --apply      # 明确要写才加 --apply（写前备份，逐章 sha256 校验）
-node scripts/migrate.js --verify     # 复核：按迁移报告重算 sha256，报出后来被改过的章节
+1. 打开 DeepSeek Harness；
+2. 进入 **设置 → 插件**；
+3. 在安装框里输入包名：
+
+   ```text
+   dsh-long-novel-workbench
+   ```
+
+4. 安装完成后刷新页面；
+5. 左下角侧栏出现 **📖 小说工作台**，点开就能用。
+
+也可以在命令行安装：
+
+```sh
+dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 ```
 
-模块边界与接口见 [`docs/REBUILD-CONTRACT.md`](docs/REBUILD-CONTRACT.md)，当前已验证到什么程度见 [`docs/ACCEPTANCE-0.6.md`](docs/ACCEPTANCE-0.6.md)（163 个测试、界面端到端 116 条、真实数据只读冒烟、未做的部分都写在里面）。设计背景见旧仓库的 `docs/DESIGN-0.6.0.md`。
+> **从源码或本地 link 安装（开发者）**：`git clone` 后让 profile 指向本仓库（用 `plugin_manager` 的 `install_bundle`，target 填仓库绝对路径）。完整步骤、升级 / 切换、热重载、`preflight` 体检、旧稿迁移与发版说明见 [docs/DEV-INSTALL.md](docs/DEV-INSTALL.md)。
 
+## 第一次打开
 
-### 资料库（账本页）
+- **已有作品**：作品数据在 `~/StoryDesk/projects/<id>/`，打开工作台就能列出来，旧项目不需要迁移就能读。
+- **开新书**：总览页或空库页点 **＋ 开新书** → 只填书名（同时作为工作区名）→ 选写作预设（或「自定义（让 AI 定）」）→ 写一段想法。工作台会创建作品、**给这本书建一个独立 DSH 工作区，并在里面新开一个对话**，把「方案 / 世界 / 地点 / 人物 / 全书大纲 / 伏笔」工作单发进去；AI 以提案提交，你批准后才进账本。
+- **导入旧稿**：设置页 **📥 导入旧稿**（顶栏「⬆ 导入」直达）可以扫描任意目录或单个 `.md` / `.txt`，不要求 `0001.md` 命名，导入会新建一部作品，**原目录不动**。
+- **打开方式**：侧栏 **📖 小说工作台** = 在系统默认浏览器打开全屏网页版后台（认证复用 DSH，关掉 DSH 网页即失效）；侧栏 **⧉** = 不跳浏览器，留在 DSH 窗口内的浮层。手机 / DSH Remote 上，普通页面仍是 DSH，只有「在默认浏览器打开」生成的专属链接会直接进入工作台，窄屏有可滚动的顶部导航和常驻关闭按钮。
 
-一个「账本」页容纳 9 个页签：**事实库 / 人物卡 / 时间线 / 地点 / 世界地图 / 高光 / 冲突 / 伏笔 / 大纲**。
+## 先看几张图
 
-- **人物卡**：目标 / 缺陷 / 弧光 / 关系，用卡片看，不再是一行行表格；
-- **时间线**：按章号与故事时间排序，高潮/重大事件着色，点章号跳正文；
-- **世界地图**：按地点坐标直绘 SVG（分区底纹 / 水线山形 / 驿道路线 / 地名避让），点地点看详情与相关事件；
-- **大纲 / 高光**：0.5.x 旧数据直接读得到，可编辑。
+> 截图来自演示数据：一部 24 章的合成武侠长篇《云隐剑歌》，用于展示界面，不涉及任何真实作品。
 
-### 账本同步提醒
+**正文页：打开就是全文** —— 左目录、中间连续阅读、右栏是本章注意力与审阅统计。
 
-改正文时如果动到了账本里的**人名 / 地名 / 事实里的数字**，顶部会出现「⚠ 第 N 章正文改到了账本里的名字/数字」，可以：
+![正文页](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/01-read.png)
 
-- 点「让 AI 核对」→ 生成一份账本核对工作单（只允许提有依据的 `ledger-fix` 提案）；
-- 点「已核对，忽略」→ 清掉这条提醒。
+**审阅收件箱：四路同权** —— AI 味 / 事实逻辑 / 注意力 / 四路一起审四个入口，每条审阅都带逐字引文。
 
-没碰到账本内容的改动**不会**打扰你。**AI / run 写出来的正文同样会记这条信号**（0.6.3 起统一在写入闸门里记），不再只有手动编辑才提醒。
+![审阅](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/02-reviews.png)
 
-**全书写完以后的账本同步（0.6.3）**：正文页写完整本后，账本常常还停在写作中途——时间线缺后半本、人物卡没更新、`events.json` 甚至是空的。账本页右上角「📚 全书同步」走四步：
+**提案：AI 只出提案，人逐条批** —— 按状态筛选，可全选批量批准 / 驳回；展开看「原文 / 改为」。
 
-1. 「制定同步计划」：按每批 4 / 6 / 8 / 10 章把正文切批（默认 6 章），进度存 `~/StoryDesk/projects/<id>/ledger-sync.json`；
-2. 「发送下一批工作单」：生成【全书账本同步工作单】发到宿主对话，AI 读这一批正文，只提有依据的 `ledger-fix` 提案（带账本现状与已有条目名，避免重复造条目）；
-3. 在工作台逐条批准提案（账本落地）；
-4. 回来点「本批已同步」记进度，再发下一批。全部完成后横幅自动消失。
+![提案](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/03-proposals.png)
 
-还可以「重新制定计划」（每批章数不变时，章号范围完全相同的已完成批会保留进度）、「清除计划」（只清计划，正文改动提醒不受影响）；计划建立后新写的章会显示「计划未覆盖第 N 章」提示重建。
+**全文动作 run** —— 从头写 / 扩写 / 改写三种动作，阶段进度与预算一目了然。
 
-### 审阅与提案：范围由你定，提案直接成文
+![全文动作](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/04-run.png)
 
-审阅页顶部四张卡：**AI 味审阅 / 事实逻辑审阅 / 注意力审阅 / 四路一起审**。
-点任一张 → 弹窗里逐章勾选范围（默认整本书；快捷按钮：全书 / 未审过的 / 有意见的 / 清空）+ 填「这次重点（可空）」→ 生成工作单 → 发到宿主对话或复制。系统不预设章数、不按顺序截断：勾了哪几章就审哪几章。
-四路同权：逻辑 / 注意力 / AI 味 / 读者。
+**总览** —— 置顶原则条与平均注意力 / 最低三章 / 未测章数，下面是注意力曲线与待办。
 
-审阅条目勾选后：
-- **生成修改提案**：AI 按意见把该段改写成成文正文，产出「原文 / 改为」段落补丁，每条补丁挂回对应审阅；提案页可先「编辑『改为』」再批准，采纳后审阅自动标为「已修复」。勾选里混有 chapter=0 的全书级条目时，会自动并进同一份工作单走全局修改，不会提示「先勾选」。
-- **全局修改意见**：把 chapter=0 的全书级问题归纳成一条全局修改意见，产出跨章 `book-fix` 提案，一次改到所有受影响章。
-- **冷读打分 / 复测**：AI 零上下文通读后打实测分（钩子 / 张力 / 回报 / 章末牵引），写回注意力曲线；正文页侧栏也有「🧊 AI 冷读打分本章」入口。
+![总览](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/05-overview.png)
 
-### **发到哪个对话**：审阅工作单 / AI 底图方案 / 账本同步工作单都能选「自动（最近在用）/ 新开一个对话 / 指定某个会话」，发成功后自动跳回那个对话；
+**账本 · 世界地图** —— 按地点坐标直绘：分区、水线山形、驿道路线与地名避让。
 
-写作预设
+![世界地图](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/06-ledger-map.png)
 
-设置页「📚 写作预设」：内置 5 套（标准长篇 / 冷峻悬疑 / 家国武侠 / 文学现实 / 自定义模板），可 ＋新建、编辑、删除、应用、**复制绝对模板**（字段说明见 `docs/PRESET-TEMPLATE.md`）。换预设不改正文。
+**账本 · 人物卡** —— 按主角 / 反派 / 配角分组，几十号人物一眼能扫。
 
-### 版本历史
+![人物卡](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/07-ledger-characters.png)
 
-正文页工具栏任何模式下都有「历史版本」：列出版本 → 预览 → 载入编辑器 → 仍需保存（写入统一过闸门）。
+**沉浸模式** —— 收掉顶栏、导航与侧栏，正文接近全屏，只留阅读 / 编辑 / 审阅三颗按钮和字号。
 
-### 三种模式
+![沉浸模式](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/08-immersive.png)
 
-- **阅读**：纯读，不改正文；`j`/`k` 翻章、`/` 搜索、字号与行距可调；
-- **编辑**：直接改正文，2 秒自动保存、⌘S 立即保存、冲突按 `baseHash` 拦；
-- **审阅**：选中正文文字 → 提交批注（`source=reader`），作为四路审阅之一进入收件箱。
+**手机阅读** —— 窄屏布局、长按选字加批注、字号照样可调。
 
-### 位置同步：三种模式共用一个阅读位置（0.6.11）
+![手机阅读](https://raw.githubusercontent.com/micellince/dsh-long-novel-workbench/main/docs/screenshots/09-mobile-read.png)
 
-改稿时最烦的是「切到编辑 → 从头找刚才那段 → 切回阅读又回到书首」。0.6.11 起三种模式共用同一个位置：
+## 核心循环：读 → 批注 → 审 → 改
 
-- **阅读 / 审阅 → 编辑**：按你正在读的那一段（段落，不是章首）打开本章，textarea 自动滚到该段，光标落在段首，可以直接打字。
-- **编辑 → 阅读 / 审阅**：按 textarea 光标所在的段落回算，正文滚回该段顶部；在编辑里改到别的段落再切回来，就落在最后光标那一段。
-- **阅读 ↔ 审阅**：同一套连续正文，位置天然不变。
-- **重开页面**：滚动停下 300ms 后把「章 + 段」写进 `localStorage:nd.pos.<作品id>` 与 `.para`，下次打开直接回到同一段（不再只恢复到章首）。
-- **沉浸模式切换**：按当前段重新落位，不会退回章首。
-- 手机同样生效：切到编辑会把 textarea 滚到该段（会弹键盘，这是进入编辑态的预期行为）。
-- 精度是**段落级**（段首对齐），不追到行号；这些数据只存本机浏览器，不写回作品文件。
+| 一步 | 你做什么 | 工作台做什么 |
+| --- | --- | --- |
+| **读** | 在正文页连续读全本，或只看某一章 | 打开就是全文：`j` / `k` 翻章、`/` 搜索并精确跳到命中段落、字号 13–28px 与行距可调、记住阅读位置 |
+| **批注** | 切到审阅模式，选中正文里不顺的那句，写下你的意见 | 读者批注以 `source=reader` 进入审阅收件箱，和 AI 的意见排在一起 |
+| **审** | 按需勾选章节，跑 AI 审阅；或让 AI 零上下文冷读打分 | 四路同权审阅（逻辑与事实 / 注意力 / 去 AI 味 / 读者），每条必须带逐字引文；冷读打分只给正文、不给旧分 |
+| **改** | 勾选审阅条目 → 生成修改提案 → 逐条批准 / 编辑后批准 | AI 产出段落级 `before / after`（或整章重写、跨章 `book-fix`、账本 `ledger-fix`），**批准才落盘，落盘仍要过闸门** |
 
-> 编辑和审阅仍然是两个模式（审阅要连续全文选字加批注，编辑是单章 textarea 直改）；这次只把「位置」打通。如果以后想把两者并成一个模式（边读边改边批注），再单独做。
+所有 AI 产出都先停在「提案」里；工作台不会背着你改正文。批量写 / 扩 / 改走「全文动作」的 run，同样只按阶段推进、可暂停可中止。
 
-### 沉浸模式与仿纸底（0.6.10）
+## 功能一览
 
-- 工具栏「⛶ 沉浸」：收掉顶栏、左导航、目录、右栏与原则条，**正文区只留「阅读 / 编辑 / 审阅」三颗按钮 + 退出**，面板铺满视口，正文接近全屏；`Esc` 先退沉浸（不会顺手关掉工作台）。开关记在 `localStorage:nd.immersive`，手机窄屏同样可用（右上角只留一个退出图标）。手机审阅靠**长按选字**：监听 `selectionchange` / `touchend`（长按选字不会触发 `mouseup`），批注框在窄屏是贴底面板，切到审阅时左侧会显示「审阅：选中文字 → 加批注」。**顶栏左侧**还有 `− 15 +` 字号控件（13–28px，只是 CSS 字号，不加载任何字体；窄屏顶栏分两行，控件始终在顶部，不压正文；窄屏不再用 `!important` 钉死字号，手机上调字号真的会变）。
-- 阅读区和正文编辑器换成**同一张仿纸底**（暖纸色 + 极淡纤维纹理，固定暖色、不随宿主明暗主题反转）；编辑器不再用等宽字体，和阅读共用字号 / 行距，改稿时看到的就是成稿的样子。宽屏、窄屏一致。
+### 正文页优先：连续阅读、页内编辑、读者批注
 
+- **连续阅读**：三栏布局（目录 ｜ 阅读区 ｜ 右栏），默认打开就是全文，不是一页一张表单。
+- **三种模式**：**阅读**（纯读，不改正文）｜ **编辑**（页内 `textarea` 直改正文，停止输入 2 秒自动保存，`⌘S` 立即保存；正文被别人改过时按 `baseHash` 拦下来提示刷新）｜ **审阅**（选中正文文字即可加读者批注）。
+- **搜索与目录**：全文搜索点结果精确跳到命中段落；目录可新建 / 删除章节。删除会一并清掉本章审阅、批注与待批准提案，已采纳 / 已驳回的提案留作历史。
+- **单章历史版本**：每次保存正文有变化都会自动备份，历史版本可预览、可载回编辑器（载回后仍要保存才写盘）。
+- **阅读位置同步（0.6.11）**：阅读 / 编辑 / 审阅三种模式共用同一个位置，精度到**段落**。阅读切编辑会打开本章并把编辑器滚到那一段、光标落在段首；编辑切回阅读会落回光标所在段；滚动停下 300ms 后写到本机 `localStorage`，重开页面回到同一段。沉浸模式切换也不会退回章首。这些只存本机浏览器，不写回作品文件。
+- **沉浸模式（0.6.10）**：工具栏 **⛶ 沉浸** 收掉顶栏、左导航、目录、右栏与原则条，正文区只留「阅读 / 编辑 / 审阅」三颗按钮和字号 `− 15 +`；`Esc` 先退出沉浸（不会顺手关掉工作台）；开关记在本机。
+- **仿纸正文底（0.6.10）**：阅读区与正文编辑器共用同一张暖纸（极淡纤维纹理），编辑器不再用等宽字体，和阅读共用字号 / 行距——改稿时看到的就是成稿的样子；宽屏窄屏一致，纸色不随宿主明暗主题反转。
+- **手机 / 窄屏**：窄屏自适应布局；审阅靠**长按选字**加批注（批注框是贴底面板）；字号上下限（13–28px）在手机上真的生效，不加载任何网络字体。
 
-## 安装 / 切换（必须原子操作）
+### 四路审阅与冷读打分
 
-0.6（本包）与旧版 0.5 **不能同时启用**：两者都注册 `/novel-desk/api` 路由，且工具名 `novel_desk_propose`、`novel_desk_review` 重名——同时加载会在插件装配期抛错。旧仓库目录已改名为 `dsh-long-novel-workbench-0.5.2` 留档，发布名回到 `dsh-long-novel-workbench`（0.6.2）。
+- 审阅页顶部四张卡：**AI 味审阅 / 事实逻辑审阅 / 注意力审阅 / 四路一起审**。点任一张 → 逐章勾选范围（默认整本书，快捷：全书 / 未审过的 / 有意见的 / 清空）并填「这次重点」→ 生成工作单发到对话。**不预设章数、不按顺序截断**，勾了哪几章就审哪几章。
+- 四路同权：**逻辑与事实 / 注意力 / 去 AI 味 / 读者批注**。每条审阅必须带该章正文里逐字出现、且只出现一次的引文（≥4 字）；全书级问题用 `chapter=0`。
+- 勾选审阅条目后可以：**生成修改提案**（AI 把这段改写成成文正文，产出段落补丁）、**全局修改意见**（`chapter=0` 的问题归成一条全局意见，每个问题出一条跨章 `book-fix` 提案）、**冷读打分 / 复测**（零上下文通读，按四拍打实测分，写回注意力曲线）。
+- **冷读打分的入口**：审阅页「冷读打分 / 复测」、正文页侧栏「🧊 AI 冷读打分本章」、总览页注意力曲线卡「冷读打分」。打分说明会原样进工作单；复测不透露旧分。
+- **注意力可人工校准**：右栏可以直接改本章四拍实测分（钩子 / 张力 / 回报 / 章末牵引，合计即总分），改动写进 `scoreHistory`。
 
-**状态：已切换（2026-10-24 17:34；同日恢复原名 `dsh-long-novel-workbench`；2026-10-24 版本 0.6.2 恢复注意力一号原则；2026-10-25 版本 0.6.3 加全书账本同步）。** 旧包已 remove，`dsh-long-novel-workbench@0.6.3` 已装在 `desktop` profile（`link:…/dsh-long-novel-workbench`）；新会话里能看到 6 个 `novel_desk_*` 工具，`/novel-desk/api/ping` 无凭证返回 401（守卫生效）。以后重装/升级同一套步骤：
+### 提案批次
 
-1. 确认旧插件没有正在跑的 AI 会话（`node scripts/preflight.mjs` 会报）。
-2. `plugin_manager` 先 `remove_bundle` 旧包 `dsh-long-novel-workbench`（若还在）。
-3. `install_bundle` 本地包目录绝对路径 `/Users/micellince/Documents/deepseek-harness/dsh-long-novel-workbench`。
-4. 刷新 DSH 页面，侧栏底部出现「小说工作台」。
+- 提案分四种：`patch-paragraph`（逐段原文 / 改为）、`rewrite-chapter`（整章新正文）、`ledger-fix`（账本修订）、`book-fix`（跨章全书修改）。
+- 提案页按状态分「待批准 / 未通过闸门 / 已采纳 / 已驳回 / 已修订」；展开可以看「原文 / 改为」，并**直接编辑「改为」再批准**。
+- 待批准提案支持全选与**批量批准 / 批量驳回**（驳回原因会写到每一条）；采纳后关联审阅自动标为「已修复」。
+- 工作单可以选发到「自动（最近在用）/ 新开一个对话 / 指定某个会话」，发送成功后自动跳回那个对话。
 
-日常命令（package.json 里也有同名 alias：`npm run preflight` / `migrate` / `e2e` / `smoke` / `check`）：`npm test`、`npm run check`、`npm run preflight`、`npm run e2e`。
+### 全文动作 run
 
-## 打开方式
+- 三种动作：**从头写**（`continue`，按大纲接着写新章，过闸门直接落盘）、**扩写**（`expand`）、**改写**（`rewrite`，再细分 文风 / 逻辑与事实 / 结构与节奏）。
+- 范围可以是全书、单章或区间；run 有阶段进度与预算（tokens / 费用），可暂停、恢复、中止。
+- 点「开工」才把工作单发进本书对话；**除「从头写」外，产物只进提案**。
+- run 的第一个阶段固定是「先定注意力设计」——没有设计不动笔。
 
-- **点侧栏「📖 小说工作台」= 在系统默认浏览器打开网页版后台**（全屏正文页，就像普通网页后台）。认证复用 DSH 宿主：插件调 `connection.authenticatedUrl()` 拿到带一次性 token 的地址，浏览器首次打开时宿主换成 cookie，之后就是正常 Web 会话。
-- **关掉 DSH，这个网页就失效**（宿主 Web 服务停止），符合「关 dsh 自动关闭」；反过来浏览器标签关掉也不影响 DSH。
-- 侧栏「⧉」小按钮 = 不跳浏览器，留在 DSH 窗口内用浮层（与网页版是同一套界面）。
-- **DSH Remote（手机远程）与显式工作台链接互不影响**（0.6.3）：不带标记的 DSH / Remote 页面正常显示 DSH，不会自动铺工作台；打开「在默认浏览器打开」生成的专属链接（标记在 `#novel-desk=1`，不是 query）则在桌面和手机上都会直接进入工作台。标记放 hash 是因为宿主认证会用 `303 Location: ./` 换 cookie，query 会被丢掉。工作台内仍可从侧栏入口打开；窄屏有可滚动的顶部导航、横向目录条和右下角常驻关闭按钮，不会出现关不掉的浮层。
-- 自动拉起浏览器失败时（例如无 GUI 环境），界面会给出可复制的链接。
+### 账本与全书同步
 
-数据无需迁移即可读（旧 `.md` 原样可读、写回原格式）。需要把旧项目统一转成 `.txt + meta.json` 时再运行 `node scripts/migrate.js --apply`（默认 dry-run，且项目有 running 流水线时拒绝执行）。
-迁移会逐章比对 sha256：**只有写回内容与源 `.md` 逐字一致才删 `.md`**，并把每章校验和写进 `<项目>/migration-report.json`；事后用 `--verify` 可复核哪些章节后来被正常编辑过。
+- 账本页把一本书的资料收在一个页面里：**事实库 / 人物卡 / 时间线 / 地点 / 世界地图 / 高光 / 冲突 / 伏笔 / 大纲**。
+- **人物卡**用卡片看（目标 / 缺陷 / 弧光 / 关系），不再是一行行表格；**时间线**按章号与故事时间排序，高潮 / 重大事件着色，点章号跳正文；**大纲 / 高光**等旧数据直接读得到、可编辑。
+- **账本同步提醒**：改正文如果动到了账本里的**人名 / 地名 / 事实里的数字**，顶部会出现「⚠ 第 N 章正文改到了账本里的名字 / 数字」，可以点「让 AI 核对」（生成账本核对工作单，只允许提 `ledger-fix` 提案）或「已核对，忽略」。没碰到账本内容的改动不会打扰你；AI / run 写出来的正文同样会记这条信号。
+- **全书账本同步（0.6.3）**：整本写完后账本常常还停在写作中途。账本页右上角 **📚 全书同步** 把正文按批（默认每批 6 章，可选 4 / 6 / 8 / 10）切开，每批生成一份【全书账本同步工作单】发给 AI 读正文补账本；AI 只能提 `ledger-fix` 提案，作者批准后点「本批已同步」记进度。可以「重新制定计划」（章号范围相同的已完成批保留）或「清除计划」；计划建立后新写的章会单独提示未覆盖。
 
-⚠️ 迁移会把 `chapters/*.md` 改写成 `*.txt`（正文逐字不变，原目录整体备份到 `.pre-0.6.0/`），**旧插件只认 `.md`，迁移后会显示 0 章**——所以务必等旧插件已移除、0.6 已接管之后再迁移。
+### 世界地图
+
+- 账本「世界地图」只做一件事：**照你自己的地点坐标画一张能用的地图**——坐标即位置，不拉伸、不挪点、不做疏密变形。
+- 分区：若 `world.json` 的 `mapStyle.aiPlan` 里存过【区域】行就按它画分区底纹，没存过就按地点的 `region` 归并兜底；路线：`aiPlan` 里的【路线】行能落到真实地点的画成虚线驿道，没有就按事件里的 `location` 顺序串一条行程线。
+- 山水：水点连成水线并标名（如「渭水」），山形沿 mountain / pass / 关 / 山 这类地点撒点；地名按重要性避让，宁可少一个字也不压在地名上。
+- 工具栏四个开关：区域 / 山水 / 路线 / 地名；全屏地图支持滚轮缩放、拖动平移、重置、`Esc` 关闭，点地点出地点卡。
+- 换样子改 `world.json` 的 `mapStyle.palette`：`ink` 水墨绢本 / `ochre` 赭石古卷 / `jade` 青绿山河 / `sepia` 羊皮纸 / `steel` 冷灰史诗 / `wine` 暗红纪事。0.6.1 起不再提供「生成底图 / 换画风 / 让 AI 出方案」按钮——那些只会多花 token，画出来还和地点对不上。
+
+### 开新书、写作预设与导入旧稿
+
+- **开新书向导**：书名（同时是工作区名）→ 选预设（4 套内置口径或「自定义（让 AI 定）」）→ 写一段想法 → 创建作品、独立工作区与对话，并把底座工作单发过去。选「自定义」时 AI 先出一份方案（类型 / 篇幅 / 结构 / 风格 + **注意力总设计**），批准后自动成为本书预设；大纲每章必须带四拍注意力设计。
+- **写作预设**：设置页 **📚 写作预设** 内置 5 套（标准长篇 / 冷峻悬疑 / 家国武侠 / 文学现实 / 自定义模板），可新建、编辑、删除、应用、复制绝对模板（字段说明见 [`docs/PRESET-TEMPLATE.md`](docs/PRESET-TEMPLATE.md)）。**换预设不改正文**，只影响之后生成的 AI 工作单。
+- **导入旧稿**：支持任意目录（递归找 `.md` / `.txt`，有 `chapters/` 优先）或单个 `.md` / `.txt`；单文件会先按「第 X 章」标题拆章，≥2 章才拆。章号优先取文件名数字前缀，冲突或缺失时按自然序排。扫描预览后才导入，导入会新建作品，原目录不动。
+
+### 导出正文
+
+顶栏 **⬇ 导出** 或设置页 **📤 导出正文** 可以把全本导成 **TXT / Markdown / EPUB 3 / DOCX**（可选附章节提要）。
+
+- 成品会洗掉写作期残留的 Markdown 标记；`※` 场景分隔在 TXT 里原样保留，在 Markdown 里转成 `***`。
+- 零依赖：EPUB / DOCX 在内存里拼 ZIP 生成，不需要装打包工具。
+- 导出只读数据、不写盘。
+
+### 用量统计
+
+`usage.summary` 读本书工作区的 DSH 会话日志（含子代理会话族），按 `data.usage` 累计 tokens，再用 models.dev 价目估算人民币；旧 `usage.json` 的字段仍保留在顶层兼容。
+
+## AI 与工具链
+
+工作台自己不写正文。所有 AI 动作都是同一条链路：**工作台生成工作单 → 发到你选的对话 → AI 调 `novel_desk_*` 工具执行 → 结果以审阅 / 提案回到工作台**。你也可以直接在对话里让 AI「审一下第 2 章」「按大纲从头写下一章」，它会先读账本再动手。
+
+7 个工具（新的对话里就能看到）：
+
+| 工具 | 用途 |
+| --- | --- |
+| `novel_desk_read` | 读作品列表 / 设定与账本摘要 / 目录 / 单章正文 / 审阅收件箱 / 提案 / run / 账本 / 全文搜索（返回紧凑文本，不是 JSON 大块） |
+| `novel_desk_review` | 提交审阅条目（四路 `source`，逐字 `quote` ≥4 字） |
+| `novel_desk_attention` | 注意力四拍：`design` 写设计 / `measured` 零上下文实测 / `workorder` 设计工作单 / `recheck` 冷读复测 |
+| `novel_desk_propose` | 提交提案（`patch-paragraph` / `rewrite-chapter` / `ledger-fix` / `book-fix`），不改正文 |
+| `novel_desk_write` | 经闸门写入整章正文（run 产正文入口），失败不落盘 |
+| `novel_desk_run` | 全文动作：start / status / advance / pause / resume / finish / abort |
+| `novel_desk_map` | 把地图区域 / 路线方案存进 `world.json`（兼容保留的入口，界面不再生成底图） |
+
+约束写在每个工作单里，也由服务端硬校验：
+
+- **单一写入闸门**：任何正文写入都按 `normalizeProse → 保真（数字 / 专名不能丢）→ 残留扫描 → 去 AI 味（>30 分判不过）→ 落盘` 执行；任一失败，提案标 `needs-fix`，正文不动。
+- **结论只走工具**：AI 不得直接改文件；审阅与提案的引文必须逐字命中当前正文、且能唯一定位，否则提交阶段就被拒绝。
+- **注意力前置**：所有写 / 改工作单第一行都是 `> ATTENTION IS ALL YOU NEED……先提交本章注意力设计（四拍 + designScore），再动笔`，并附最近 6 章曲线、疲劳预警、目标分与强制补强；`novel_desk_attention op="design"` 缺任一拍或 `designScore` 直接拒绝。
+- **工作台接口**：只有一个 RPC 入口 `POST /novel-desk/api`，复用 DSH 宿主认证，未认证请求 401，不返回任何 CORS 头。
+
+## 数据在哪、怎么升级
+
+数据都在本机，纯文本 + JSON，没有数据库、没有私有格式；停用插件数据也还在，可以直接备份、进 Git、用别的编辑器打开。
+
+```text
+~/StoryDesk/
+  library.json
+  projects/<id>/
+    project.json
+    chapters/NNNN.txt          ← 0.6 新章：纯文本正文
+    chapters/NNNN.meta.json    ← 章级元数据（标题 / 状态 / 摘要 / 闸门结果…）
+    chapters/NNNN.md           ← 0.5.x 旧章：frontmatter + 正文，原地读写回
+    reviews.json               ← 四路审阅
+    attention.json             ← 注意力账本（按章）
+    proposals.json             ← 提案
+    runs.json                  ← 全文动作
+    facts.json characters.json events.json foreshadow.json conflicts.json locations.json world.json presets.json
+    ledger-sync.json           ← 账本同步信号与全书同步计划
+    .backups/                  ← 章节历史版本
+```
+
+数据根可以用环境变量 `STORY_DESK_ROOT` 覆盖（测试 / 多套数据时很有用）。
+
+### 0.5.x 兼容与升级注意
+
+- **旧项目直接可读**：0.5.x 的 `chapters/NNNN.md`（带 frontmatter）继续可读，也**原地写回 `.md`**，不认识的 frontmatter 字段原样保留；新章才写 `.txt + .meta.json`。旧 `attention.json`、`reviews.json`、账本文件与旧提案都能读，不会误删；0.5.x 的老提案原样保留，但不在 0.6 提案页里处理。
+- **0.5 与 0.6 不能同时启用**：两者都注册 `/novel-desk/api`，且工具名 `novel_desk_propose`、`novel_desk_review` 重名——同时加载会在插件装配期直接报错。升级时先移除旧插件，再安装 0.6；顺序见 [`docs/DEV-INSTALL.md`](docs/DEV-INSTALL.md)。
+- **迁移是可选的**：不想改文件格式就什么都不用做。需要把旧项目统一成 `.txt + meta.json` 时再跑 `node scripts/migrate.js`（默认 dry-run；`--apply` 前整目录备份到 `.pre-0.6.0/`，逐章 sha256 校验，并写 `migration-report.json`；`--verify` 可复核后来被改过的章）。**迁移后旧插件只认 `.md`、会显示 0 章**，所以务必等旧插件已移除、0.6 已接管之后再迁移。
+
+## 开发与测试
+
+需要 **Node `^22.19.0 || >=24.0.0`**（`package.json` 的 `engines`）。仓库没有第三方依赖，也没有构建步骤；测试用 Node 内置的 `node:test`，零依赖。
+
+```sh
+git clone https://github.com/micellince/dsh-long-novel-workbench.git
+cd dsh-long-novel-workbench
+
+npm test            # node --test test/*.test.js：164 个测试
+npm run check       # node --check：index.js / client.js / lib/*.js 语法检查
+npm run e2e         # 界面端到端 116 条：无头 Chrome + CDP，真实 HTTP handler + 真实 store（临时副本）
+npm run smoke       # 界面冒烟：12 个页面 / 页签逐一挂载并截图
+npm run smoke -- --size 500x844   # 手机宽度截图，验证窄屏布局
+```
+
+- 测试与脚本都跑在临时副本上，**不写 `~/StoryDesk`**；`e2e` / `smoke` 需要本机有 Chrome（可用 `--chrome` 指定路径）。
+- 改 Host 代码（`index.js`、`lib/*.js`）后需要重载插件；改 `client.js` 后刷新页面即可。
+- 本地 link 安装、升级 / 切换、`preflight` 体检、`migrate` 迁移、打开链路与发版流程见 [docs/DEV-INSTALL.md](docs/DEV-INSTALL.md)。
+
+## 文档索引
+
+| 文档 | 内容 |
+| --- | --- |
+| [`docs/REBUILD-CONTRACT.md`](docs/REBUILD-CONTRACT.md) | 重建契约：数据模型（Chapter / Review / Attention / Proposal / Run）、模块边界、RPC 与工具、客户端结构 |
+| [`docs/ACCEPTANCE-0.6.md`](docs/ACCEPTANCE-0.6.md) | 0.6.1 → 0.6.11 每一版的增减与验收证据：测试数字、真实数据只读验证、安全与共存、尚未验证 / 明确不做的部分 |
+| [`docs/MAP-MODEL.md`](docs/MAP-MODEL.md) | 地图模型：坐标、分区、路线、水线山形、地名落点规则 |
+| [`docs/PRESET-TEMPLATE.md`](docs/PRESET-TEMPLATE.md) | 写作预设的绝对模板与字段口径 |
+| [`docs/DEV-INSTALL.md`](docs/DEV-INSTALL.md) | 开发安装、升级切换、热重载、preflight、旧稿迁移、发版 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 参与贡献：环境、加载插件、测试与代码约定 |
+
+## 问题与反馈
+
+用着不顺手、缺功能、发现 bug，欢迎开 [Issue](https://github.com/micellince/dsh-long-novel-workbench/issues)；预设、检查规则都是数据驱动的，PR 也很好加。如果这个工作台帮你少踩一个坑，点个 ⭐ 就是最大的鼓励。
+
+## License
+
+[MIT](LICENSE)。拿去用，随便改。
+
+---
+
+## English summary
+
+**Long-form Chinese Novel Workbench** — a read → annotate → review → revise workbench for long Chinese novels, shipped as a DeepSeek Harness (DSH) plugin.
+
+- Manuscript first: continuous reading, in-page editing, reader notes, immersive mode, a paper-like page, and one shared paragraph-level reading position across read / edit / review.
+- Four equally weighted review lanes (logic & facts, attention, AI-style, reader notes), plus a zero-context cold read that scores each chapter on four attention beats.
+- Every AI change is a proposal — paragraph patches, chapter rewrites, cross-chapter book fixes, ledger fixes — and only human approval writes it to disk, through a single gate (normalize → fidelity → residue scan → AI-style audit → save).
+- A per-book ledger (facts, characters, timeline, locations, foreshadowing, conflicts, highlights, outlines), a coordinate-driven world map, and batched whole-book ledger sync keep canon in step with the prose.
+- First principle: **ATTENTION IS ALL YOU NEED** — design each chapter's hook, tension, payoff and cliff before writing, then measure it with an independent cold read.
+- Export to TXT, Markdown, EPUB 3 or DOCX; plain-text and JSON data in `~/StoryDesk`; MIT licensed.
+- Version 0.6.11, released 2026-10-26 (first release after 0.5.1). Install from DSH *Settings → Plugins* with the package name `dsh-long-novel-workbench`.

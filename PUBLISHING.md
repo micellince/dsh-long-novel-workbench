@@ -1,6 +1,7 @@
 # 发布与收录（DSH 插件）
 
-> 最后更新：2026-10-22（v0.5.1 发布：扩写 + 整本书收尾 + 队列修复）
+> 最后更新：2026-10-26（0.6.11 发布：整包重写为「读—批注—审—改」工作台）
+> 当前版本：`0.6.11` ｜ npm 上此前 `latest` 是 `0.5.1`
 
 ## 结论先说
 
@@ -12,124 +13,143 @@ DSH 插件**没有“官方登记”这一步**。一个插件要能被别人安
 
 许可证用 **MIT** 是社区惯例（本仓库已加 `LICENSE`）。
 
-## 已完成的配置
+## 发布状态（2026-10-26）
 
-- `package.json`
-  - `name`: `dsh-long-novel-workbench`（npm 上可用）
-  - `version`: 代码已是 `0.4.0`（**尚未发布到 npm**）；npm 上 `latest` 仍是 `0.3.1`
-  - `license`: `MIT`
-  - `repository` / `homepage` / `bugs` / `author` / `keywords`（含 `dsh-plugin`）
-  - `engines.node`: `^22.19.0 || >=24.0.0`
-  - `dsh.bundle.patch` + `dsh.client`（UI 必需）
-  - `files`：只发布运行所需文件
-- `LICENSE`：MIT
-- `cordis.patch.yml`：插入 `story-desk` 行，指向 `dsh-long-novel-workbench`
-- `client.js`：客户端模块 id 与包名一致
-- GitHub 仓库：<https://github.com/micellince/dsh-long-novel-workbench>（public，已加 `dsh-plugin` topic）
-- GitHub Release：`v0.3.1`，附带免版本号的 tarball
-  - `https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz`
-
-## 发布状态（2026-10-21）
-
-- [x] npm 已发布：`dsh-long-novel-workbench@0.3.1`，`latest` 指向 0.3.1
-  - https://www.npmjs.com/package/dsh-long-novel-workbench
-  - 发布时账号未开 2FA，npm 自动进入 staged publishing，随后版本正常上线；`0.0.0-stage` 是暂存占位版本，不影响安装
-- [x] 社区目录 PR 已开：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/8520>
-  - 条目分支：`micellince:add-dsh-long-novel-workbench`（只新增 `data/plugins/micellince__dsh-long-novel-workbench.yml`）
-  - **仓库年龄门槛**：目录要求仓库创建满 24 小时（CI 的 Submission gate 自动检查）。
-    本仓库创建于 **2026-10-21 22:50（Asia/Shanghai）**，门槛在 **2026-10-22 22:50** 之后自动满足。
-    gate 会自己重跑并转绿，**不需要重提、push 或关掉重开**；等它变绿即可。
-- [x] 0.4.0 / 0.4.1 已发布
-- [x] 0.5.0 已发布
-- [x] 0.5.1 已发布：tag `v0.5.1` → Publish workflow；GitHub Release v0.5.1（含稳定版 tarball）
-- [ ] 目录合并后：确认目录页/市场能搜到
+- **当前 npm `latest`：`0.5.1`**（0.6.11 发布后会指向 0.6.11）。
+- **0.6.11 的发版路径已确定：推 tag → GitHub Actions 发布**。
+  - 本机 npm 登录凭据已失效：`npm whoami` 返回 `E401 Unauthorized`，本地 `npm publish` 不可用，**不要在本地硬试**；
+  - 实际发版：推 `v0.6.11` tag → `.github/workflows/publish.yml` 先跑测试、校验 tag 与 `package.json` 版本一致，再用仓库 secret `NPM_TOKEN` 执行 `npm publish --access public`。仓库 secret 已有，`v0.5.1` 就是这样发出去的，链路可用；
+  - 发布后 npm 上 `latest` 应从 `0.5.1` 指向 `0.6.11`。
+- **GitHub Release**：正文用仓库里的 [`docs/releases/v0.6.11.md`](docs/releases/v0.6.11.md)，可直接整篇作为 Release 说明。
+- **社区目录已收录**：PR #8520 已合并，条目文件 `data/plugins/micellince__dsh-long-novel-workbench.yml`。
+  - 目录站的**版本号与下载数由市场每日探针（npm）自动更新**，不需要为 0.6.11 手动改版本；
+  - 市场详情页 README 由目录仓库的每日构建从本仓库 `README.md` 自动同步，也不用手工贴；
+  - 条目里的 `description`（en/zh）仍是 0.5.x 时代文案，**需要单独提一个 PR 更新**（本版由发布流程里的独立任务处理）。
+- [ ] 发布后确认：npm `latest` 指向 0.6.11、GitHub Release 可见、市场详情页在下次构建后显示新 README。
 
 ## 发版流程（以后每个版本）
 
-### 1. 发布到 npm
+### 0. 预检（发版前必须全绿）
 
 ```sh
-cd dsh-long-novel-workbench
-npm test                       # 先跑测试
-npm version patch|minor        # 0.4.0 用 minor
-npm publish --access public
+npm test          # 0.6.11：164/164
+npm run check     # index.js / client.js / lib/*.js 语法检查
 ```
 
-发布后验证：
+同时确认这几处版本/文案一致：
+
+- `package.json` 的 `version`（必须与将要打的 tag 完全一致，`v` + 版本号）；
+- `CHANGELOG.md` 顶部新增该版本条目（写实际发布日）；
+- `docs/releases/vX.Y.Z.md` 发布说明（GitHub Release 正文）；
+- `README.md` 里如果提到版本号/测试数量，一并更新；
+- `PUBLISHING.md`（本文件）的「发布状态」。
+
+### 1. 提交、打 tag 触发 npm 发布
 
 ```sh
-npm view dsh-long-novel-workbench version
-dsh plugin --profile web add dsh-long-novel-workbench
+git push origin main        # 发布提交先进 main
+git tag v0.6.11
+git push origin v0.6.11
 ```
 
-> 不想发 npm 也可以：市场支持用 GitHub Release 的 tarball 安装（本仓库已经准备好），
-> 目录条目里用 `tarball:` 字段指向它即可。
+推 tag 会触发 `.github/workflows/publish.yml`，它依次做：
 
-### 2. GitHub Release
+1. `npm test`（不绿就不发）；
+2. 校验 `v${package.json.version}` 与 tag 名一致（不一致直接失败）；
+3. 用 `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` 执行 `npm publish --access public`。
+
+> 仓库没有依赖与锁文件，**不要用 `npm ci` / `npm install`**（会因为没有 lockfile 失败）；测试与发布都不需要安装依赖。
+
+### 2. 发布后校验
+
+```sh
+npm view dsh-long-novel-workbench version        # 期望 0.6.11
+npm view dsh-long-novel-workbench dist-tags      # latest 应指向 0.6.11
+npm view dsh-long-novel-workbench time --json    # 看 0.6.11 的发布时间
+gh run list --workflow=publish.yml --limit 3     # Publish 工作流应为 success
+```
+
+装一遍确认能装上（换一个干净的 profile / 或先移除再装）：
+
+```
+plugin_manager({ action: "remove_bundle", target: "dsh-long-novel-workbench" })
+plugin_manager({ action: "install_bundle", target: "dsh-long-novel-workbench" })
+```
+
+装好后重载插件 + 刷新页面，侧栏应出现「📖 小说工作台」。
+
+### 3. GitHub Release
+
+```sh
+gh release create v0.6.11 \
+  --title "v0.6.11 · 长篇中文小说工作台" \
+  --notes-file docs/releases/v0.6.11.md
+```
+
+`docs/releases/` 下的发布说明是成套的，直接作为 Release 正文即可；截图用仓库 `docs/screenshots/` 下的 raw 链接。
+
+如果需要一个**免版本号**的稳定 tarball 安装地址（市场也可以用 `tarball:` 指过来）：
 
 ```sh
 npm pack
-# 生成 dsh-long-novel-workbench-X.Y.Z.tgz，重命名去掉版本号
-gh release create vX.Y.Z dsh-long-novel-workbench.tgz
+# 生成 dsh-long-novel-workbench-0.6.11.tgz，复制并去掉版本号
+gh release upload v0.6.11 dsh-long-novel-workbench.tgz
+# 稳定链接：
+# https://github.com/micellince/dsh-long-novel-workbench/releases/latest/download/dsh-long-novel-workbench.tgz
 ```
 
-### 3. 同步文档（容易漏）
+### 4. 文档同步（最容易漏）
 
-发版时一起改这几处版本号/状态：
-
-- `package.json` 的 `version`
-- `CHANGELOG.md` 顶部新增版本条目
-- 本文件「发布状态」与「已完成配置」里的版本号
-- `HANDOVER.md` 的当前版本与状态表
-- `README.md` 如提到版本，一并改
-- 目录条目不用改（npm 有新版本会自动体现）
+- `CHANGELOG.md`：新增版本条目；
+- `docs/releases/vX.Y.Z.md`：发布说明；
+- `PUBLISHING.md`：更新「发布状态」与「最后更新」；
+- `CONTRIBUTING.md`：如果测试数量 / 脚本 / 模块结构变了，同步更新；
+- `README.md`：公开内容（安装、功能、开发与测试）；
+- 目录条目：**不用改版本**（探针自动更新）；只有 `description` 这类静态文案变化时才需要 PR。
 
 ## 社区目录（awesome-dsh-plugin）
 
 目录仓库：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin>
-规则：一个 PR 加一个 `data/plugins/<owner>__<repo>.yml`；仓库创建满 1 天、有 `dsh.bundle`、有 `dsh-plugin` topic、描述与代码一致。
+规则：一个 PR 加 / 改一个 `data/plugins/<owner>__<repo>.yml`；仓库创建满 1 天、有 `dsh.bundle`、有 `dsh-plugin` topic、描述与代码一致（维护者会读源码核对，不要写营销词、不要堆容易过期的数字）。
 
-当前条目（已在 PR #8520 里）：
+我们的条目已合并（PR #8520）：`data/plugins/micellince__dsh-long-novel-workbench.yml`。
 
-```yaml
-url: https://github.com/micellince/dsh-long-novel-workbench
-name: micellince/dsh-long-novel-workbench
-category: workflow
-description:
-  en: "Long-form Chinese novel workbench: chapters, timeline, fact ledger, foreshadowing, conflicts, characters, highlights, reviews, proposals, plan alignment, nine agent roles, author-style presets, and built-in AI generation and review."
-  zh: "长篇中文小说工作台：章节、时间线、事实账本、伏笔、冲突、人物、高光、审稿、提案、计划对齐、11 个 Agent 分工（含注意力设计师、独立审稿人）、名家风格预设，并内置 AI 生成与审稿。"
-```
+- **版本号 / 下载数**：目录仓库的 nightly 探针会读 npm 自动更新，发完 npm 不用手动改；
+- **详情页 README**：目录仓库每日构建会从本仓库 `README.md` 同步，改 README 后等下一次构建即可；
+- **description**：静态文案，需要改时单独提 PR（0.5.x → 0.6.x 的描述更新由 0.6.11 发布流程中的独立任务处理）。
 
-如需补提/更新（一般不用）：
+需要更新 description 时的命令（示例，分支名按实际情况）：
 
 ```sh
 gh pr create \
   --repo awesome-dsh-plugin/awesome-dsh-plugin \
-  --head micellince:add-dsh-long-novel-workbench \
-  --title "Add micellince/dsh-long-novel-workbench" \
-  --body "Long-form Chinese novel workbench with fact ledger, timeline, foreshadowing, reviews, proposals, agent roles and AI generation."
+  --head micellince:update-description-0-6 \
+  --title "Update description for 0.6.x workbench" \
+  --body "Same plugin; 0.6 is a rewrite: read → annotate → review → revise workbench."
 ```
 
-CI 会检查：`dsh.bundle` 存在、仓库满 1 天、YAML 格式、README 自动生成。维护者会读源码核对描述，所以 `description` 不要写营销词、不要夸大工具数量。
+CI 会检查：`dsh.bundle` 存在、仓库满 1 天、YAML 格式、README 自动生成。
 
 ## 清单（发布前自查）
 
 - [x] `package.json` 声明 `dsh.bundle.patch`
 - [x] 带 UI 时声明 `dsh.client`（`platform: web`）
-- [x] 客户端模块 id 与包名一致
-- [x] `cordis.patch.yml` 与包名一致
+- [x] 客户端模块 id 与包名一致（`dsh-long-novel-workbench`）
+- [x] `cordis.patch.yml` 与包名一致（行 id `novel-desk`）
 - [x] `LICENSE`（MIT）
-- [x] `repository` / `homepage` / `bugs` / `keywords`
+- [x] `repository` / `homepage` / `bugs` / `keywords`（含 `dsh-plugin`）
 - [x] `files` 白名单，`npm pack` 内容正确
 - [x] GitHub public 仓库 + `dsh-plugin` topic + Release tarball
-- [x] npm 发布（0.3.1）
-- [x] 社区目录 PR（#8520，等仓库年龄门槛自动转绿）
-- [ ] 0.4.0 发布（测试全绿后）
+- [x] npm 发布走 tag → GitHub Actions（本地 token 不可用，见「发布状态」）
+- [x] 社区目录已收录（PR #8520 已合并）
+- [ ] 0.6.11 发布后：npm `latest` / Release / 市场详情页三项回读确认
 
-## 备注
+## 备注（踩过的坑）
 
-- 不要只声明 `dsh.client`：那只会在浏览器注册 UI，`dsh plugin add` 装不上。
-- 官方 `@deepseek-ai/*` 包如果被 import，应放 `peerDependencies`，不要放 `dependencies`。
-  本插件没有 import 官方包（工具用原始 JSON Schema 注册），因此无需 peer 依赖。
-- 目录收录不是安全审查；安装第三方插件会以你的权限执行代码。
-- 凭据：npm token 和 2FA 恢复码曾在旧会话里明文出现过，不要写进仓库；发版后建议 revoke 旧 token、重新生成恢复码。
+- **不要只声明 `dsh.client`**：那只会在浏览器注册 UI，`dsh plugin add` 装不上。
+- **0.6 与 0.5 不能同时启用**：两者注册同名路由与同名工具，同时加载会在插件装配期报错。切换必须原子（先移除旧包，再装新包），装完重载插件 + 刷新页面。
+- **2FA 与 token**：如果 npm 账号开了 2FA，CI 用的 `NPM_TOKEN` 必须是带 **Bypass 2FA** 的 granular token（只授权本包 read/write 即可）。这类 token 不能做 unpublish / 改 dist-tag 等治理动作。以后可换成 npm **trusted publishing（OIDC）**，见 `publish.yml` 里的注释——那样就不用长期在仓库里存 token 了。
+- **曾经的 staged publishing**：0.3.1 发布时账号未开 2FA，npm 自动进入 staged publishing，随后版本正常上线，`0.0.0-stage` 是暂存占位版本，不影响安装。
+- **官方 `@deepseek-ai/*` 包**如果被 import，应放 `peerDependencies`，不要放 `dependencies`。本插件没有 import 官方包（工具用原始 JSON Schema 注册），因此无需 peer 依赖。
+- **目录收录不是安全审查**；安装第三方插件会以你的权限执行代码。
+- **凭据**：npm token、2FA 恢复码、`.npmrc`、Cookie、个人绝对路径一律不要进仓库；发版后建议 revoke 旧 token、重新生成恢复码。CI 里只通过 GitHub Actions secrets 注入。
