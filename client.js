@@ -2124,12 +2124,23 @@ window.__ModuleLoader__.load({
         try {
           const value = await api('review.add', scope(projectId, { chapter: cur.chapter, reviews: [item], items: [item] }))
           const added = value && typeof value.added === 'number' ? value.added : 1
-          setPop(null)
-          if (window.getSelection) window.getSelection().removeAllRanges()
-          reviews.reload()
-          setNotice(added > 0 ? '已提交读者批注' : '没有新增：可能重复或引文未命中正文')
+          if (added > 0) {
+            // 提交成功才关弹窗；批注一律落盘，引文能否定位只做事后标记
+            setPop(null)
+            if (window.getSelection) window.getSelection().removeAllRanges()
+            reviews.reload()
+            setNotice('已提交读者批注')
+          } else {
+            // 没落盘就不许丢输入：保留弹窗与已写的内容，把原因写在弹窗里
+            const why = value && Array.isArray(value.skippedReasons) && value.skippedReasons.length
+              ? value.skippedReasons.join('；')
+              : '存储失败'
+            setPop((p) => (p ? { ...p, saving: false, error: `未写入：${why}` } : p))
+            reviews.reload()
+          }
         } catch (err) {
-          setPop((p) => (p ? { ...p, saving: false, error: friendlyError(err) } : p))
+          // 网络 / 服务端错误同样保留输入，作者可以直接再点一次提交
+          setPop((p) => (p ? { ...p, saving: false, error: `提交失败（内容已保留）：${friendlyError(err)}` } : p))
         }
       }
 
