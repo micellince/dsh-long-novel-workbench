@@ -829,6 +829,38 @@ window.__ModuleLoader__.load({
         options.map((opt) => h('option', { key: String(opt.value), value: String(opt.value) }, opt.label)),
       )
     }
+    // 插件更新检查卡：只读 npm，不自动安装
+    function UpdateCard() {
+      const [state, setState] = useState({ loading: false, data: null, error: '' })
+      const check = async () => {
+        setState({ loading: true, data: state.data, error: '' })
+        try {
+          const data = await api('update.check', { force: true })
+          setState({ loading: false, data, error: '' })
+        } catch (error) {
+          setState({ loading: false, data: state.data, error: friendlyError(error) })
+        }
+      }
+      const copy = () => {
+        const text = String((state.data && state.data.hint) || '')
+        try { navigator.clipboard.writeText(text) } catch { /* 无剪贴板权限 */ }
+      }
+      const data = state.data || {}
+      return h('section', { className: 'nd-card' },
+        h('div', { className: 'nd-card-head' }, h('h3', null, '🔄 插件更新')),
+        h('p', { className: 'nd-hint' }, `已装版本：${data.current || '—'}${data.latest ? ` ｜ npm 最新：${data.latest}` : ''}`),
+        data.error ? h(Msg, { tone: 'error' }, `检查失败：${data.error}`) : null,
+        data.latest && data.outdated ? h(Msg, { tone: 'warn' }, '有新版本可用：在 DSH 插件管理里更新本插件，更新后重载插件并刷新页面。') : null,
+        data.latest && !data.outdated ? h(Msg, { tone: 'ok' }, '已是最新版本。') : null,
+        state.error ? h(Msg, { tone: 'error' }, state.error) : null,
+        data.hint ? h('pre', { className: 'nd-pre' }, data.hint) : null,
+        h('div', { className: 'nd-actions' },
+          h(Btn, { small: true, kind: 'primary', onClick: check, disabled: state.loading }, state.loading ? '检查中…' : '检查更新'),
+          data.hint ? h(Btn, { small: true, onClick: copy }, '复制更新方式') : null,
+        ),
+      )
+    }
+
     function Tag({ children, tone }) {
       return h('span', { className: `nd-tag${tone ? ' nd-tag-' + tone : ''}` }, children)
     }
@@ -6149,6 +6181,7 @@ window.__ModuleLoader__.load({
 
       const storageRes = useAsync(() => (projectId ? api('storage.status', scope(projectId)) : Promise.resolve(null)), [projectId])
       const rolesRes = useAsync(() => api('roles.list'), [])
+      const unknownRes = useAsync(() => (projectId ? api('ledger.unknown', scope(projectId)) : Promise.resolve({ items: [] })), [projectId])
 
       const rootValue =
         (settingsRes.data && (settingsRes.data.dataRoot || settingsRes.data.root || settingsRes.data.dataDir)) ||
@@ -6171,6 +6204,26 @@ window.__ModuleLoader__.load({
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         settingsRes.error ? h(ErrorBox, { error: settingsRes.error, onRetry: () => settingsRes.reload() }) : null,
+        storageRes.data
+          ? h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' }, h('h3', null, '🧾 账本数据库')),
+              h('p', { className: 'nd-hint' }, storageRes.data.ledger
+                ? `实体 ${storageRes.data.ledger.entities} ｜ 提及 ${storageRes.data.ledger.mentions} ｜ 事实 ${storageRes.data.ledger.facts} ｜ 事件 ${storageRes.data.ledger.events} ｜ 高光 ${storageRes.data.ledger.highlights} ｜ 待确认专名 ${storageRes.data.ledger.unknown}`
+                : '账本数据库尚未建立。'),
+              h('p', { className: 'nd-hint' }, '首次建账：账本页跑一次「全书同步」，AI 会把人物/地点/事实/事件落库；之后改正文只做本地增量同步，不再花 AI。'),
+              unknownRes.data && Array.isArray(unknownRes.data.items) && unknownRes.data.items.length
+                ? h('div', { className: 'nd-unknown-list' },
+                    h('p', { className: 'nd-hint' }, '未登记专名（确认后记入别名，之后自动匹配）：'),
+                    unknownRes.data.items.slice(0, 30).map((item) => h('div', { className: 'nd-unknown', key: `${item.chapter}:${item.name}` },
+                      h('span', null, `${item.name}（第 ${item.chapter} 章 ×${item.count}）`),
+                      h(Btn, { small: true, onClick: async () => { try { await api('ledger.confirm', scope(projectId, { name: item.name, kind: 'character', chapter: item.chapter })); unknownRes.reload(); storageRes.reload() } catch (err) { /* 下一步再显示错误 */ } } }, '确认人物'),
+                      h(Btn, { small: true, onClick: async () => { try { await api('ledger.confirm', scope(projectId, { name: item.name, kind: 'location', chapter: item.chapter })); unknownRes.reload(); storageRes.reload() } catch (err) { /* 同上 */ } } }, '确认地点'),
+                    )),
+                  )
+                : null,
+            )
+          : null,
+        h(UpdateCard, null),
         rolesRes.data && Array.isArray(rolesRes.data.roles)
           ? h('section', { className: 'nd-card' },
               h('div', { className: 'nd-card-head' }, h('h3', null, '🧑‍🤝‍🧑 分工（7 角色）')),
@@ -6337,7 +6390,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}

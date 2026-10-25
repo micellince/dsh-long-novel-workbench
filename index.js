@@ -25,11 +25,15 @@ import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage
 import * as bookdb from './lib/bookdb.js'
 import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
 import { ROLES } from './lib/roles.js'
+import { checkLatest, updateHint } from './lib/update.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
 
 export const VERSION = '0.7.0-dev.0'
+
+/** 启动期错误（装配失败不拖垮 DSH，只记录并在诊断里显示）。 */
+const bootErrors = []
 
 /** API 前缀路由（客户端 fetch 相对路径）。 */
 export const ROUTE = '/novel-desk/api'
@@ -64,6 +68,8 @@ export const READ_OPS = [
   'export.book',
   'storage.status',
   'roles.list',
+  'update.check',
+  'diagnostics',
   'chapter.index',
   'opinions.list',
   'ledger.digest',
@@ -1287,6 +1293,21 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       if (version === undefined || version === null || String(version).trim() === '') throw invalid('缺少参数 version')
       return s.readChapterVersion(root, projectId, needNumber(payload, 'chapter'), String(version))
     }
+    case 'update.check': {
+      const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'))
+      const info = await checkLatest({ installed: String(pkg.version ?? ''), force: Boolean(payload.force) })
+      return { ...info, current: String(pkg.version ?? ''), hint: updateHint() }
+    }
+    case 'diagnostics': {
+      const info = await bookdb.storageStatus('')
+      return {
+        plugin: { name, version: VERSION },
+        node: process.versions?.node || '',
+        boot: bootErrors.slice(-20),
+        storage: info,
+        roles: ROLES.length,
+      }
+    }
     case 'roles.list':
       return { roles: ROLES }
     case 'storage.status': {
@@ -1797,6 +1818,7 @@ export function createHandler(ctx = {}, options = {}) {
 export function mountRoute(ctx) {
   if (!ctx || typeof ctx.inject !== 'function') return
   ctx.inject(['webServer'], (c) => {
+    try {
     const webServer = c?.webServer
     if (!webServer || typeof webServer.register !== 'function') return
     const connection = c.get?.('connection')
@@ -1833,6 +1855,9 @@ export function mountRoute(ctx) {
           }
         }
       }, 'novel-desk: api + boot')
+    }
+    } catch (error) {
+      bootErrors.push({ at: 'webServer', message: error?.message || String(error) })
     }
   })
 }
@@ -2299,7 +2324,7 @@ const attentionTool = {
 
 const writeTool = {
   name: 'novel_desk_write',
-  description: '用闸门写入章正文（规范化/保真/残留/去AI味），失败不落盘并返回失败项；纯文本、禁 Markdown、场景分隔 ※。',
+  description: '用闸门写入章正文（规范化/保真/残留/去AI味），失败不落盘并返回失败项；纯文本、禁 Markdown、场景分隔 ※；首行必须是回目标题（第X回 …），标题属于正文。',
   parameters: {
     type: 'object',
     properties: {
@@ -2501,9 +2526,20 @@ export const TOOLS = [readTool, reviewTool, proposeTool, attentionTool, writeToo
 // ── 入口 ────────────────────────────────────────────────────
 
 export function apply(ctx) {
-  mountRoute(ctx)
+  // 装配期任何异常都不能冒出去拖垮 DSH：记录到诊断，其余能力继续注册。
+  try {
+    mountRoute(ctx)
+  } catch (error) {
+    bootErrors.push({ at: 'mountRoute', message: error?.message || String(error) })
+  }
   const tools = ctx?.tools
   if (tools && typeof tools.register === 'function') {
-    for (const tool of TOOLS) tools.register(tool)
+    for (const tool of TOOLS) {
+      try {
+        tools.register(tool)
+      } catch (error) {
+        bootErrors.push({ at: `register:${tool?.name || '?'}`, message: error?.message || String(error) })
+      }
+    }
   }
 }

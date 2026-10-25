@@ -10,7 +10,8 @@
     "preflight": "node scripts/preflight.mjs",
     "migrate": "node scripts/migrate.js",
     "e2e": "node scripts/ui-e2e.mjs",
-    "smoke": "node scripts/ui-smoke.mjs"
+    "smoke": "node scripts/ui-smoke.mjs",
+    "migrate:titles": "node scripts/migrate-titles.mjs"
   },
   "exports": {
     ".": "./index.js",
