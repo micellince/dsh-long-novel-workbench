@@ -25,6 +25,8 @@ import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage
 import * as bookdb from './lib/bookdb.js'
 import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
 import { ROLES } from './lib/roles.js'
+import * as ledgerdb from './lib/ledgerdb.js'
+import { scanChapterLocal } from './lib/localchecks.js'
 import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
 
 export const name = 'novel-desk'
@@ -74,6 +76,7 @@ export const READ_OPS = [
   'migrate.titles',
   'diagnostics',
   'chapter.index',
+  'checks.local',
   'opinions.list',
   'ledger.digest',
   'ledger.entities',
@@ -1329,6 +1332,31 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const dir = projectId ? await s.projectDir(root, projectId) : ''
       return bookdb.storageStatus(dir)
     }
+    case 'checks.local': {
+      const projectId = String(need(payload, 'projectId'))
+      const limit = Math.max(1, Math.min(200, Number(payload.limit) || 200))
+      const chapters = listOf(await s.listChapters(root, projectId)).slice(0, limit)
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const aliases = ledgerdb.aliasIndex(db)
+      const facts = db.prepare('SELECT subject, attribute, value FROM facts').all()
+      const items = []
+      let scanned = 0
+      for (const row of chapters) {
+        const chapter = Number(row?.chapter ?? row?.id ?? 0)
+        if (!chapter) continue
+        let doc
+        try { doc = await s.readChapter(root, projectId, chapter) } catch { continue }
+        const index = buildIndex(doc.text, chapter)
+        const body = splitTitle(doc.text).body
+        const unknownNames = ledgerdb.unknownCandidates(body, aliases, { limit: 5 })
+        items.push(...scanChapterLocal({ chapter, text: doc.text, index: { ...index, body }, unknownNames, facts }))
+        scanned += 1
+      }
+      const counts = { logic: 0, deai: 0 }
+      for (const item of items) counts[item.kind] = (counts[item.kind] || 0) + 1
+      return { scanned, counts, items: items.slice(0, 300) }
+    }
     case 'chapter.index': {
       const projectId = String(need(payload, 'projectId'))
       const chapter = needNumber(payload, 'chapter')
@@ -2141,6 +2169,12 @@ const reviewTool = {
     const project = await resolveProject(s, root, args.projectId)
     const reviews = Array.isArray(args.reviews) ? args.reviews : []
     if (reviews.length === 0) throw new Error('reviews 不能为空')
+    if (reviews.length > 5) throw new Error(`一次最多提交 5 条意见（收到 ${reviews.length} 条）：分多次调用，避免一个大 JSON 解析失败。`)
+    for (const row of reviews) {
+      if (String(row?.issue ?? '').length > 200) throw new Error('issue 超过 200 字：写清问题即可，不要长篇分析。')
+      if (String(row?.after ?? '').length > 4000) throw new Error('after 超过 4000 字：只替换指到的那一段，整段成文即可。')
+      if (String(row?.quote ?? '').length > 400) throw new Error('quote 超过 400 字：只引指到的那一段/一句。')
+    }
     const items = reviews.map((row) => ({
       ...row,
       chapter: Number(row?.chapter) || 0,
@@ -2310,6 +2344,11 @@ const attentionTool = {
         merged.push(await s.mergeAttention(root, projectId, chapter, patch))
         // 冷读的地址评价 → 自动生成意见（weakness 带改法；highlight 等作者决定是否入高光）
         const points = Array.isArray(patch.points) ? patch.points.filter((point) => point && String(point.comment ?? '').trim()) : []
+        if (points.length > 20) throw new Error('冷读 points 最多 20 条：只写值得写下来的。')
+        for (const point of points) {
+          if (String(point.comment ?? '').length > 120) throw new Error('point.comment 超过 120 字：写清为什么即可（目标 ≤80 字）。')
+          if (String(point.after ?? '').length > 4000) throw new Error('point.after 超过 4000 字：只给指到的那一段成文。')
+        }
         if (op === 'measured' && points.length) {
           try {
             const dir = await s.projectDir(root, projectId)

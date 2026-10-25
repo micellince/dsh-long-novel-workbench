@@ -1,7 +1,7 @@
 /**
  * 小说工作台 0.6 · 客户端
  *
- * 全屏工作台：左侧 8 页导航（正文 / 审阅 / 提案 / 全文动作 / 世界地图 / 账本 / 总览 / 设置）。
+ * 全屏工作台：左侧导航（正文 / 意见 / 提案 / 全文动作 / 账本 / 总览 / 设置）。
  * React 由浏览器模块表提供，无构建、无外部依赖；正文一律纯文本渲染，禁止 Markdown 解析。
  * 所有数据走同源 RPC：POST /novel-desk/api，body { op, payload }。
  */
@@ -26,8 +26,7 @@ window.__ModuleLoader__.load({
 
     const PAGES = [
       { id: 'read', label: '正文', icon: '📖', group: '正文' },
-      { id: 'reviews', label: '审阅', icon: '🔎', group: '正文' },
-      { id: 'opinions', label: '意见库', icon: '📝', group: '正文' },
+      { id: 'reviews', label: '意见', icon: '📝', group: '正文' },
       { id: 'proposals', label: '提案', icon: '📋', group: '正文' },
       { id: 'run', label: '全文动作', icon: '🛠️', group: '正文' },
       { id: 'ledger', label: '账本', icon: '🗂️', group: '资料' },
@@ -39,7 +38,7 @@ window.__ModuleLoader__.load({
     const MODES = [
       { id: 'read', label: '阅读' },
       { id: 'edit', label: '编辑' },
-      { id: 'reader', label: '审阅' },
+      { id: 'reader', label: '批注' },
     ]
 
     const ROUTES = [
@@ -1489,8 +1488,7 @@ window.__ModuleLoader__.load({
         }
         let pageNode
         if (page === 'read') pageNode = h(ReadingTab, { ...common, key: `read:${projectId}` })
-        else if (page === 'reviews') pageNode = h(ReviewsTab, { ...common, key: `reviews:${projectId}` })
-        else if (page === 'opinions') pageNode = h(OpinionsTab, { ...common, key: `opinions:${projectId}` })
+        else if (page === 'reviews') pageNode = h(OpinionsPage, { ...common, key: `opinions:${projectId}` })
         else if (page === 'proposals') pageNode = h(ProposalsTab, { ...common, key: `proposals:${projectId}` })
         else if (page === 'run') pageNode = h(RunTab, { ...common, key: `run:${projectId}` })
         else if (page === 'ledger') pageNode = h(LedgerTab, { ...common, key: `ledger:${projectId}` })
@@ -1609,7 +1607,7 @@ window.__ModuleLoader__.load({
       const [deletingChapter, setDeletingChapter] = useState(false)
       const deleteActiveChapter = async (chapter) => {
         if (!chapter || deletingChapter) return
-        if (!window.confirm(`删除第 ${chapter} 章？正文会进回收站（.backups 里仍保留历史版本），本章的审阅、批注与待批准提案一并清除。已采纳/已驳回的提案留作历史。`)) return
+        if (!window.confirm(`删除第 ${chapter} 章？正文会进回收站（.backups 里仍保留历史版本），本章的意见与待批准提案一并清除。已采纳/已驳回的提案留作历史。`)) return
         setDeletingChapter(true)
         try {
           await api('chapter.delete', scope(projectId, { chapter }))
@@ -2117,7 +2115,7 @@ window.__ModuleLoader__.load({
         }
         setMode(next)
         lsSet(LS.mode, next)
-        if (next === 'reader') setNotice('审阅模式：选中正文文字即可加批注（不改正文）')
+        if (next === 'reader') setNotice('批注模式：选中正文文字即可提交作者意见（不改正文）')
         if (next === 'read') setNotice('')
       }
 
@@ -2230,7 +2228,7 @@ window.__ModuleLoader__.load({
             setPop(null)
             if (window.getSelection) window.getSelection().removeAllRanges()
             reviews.reload()
-            setNotice(value && value.added ? (item.anchor === 'chapter' ? '已提交整章意见' : '已提交读者批注') : '已提交')
+            setNotice(value && value.added ? (item.anchor === 'chapter' ? '已提交整章意见' : '已提交作者意见') : '已提交')
           } else {
             // 没落盘就不许丢输入：保留弹窗与已写的内容，把原因写在弹窗里
             const why = value && Array.isArray(value.skippedReasons) && value.skippedReasons.length
@@ -2433,7 +2431,7 @@ window.__ModuleLoader__.load({
                       mode === 'edit'
                         ? (edit.saving ? '保存中…' : edit.dirty ? '未保存 · 自动保存中' : edit.savedAt ? `已保存 ${fmtClock(edit.savedAt)}` : '尚无改动')
                         : mode === 'reader'
-                          ? '审阅：选中文字 → 加批注'
+                          ? '批注：选中文字 → 提交作者意见'
                           : active > 0 ? `第 ${active} 章 / ${chapters.length}` : ''),
                     h('span', { className: 'nd-im-size', role: 'group', 'aria-label': '字号' },
                       h('button', { type: 'button', className: 'nd-im-size-btn', title: '字号减小（A−）', onClick: () => bumpPref('size', -1, 13, 28) }, '−'),
@@ -2452,13 +2450,13 @@ window.__ModuleLoader__.load({
               h(Btn, { small: true, onClick: () => active > 0 && setHistoryChapter(active) }, '历史版本'),
               immersive
                 ? null
-                : h(Btn, { small: true, className: 'nd-im-toggle', onClick: () => setImmersive(true), title: '沉浸模式：只留阅读 / 编辑 / 审阅三个按钮，正文接近全屏（Esc 退出）' }, '⛶ 沉浸'),
+                : h(Btn, { small: true, className: 'nd-im-toggle', onClick: () => setImmersive(true), title: '沉浸模式：只留阅读 / 编辑 / 批注三个按钮，正文接近全屏（Esc 退出）' }, '⛶ 沉浸'),
               h('span', { className: 'nd-read-pos' }, active > 0 ? `第 ${active} 章 / ${chapters.length}` : ''),
               h('span', { className: 'nd-hint nd-mode-legend' },
                 mode === 'read'
                   ? '阅读＝纯读，不会改正文 · j/k 翻章 · / 搜索'
                   : mode === 'reader'
-                    ? '审阅＝选中正文文字提交批注，不改正文'
+                    ? '批注＝选中正文文字提交作者意见，不改正文'
                     : '编辑＝直接修改正文 · 2 秒自动保存 · ⌘S 立即保存'),
               immersive
                 ? h('button', { type: 'button', className: 'nd-im-exit', onClick: () => setImmersive(false), title: '退出沉浸（Esc）' },
@@ -2520,7 +2518,7 @@ window.__ModuleLoader__.load({
           ),
           h(
             SideSection,
-            { title: '审阅统计', extra: h('span', { className: 'nd-hint' }, `${chapterReviews.filter((r) => !r.status || r.status === 'open').length} 条待处理`) },
+            { title: '意见统计', extra: h('span', { className: 'nd-hint' }, `${chapterReviews.filter((r) => !r.status || r.status === 'open').length} 条待处理`) },
             h('div', { className: 'nd-routes' },
               ROUTES.map((route) =>
                 h('button', { key: route.id, type: 'button', className: 'nd-route-row', onClick: () => go('reviews', { source: route.id, chapter: active }) },
@@ -2531,7 +2529,7 @@ window.__ModuleLoader__.load({
             ),
             readerNotes.length
               ? h('div', { className: 'nd-notes' },
-                  h('div', { className: 'nd-side-sub' }, '本章读者批注'),
+                  h('div', { className: 'nd-side-sub' }, '作者意见'),
                   readerNotes.slice(0, 3).map((note) => h('div', { key: note.id, className: 'nd-note' }, h('div', { className: 'nd-note-quote' }, String(note.quote || '').slice(0, 60)), h('div', null, String(note.issue || '')))),
                 )
               : null,
@@ -2809,24 +2807,40 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ── 审阅页 ────────────────────────────────────────────────
-    // ── 意见库：用户批注与 AI 意见同库、按段分组、可合并/采纳/驳回 ──
-    function OpinionsTab({ projectId, toc, onChanged, openChapter }) {
+    // ── 意见页 ────────────────────────────────────────────────
+    // ── 意见页：AI 意见 / 作者意见 分开；AI 意见分 去AI化 / 事实逻辑 / 注意力（冷读）──
+    function OpinionsPage({ projectId, toc, pageArg, openChapter, onChanged }) {
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState('')
+      const [who, setWho] = useState('ai')
+      const [cat, setCat] = useState('all')
       const [status, setStatus] = useState('open')
       const [picked, setPicked] = useState([])
+      const [coldOpen, setColdOpen] = useState(Boolean(pageArg && pageArg.recheck))
+      const [coldFocus, setColdFocus] = useState('')
+      const [workorder, setWorkorder] = useState(null)
+      const [target, setTarget] = useState('')
       const res = useAsync(() => api('opinions.list', scope(projectId)), [projectId])
+      const localRes = useAsync(() => (projectId ? api('checks.local', scope(projectId)) : Promise.resolve(null)), [projectId])
       const rows = res.data && Array.isArray(res.data.rows) ? res.data.rows : []
       const counts = (res.data && res.data.counts) || {}
       const titleOf = (chapter) => {
         const row = (toc || []).find((item) => chapterNo(item) === Number(chapter))
         return row ? chapterTitle(row) : ''
       }
-      const filtered = rows.filter((row) => {
-        if (status === 'all') return true
-        if (status === 'stale') return row.status === 'stale'
-        return String(row.status) === status
+      const categoryOf = (row) => {
+        const role = String(row.role || '')
+        if (role === 'ai-style' || role === 'AI 味' || role === '去AI化') return 'ai-style'
+        if (role === 'logic' || role === '事实逻辑' || role === '逻辑') return 'logic'
+        if (role === '冷读审稿人' || role === 'attention' || role === '注意力') return 'attention'
+        if (row.kind === 'highlight') return 'attention'
+        return 'ai-style'
+      }
+      const sourceRows = rows.filter((row) => (who === 'author' ? row.origin === 'user' : row.origin !== 'user'))
+      const filtered = sourceRows.filter((row) => {
+        if (who === 'ai' && cat !== 'all' && categoryOf(row) !== cat) return false
+        if (status !== 'all' && String(row.status) !== status) return false
+        return true
       })
       const groups = []
       const map = new Map()
@@ -2838,73 +2852,117 @@ window.__ModuleLoader__.load({
         }
         map.get(key).opinions.push(row)
       }
-      const reload = () => {
-        res.reload()
-        if (onChanged) onChanged()
-      }
+      const reload = () => { res.reload(); if (onChanged) onChanged() }
       const toggle = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
       const accept = async (id) => {
-        setBusy(id)
-        setNotice(null)
-        try {
-          await api('opinions.accept', scope(projectId, { id }))
-          setNotice({ tone: 'ok', text: '已采纳并替换正文' })
-          reload()
-        } catch (err) {
-          setNotice({ tone: 'error', text: friendlyError(err) })
-          reload()
-        } finally {
-          setBusy('')
-        }
+        setBusy(id); setNotice(null)
+        try { await api('opinions.accept', scope(projectId, { id })); setNotice({ tone: 'ok', text: '已采纳' }); reload() }
+        catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }); reload() }
+        finally { setBusy('') }
       }
       const reject = async (id) => {
-        setBusy(id)
-        setNotice(null)
-        try {
-          await api('opinions.reject', scope(projectId, { id }))
-          setNotice({ tone: 'ok', text: '已驳回' })
-          reload()
-        } catch (err) {
-          setNotice({ tone: 'error', text: friendlyError(err) })
-        } finally {
-          setBusy('')
-        }
+        setBusy(id); setNotice(null)
+        try { await api('opinions.reject', scope(projectId, { id })); setNotice({ tone: 'ok', text: '已驳回' }); reload() }
+        catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
       }
       const mergePicked = async (group) => {
         const ids = group.opinions.filter((row) => picked.includes(row.id)).map((row) => row.id)
         if (ids.length < 2) return
         const text = window.prompt('合并后的意见（可修改）：', group.opinions.filter((row) => ids.includes(row.id)).map((row) => `· ${row.text}`).join('\n'))
         if (text == null) return
-        setBusy('merge')
-        setNotice(null)
+        setBusy('merge'); setNotice(null)
+        try { await api('opinions.merge', scope(projectId, { ids, text })); setPicked([]); setNotice({ tone: 'ok', text: '已合并成一条意见' }); reload() }
+        catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const chaptersForWorkorder = () => (toc || []).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' })).filter((row) => row.chapter > 0)
+      const makeColdWorkorder = async () => {
+        setBusy('cold'); setNotice(null)
         try {
-          await api('opinions.merge', scope(projectId, { ids, text }))
-          setPicked([])
-          setNotice({ tone: 'ok', text: '已合并成一条意见' })
-          reload()
-        } catch (err) {
-          setNotice({ tone: 'error', text: friendlyError(err) })
-        } finally {
-          setBusy('')
+          const value = await api('chat.send', { projectId, workorder: 'attentionRecheckWorkorder', chapters: chaptersForWorkorder(), focus: coldFocus.trim() || undefined, dryRun: true })
+          setWorkorder({ title: '冷读工作单（注意力）', text: String(value.prompt || ''), sending: false })
+          setColdOpen(false)
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const sendWorkorder = async () => {
+        if (!workorder) return
+        setWorkorder((prev) => (prev ? { ...prev, sending: true } : prev))
+        try {
+          await sendToChat(projectId, { prompt: workorder.text }, target)
+          setWorkorder(null)
+          setNotice({ tone: 'ok', text: '冷读工作单已发到对话' })
+        } catch (error) {
+          setWorkorder((prev) => (prev ? { ...prev, sending: false } : prev))
+          setNotice({ tone: 'error', text: friendlyError(error) })
         }
       }
-      const chip = (key, label) => h(Btn, { small: true, kind: status === key ? 'primary' : undefined, onClick: () => setStatus(key) }, `${label} ${counts[key] == null ? '' : counts[key]}`)
+      const makeLocalWorkorder = async () => {
+        if (busy) return
+        setBusy('local'); setNotice(null)
+        try {
+          const items = (localRes.data && Array.isArray(localRes.data.items)) ? localRes.data.items : []
+          if (!items.length) return
+          const chapters = [...new Set(items.map((row) => Number(row.chapter)))].filter((n) => n > 0)
+          const rowsFor = (toc || []).filter((row) => chapters.includes(chapterNo(row))).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' }))
+          const focus = ['本地检查发现这些可疑点，请只判这些点并给改法（不要通读全文找新问题）：', ...items.slice(0, 40).map((row) => `- 第${row.chapter}章 第${Number(row.para) + 1}段 [${row.kind === 'deai' ? '去AI化' : '事实逻辑'}] ${row.message}`)].join('\n')
+          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rowsFor, sources: ['logic', 'ai-style'], focus, dryRun: true })
+          setWorkorder({ title: `本地检查工作单（${chapters.length} 章 / ${items.length} 个可疑点）`, text: String(value.prompt || ''), sending: false })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const chip = (key, label, value, onClick) => h(Btn, { small: true, kind: value === key ? 'primary' : undefined, onClick: () => onClick(key) }, label)
+      const cats = [
+        { id: 'all', label: `全部 ${sourceRows.length}` },
+        { id: 'ai-style', label: `去 AI 化 ${sourceRows.filter((row) => categoryOf(row) === 'ai-style').length}` },
+        { id: 'logic', label: `事实逻辑 ${sourceRows.filter((row) => categoryOf(row) === 'logic').length}` },
+        { id: 'attention', label: `注意力 ${sourceRows.filter((row) => categoryOf(row) === 'attention').length}` },
+      ]
       return h('div', { className: 'nd-page nd-opinions' },
         h('div', { className: 'nd-page-head' },
           h('div', null,
-            h('h2', null, '意见库'),
-            h('p', { className: 'nd-hint' }, '用户批注与 AI 意见同库、按段落组织。同一段多条可合并成一条完整意见；正文改动后地址失效只标记 stale，永远不删。')),
+            h('h2', null, '意见'),
+            h('p', { className: 'nd-hint' }, '作者意见与 AI 意见分开。AI 意见只分三类：去 AI 化 / 事实逻辑 / 注意力（冷读）；AI 意见带地址和改法，采纳即替换该段。')),
           h('div', { className: 'nd-page-actions' },
-            h(Btn, { small: true, onClick: res.reload, disabled: res.loading }, '刷新'),
+            h(Btn, { small: true, onClick: reload, disabled: res.loading }, '刷新'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => { setColdOpen(true); setColdFocus('') } }, '❄️ 冷读（注意力）'),
           ),
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
         h('div', { className: 'nd-toolbar' },
-          chip('open', '待处理'), chip('stale', '失效'), chip('accepted', '已采纳'), chip('rejected', '已驳回'), chip('all', '全部'),
+          chip('ai', `AI 意见 ${rows.filter((row) => row.origin !== 'user').length}`, who, setWho),
+          chip('author', `作者意见 ${rows.filter((row) => row.origin === 'user').length}`, who, setWho),
+          h('span', { className: 'nd-hint' }, ' ｜ '),
+          chip('open', '待处理', status, setStatus),
+          chip('stale', '失效', status, setStatus),
+          chip('accepted', '已采纳', status, setStatus),
+          chip('rejected', '已驳回', status, setStatus),
+          chip('all', '全部状态', status, setStatus),
         ),
+        who === 'ai' ? h('div', { className: 'nd-toolbar' }, cats.map((item) => chip(item.id, item.label, cat, setCat))) : null,
         res.error ? h(ErrorBox, { error: res.error, onRetry: res.reload }) : null,
-        res.loading && !rows.length ? h(Loading, null, '读取意见库…') : null,
-        !res.loading && !groups.length ? h('p', { className: 'nd-hint' }, '没有符合条件的意见。') : null,
+        res.loading && !rows.length ? h(Loading, null, '读取意见…') : null,
+        !res.loading && !groups.length ? h('p', { className: 'nd-hint' }, who === 'author' ? '还没有作者意见：正文页切到「批注」，选中文字或点「整章意见」提交。' : '这个分类下还没有 AI 意见。去 AI 化的入口在正文选区里；事实逻辑先跑「全书同步」或让它出意见；注意力用右上角冷读。') : null,
+        localRes.data && Array.isArray(localRes.data.items) && localRes.data.items.length
+          ? h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' },
+                h('h3', null, '🧪 本地检查（0 AI 成本）'),
+                h('span', { className: 'nd-hint' }, `事实逻辑 ${localRes.data.counts.logic || 0} ｜ 去 AI 化 ${localRes.data.counts.deai || 0}`),
+                h(Btn, { small: true, onClick: () => localRes.reload() }, '重新扫'),
+                h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点'),
+              ),
+              h('p', { className: 'nd-hint' }, '这些是程序确定性筛出的候选点，不是结论；只把可疑点交给 AI，省 token。'),
+              h('div', { className: 'nd-local-list' },
+                localRes.data.items.slice(0, 8).map((row, index) => h('div', { className: 'nd-local-item', key: index },
+                  h(Tag, { tone: row.kind === 'deai' ? 'warn' : 'muted' }, row.kind === 'deai' ? '去 AI 化' : '事实逻辑'),
+                  h('span', { className: 'nd-hint' }, `第 ${row.chapter} 章 · 第 ${Number(row.para) + 1} 段`),
+                  h('span', null, row.message),
+                )),
+                localRes.data.items.length > 8 ? h('p', { className: 'nd-hint' }, `还有 ${localRes.data.items.length - 8} 条，点「让 AI 判这些点」会全部带上。`) : null,
+              ),
+            )
+          : null,
         groups.map((group) => {
           const pickedHere = group.opinions.filter((row) => picked.includes(row.id))
           const head = `第 ${group.chapter} 章${group.para == null ? ' · 章级' : ` · 第 ${Number(group.para) + 1} 段`}`
@@ -2912,24 +2970,21 @@ window.__ModuleLoader__.load({
             h('div', { className: 'nd-card-head' },
               h('h3', null, head),
               h('span', { className: 'nd-hint' }, titleOf(group.chapter)),
-              group.para != null && openChapter
-                ? h(Btn, { small: true, onClick: () => openChapter(group.chapter) }, '看正文')
-                : null,
-              pickedHere.length >= 2
-                ? h(Btn, { small: true, kind: 'primary', disabled: busy === 'merge', onClick: () => mergePicked(group) }, `合并所选 ${pickedHere.length}`)
-                : null,
+              group.para != null && openChapter ? h(Btn, { small: true, onClick: () => openChapter(group.chapter) }, '看正文') : null,
+              group.opinions.length >= 2 ? h('span', { className: 'nd-hint' }, `本段 ${group.opinions.length} 条，建议合并成一条完整意见`) : null,
+              pickedHere.length >= 2 ? h(Btn, { small: true, kind: 'primary', disabled: busy === 'merge', onClick: () => mergePicked(group) }, `合并所选 ${pickedHere.length}`) : null,
             ),
             group.opinions.map((row) => h('div', { className: `nd-opinion nd-opinion-${row.status}`, key: row.id },
               h('div', { className: 'nd-opinion-head' },
                 h('input', { type: 'checkbox', checked: picked.includes(row.id), onChange: () => toggle(row.id), title: '选择以合并' }),
                 h(Tag, { tone: row.status === 'stale' ? 'error' : row.status === 'accepted' ? 'ok' : row.status === 'rejected' ? 'muted' : 'warn' }, row.status || 'open'),
-                row.origin === 'ai' ? h(Tag, { tone: 'muted' }, row.role || 'AI') : h(Tag, { tone: 'brand' }, '我的批注'),
+                row.origin === 'user' ? h(Tag, { tone: 'brand' }, '作者意见') : h(Tag, { tone: 'muted' }, `AI · ${categoryOf(row) === 'ai-style' ? '去 AI 化' : categoryOf(row) === 'logic' ? '事实逻辑' : '注意力'}`),
                 row.kind === 'highlight' ? h(Tag, { tone: 'ok' }, '高光') : null,
                 h('span', { className: 'nd-opinion-when' }, row.createdAt ? String(row.createdAt).slice(0, 10) : ''),
               ),
               h('p', { className: 'nd-opinion-text' }, row.text),
               row.after ? h('div', { className: 'nd-opinion-after' }, h('div', { className: 'nd-diff-head' }, '改为'), h('pre', { className: 'nd-pre' }, row.after)) : null,
-              row.status === 'stale' ? h('p', { className: 'nd-hint nd-opinion-stale' }, `地址失效：${row.staleReason || '正文已改动'}`) : null,
+              row.status === 'stale' ? h('p', { className: 'nd-hint nd-opinion-stale' }, `地址失效：${row.staleReason || '正文已改动'}（保留原文，可在正文重新批注）`) : null,
               h('div', { className: 'nd-opinion-actions' },
                 row.status === 'open' ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, row.after ? '采纳并替换' : '采纳') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
@@ -2937,425 +2992,33 @@ window.__ModuleLoader__.load({
             )),
           )
         }),
-      )
-    }
-
-    function ReviewsTab({ projectId, toc, pageArg, go, onChanged }) {
-      const [tab, setTab] = useState(() => (pageArg && pageArg.source) || 'all')
-      const [status, setStatus] = useState('open')
-      const [chapterFilter, setChapterFilter] = useState(() => (pageArg && pageArg.chapter ? String(pageArg.chapter) : ''))
-      const [selected, setSelected] = useState([])
-      const [notice, setNotice] = useState(null)
-      const [busy, setBusy] = useState(false)
-      const [workorder, setWorkorder] = useState(null) // { title, text, sending, payload }
-      const [launcher, setLauncher] = useState(null) // 审阅/复测弹窗：{ source, mode, focus, chapters }
-      const recheckIntent = useRef(pageArg && pageArg.recheck ? Number(pageArg.chapter) || 0 : 0)
-
-      const reviews = useAsync(
-        () => (projectId ? api('review.list', scope(projectId)) : Promise.resolve([])),
-        [projectId],
-      )
-      const rows = useMemo(
-        () => toList(reviews.data, 'reviews').map((rv) => ({ ...rv, route: normalRoute(rv) })),
-        [reviews.data],
-      )
-      const filtered = useMemo(
-        () =>
-          rows.filter((rv) => {
-            const n = chapterNo(rv)
-            if (tab === 'book') {
-              if (n !== 0) return false
-            } else if (tab !== 'all' && rv.route !== tab) {
-              return false
-            }
-            if (status !== 'all' && String(rv.status || 'open') !== status) return false
-            if (chapterFilter !== '' && String(n) !== chapterFilter) return false
-            return true
-          }),
-        [rows, tab, status, chapterFilter],
-      )
-      const counts = useMemo(() => {
-        const out = { all: 0, book: 0 }
-        ROUTES.forEach((route) => { out[route.id] = 0 })
-        for (const rv of rows) {
-          if (rv.status && rv.status !== 'open' && rv.status !== 'proposed') continue
-          out.all += 1
-          if (chapterNo(rv) === 0) out.book += 1
-          out[rv.route] = (out[rv.route] || 0) + 1
-        }
-        return out
-      }, [rows])
-
-      // 审阅范围一律由用户勾选：默认整本书，不预设章数、不按顺序截断
-      const allChapters = useMemo(
-        () => sortChapters(toList(toc)).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' })).filter((row) => row.chapter > 0),
-        [toc],
-      )
-      const chapterStats = useMemo(() => {
-        const out = new Map()
-        for (const rv of rows) {
-          const n = chapterNo(rv)
-          if (n <= 0) continue
-          if (!out.has(n)) out.set(n, { open: 0, total: 0 })
-          const stat = out.get(n)
-          stat.total += 1
-          if (!rv.status || rv.status === 'open' || rv.status === 'proposed') stat.open += 1
-        }
-        return out
-      }, [rows])
-      useEffect(() => {
-        const n = recheckIntent.current
-        if (!n || !allChapters.some((row) => row.chapter === n)) return
-        recheckIntent.current = 0
-        setLauncher({ source: 'all', mode: 'recheck', focus: '', chapters: [n] })
-      }, [allChapters.length])
-      const selectedChapterRows = (numbers) => {
-        const wanted = new Set(numbers)
-        return allChapters.filter((row) => wanted.has(row.chapter))
-      }
-      const openLauncher = (source, mode = 'review') => {
-        setLauncher({ source, mode, focus: '', chapters: allChapters.map((row) => row.chapter) })
-      }
-      const launchWorkorder = async () => {
-        if (!projectId || busy || !launcher) return
-        const chapters = selectedChapterRows(launcher.chapters)
-        if (chapters.length === 0) {
-          setNotice({ tone: 'warn', text: '先勾选要审的章节：可以点「全书」，也可以逐章勾选。' })
-          return
-        }
-        const source = launcher.source
-        setBusy(true)
-        setNotice(null)
-        try {
-          const payload = {
-            workorder: 'reviewWorkorder',
-            chapters,
-            sources: source === 'all' ? ['logic', 'ai-style', 'reader'] : [source],
-            focus: String(launcher.focus || '').trim() || undefined,
-          }
-          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
-          setWorkorder({ title: `${source === 'all' ? '三路' : ROUTE_LABEL[source] || ''}审阅工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
-          setLauncher(null)
-        } catch (err) {
-          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
-        } finally {
-          setBusy(false)
-        }
-      }
-      const launchRecheck = async () => {
-        if (!projectId || busy || !launcher) return
-        const chapters = selectedChapterRows(launcher.chapters)
-        if (chapters.length === 0) {
-          setNotice({ tone: 'warn', text: '先勾选要复测的章节。' })
-          return
-        }
-        setBusy(true)
-        setNotice(null)
-        try {
-          const payload = { workorder: 'attentionRecheckWorkorder', chapters, focus: String(launcher.focus || '').trim() || undefined }
-          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
-          setWorkorder({ title: `冷读打分工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
-          setLauncher(null)
-        } catch (err) {
-          setNotice({ tone: 'error', text: `生成复测工作单失败：${friendlyError(err)}` })
-        } finally {
-          setBusy(false)
-        }
-      }
-      const sendWorkorder = async () => {
-        if (!projectId || busy || !workorder) return
-        setWorkorder((prev) => (prev ? { ...prev, sending: true } : prev))
-        try {
-          const value = await sendToChat(projectId, workorder.payload || {}, workorder.target)
-          setWorkorder(null)
-          setNotice({ tone: 'ok', text: `已发到宿主对话（会话 ${String(value.sessionId || '').slice(0, 8) || '当前'}）：去 DSH 侧栏最近的会话里能看到它，让它按工作单执行并把结果提交回来。` })
-        } catch (err) {
-          setWorkorder((prev) => (prev ? { ...prev, sending: false } : prev))
-          setNotice({ tone: 'error', text: `发不出去：${friendlyError(err)}。可以点「复制」自己粘到对话里。` })
-        }
-      }
-      const selectedGlobalCount = rows.filter((rv) => selected.includes(String(rv.id)) && chapterNo(rv) === 0).length
-      const allChecked = filtered.length > 0 && filtered.every((rv) => selected.includes(String(rv.id)))
-      const toggleAll = () => {
-        if (allChecked) setSelected([])
-        else setSelected(filtered.map((rv) => String(rv.id)))
-      }
-      const toggle = (id) => {
-        setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-      }
-
-      const pickSelectedReviews = () => rows.filter((rv) => selected.includes(String(rv.id)))
-      const cleanReview = (rv) => ({
-        id: String(rv.id),
-        chapter: chapterNo(rv),
-        source: rv.route,
-        severity: rv.severity || '',
-        quote: String(rv.quote || ''),
-        issue: String(rv.issue || ''),
-        suggestion: String(rv.suggestion || ''),
-      })
-      const launchProposalWorkorder = async () => {
-        if (!projectId || busy) return
-        const picked = pickSelectedReviews()
-        const local = picked.filter((rv) => chapterNo(rv) > 0)
-        const global = picked.filter((rv) => chapterNo(rv) === 0)
-        if (picked.length === 0) {
-          setNotice({ tone: 'warn', text: '先勾选审阅条目（左侧方框）：章节条目生成逐段修改提案，全书级条目不挑章、会并进全局修改意见。' })
-          return
-        }
-        setBusy(true)
-        setNotice(null)
-        try {
-          const parts = []
-          const titles = []
-          // 章节级意见：一章一条 patch-paragraph 工作单
-          if (local.length > 0) {
-            const byChapter = new Map()
-            for (const rv of local) {
-              const n = chapterNo(rv)
-              if (!byChapter.has(n)) byChapter.set(n, [])
-              byChapter.get(n).push(cleanReview(rv))
-            }
-            const groups = [...byChapter.keys()].sort((a, b) => a - b).map((chapter) => {
-              const row = allChapters.find((item) => item.chapter === chapter) || { chapter, title: '', words: 0, path: '' }
-              return { chapter, title: row.title, words: row.words, path: row.path, reviews: byChapter.get(chapter) }
-            })
-            const localPayload = { workorder: 'proposalGroupsWorkorder', groups, chapters: selectedChapterRows([...byChapter.keys()]), focus: '' }
-            const value = await api('chat.send', { projectId, ...localPayload, dryRun: true })
-            parts.push(String(value.prompt || ''))
-            titles.push(`${groups.length} 章 / ${local.length} 条章节意见`)
-          }
-          // 全书级意见：不管有没有同时选章节，都并到同一份工作单里走 book-fix，不再提示「先去点另一个按钮」
-          if (global.length > 0) {
-            const globalPayload = { workorder: 'globalFixWorkorder', chapters: allChapters, reviews: global.map(cleanReview), focus: '' }
-            const value = await api('chat.send', { projectId, ...globalPayload, dryRun: true })
-            parts.push(String(value.prompt || ''))
-            titles.push(`${global.length} 条全书级意见`)
-          }
-          const text = parts.join('\n\n====================\n\n')
-          setWorkorder({ title: `生成提案工作单（${titles.join(' + ')}）`, text, sending: false, confirming: false, target: '', payload: { prompt: text } })
-        } catch (err) {
-          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
-        } finally {
-          setBusy(false)
-        }
-      }
-      const launchGlobalWorkorder = async () => {
-        if (!projectId || busy) return
-        const pickedGlobal = pickSelectedReviews().filter((rv) => chapterNo(rv) === 0)
-        const picks = pickedGlobal.length ? pickedGlobal : rows.filter((rv) => chapterNo(rv) === 0 && (!rv.status || rv.status === 'open' || rv.status === 'proposed'))
-        if (picks.length === 0) {
-          setNotice({ tone: 'warn', text: '没有全书级审阅条目：先让 AI 用 chapter=0 提交全局问题。' })
-          return
-        }
-        setBusy(true)
-        setNotice(null)
-        try {
-          const payload = { workorder: 'globalFixWorkorder', chapters: allChapters, reviews: picks.map(cleanReview), focus: '' }
-          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
-          setWorkorder({ title: `全局修改意见工作单（${picks.length} 条全书级意见）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
-        } catch (err) {
-          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
-        } finally {
-          setBusy(false)
-        }
-      }
-      const patchReview = async (id, patch) => {
-        try {
-          await api('review.patch', scope(projectId, { ids: [String(id)], patch }))
-          reviews.reload()
-        } catch (err) {
-          setNotice({ tone: 'error', text: `更新审阅状态失败：${friendlyError(err)}` })
-        }
-      }
-
-      const chapterOptions = [{ value: '', label: '全部章节' }].concat(
-        sortChapters(toc).map((row) => ({ value: String(chapterNo(row)), label: `第 ${chapterNo(row)} 章 ${chapterTitle(row)}` })),
-      )
-
-      return h('div', { className: 'nd-page' },
-        h('div', { className: 'nd-pagehead' },
-          h('h2', null, '审阅收件箱'),
-          h('span', { className: 'nd-hint' }, '三路审阅（逻辑 / AI 味 / 读者）+ 冷读（注意力）；chapter 0 为全书级条目。注意力不再单独审阅，只看冷读分数。'),
-        ),
-        h('div', { className: 'nd-review-launchers' },
-          [
-            { source: 'ai-style', icon: '🤖', title: 'AI 味审阅', hint: '机器痕迹 / 套话 / 节奏单一 / 文笔' },
-            { source: 'logic', icon: '⚖️', title: '事实逻辑审阅', hint: '因果 / 动机 / 连续性 / 事实自洽' },
-            { source: 'attention', moood: '', mode: 'recheck', icon: '❄️', title: '冷读（注意力）', hint: '读者会不会继续读：分数 + 地址评价（亮点 / 不足）' },
-          ].map((item) =>
-            h('button', { key: item.source + (item.mode || ''), type: 'button', className: 'nd-launch-card', onClick: () => openLauncher(item.source, item.mode || 'review') },
-              h('span', { className: 'nd-launch-icon' }, item.icon),
-              h('span', { className: 'nd-launch-main' }, h('strong', null, item.title), h('span', { className: 'nd-hint' }, item.hint)),
-              h('span', { className: 'nd-launch-go' }, '开始 →'),
-            ),
+        coldOpen ? h(Modal, {
+          title: '冷读（注意力）',
+          onClose: () => setColdOpen(false),
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setColdOpen(false) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: makeColdWorkorder, disabled: busy === 'cold' }, busy === 'cold' ? '生成中…' : '生成冷读工作单'),
           ),
-          h('button', { type: 'button', className: 'nd-launch-card nd-launch-mini', onClick: () => openLauncher('all'), disabled: busy },
-            h('span', { className: 'nd-launch-icon' }, '🧪'),
-            h('span', { className: 'nd-launch-main' }, h('strong', null, '三路一起审'), h('span', { className: 'nd-hint' }, '逻辑 / AI 味 / 读者 一次交给 AI；注意力走冷读')),
-            h('span', { className: 'nd-launch-go' }, '工作单 →'),
+        },
+          h('p', { className: 'nd-hint' }, '零上下文通读全书 → 一个 0–100 注意力分 + 地址评价（亮点/不足）；不会改正文。'),
+          h('div', { className: 'nd-field' },
+            h('span', { className: 'nd-label' }, '本次关注（可留空）'),
+            h('textarea', { className: 'nd-input nd-textarea', rows: 3, value: coldFocus, placeholder: '例：重点看第 12–20 章有没有让人想继续读。', onChange: (e) => setColdFocus(e.target.value) }),
           ),
-        ),
-        launcher
-          ? h(Modal, {
-              title: launcher.mode === 'recheck' ? '冷读（注意力）' : `${launcher.source === 'all' ? '三路' : ROUTE_LABEL[launcher.source] || ''}审阅`,
-              onClose: () => setLauncher(null),
-              footer: h(Fragment, null,
-                h(Btn, { onClick: () => setLauncher(null) }, '取消'),
-                h(Btn, { kind: 'primary', onClick: launcher.mode === 'recheck' ? launchRecheck : launchWorkorder, disabled: busy }, busy ? '生成中…' : '生成工作单'),
-              ),
-            },
-              h('div', { className: 'nd-field' },
-                h('div', { className: 'nd-form-row', style: { flexWrap: 'wrap', gap: '6px' } },
-                  h('span', { className: 'nd-label' }, launcher.mode === 'recheck' ? '打分范围' : '审阅范围'),
-                  h('span', { className: 'nd-hint' }, `已选 ${launcher.chapters.length} / ${allChapters.length} 章`),
-                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.map((row) => row.chapter) } : prev)) }, '全书'),
-                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.filter((row) => !chapterStats.get(row.chapter)?.total).map((row) => row.chapter) } : prev)) }, '未审过的'),
-                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.filter((row) => chapterStats.get(row.chapter)?.open).map((row) => row.chapter) } : prev)) }, '有意见的'),
-                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: [] } : prev)) }, '清空'),
-                ),
-                h(ChapterPicker, { chapters: allChapters, stats: chapterStats, value: launcher.chapters, onChange: (next) => setLauncher((prev) => (prev ? { ...prev, chapters: next } : prev)) }),
-              ),
-              h('div', { className: 'nd-field' },
-                h('span', { className: 'nd-label' }, launcher.mode === 'recheck' ? '打分说明（可留空）' : '这次重点是什么？（可留空）'),
-                h('textarea', {
-                  className: 'nd-input nd-textarea',
-                  rows: 3,
-                  value: launcher.focus,
-                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章有没有让人想继续读。留空则按标准冷读。' : '例：这一章读者容易弃读，重点看章末；或：注意华羽生和小蝶的关系变化是否突兀。留空则按三路口径完整审。',
-                  onChange: (e) => setLauncher((prev) => (prev ? { ...prev, focus: e.target.value } : prev)),
-                }),
-              ),
-              h('p', { className: 'nd-hint' }, launcher.mode === 'recheck' ? 'AI 零上下文通读后打实测分（钩子 / 张力 / 回报 / 章末牵引），写回注意力曲线；不会改正文。勾了哪些章就打分哪些章。' : '不会替你截断章数：勾了哪些章就审哪些章。生成后可以复制，也可以直接投递到宿主对话。'),
-            )
-          : null,
-        h(Tabs, {
-          value: tab,
-          onChange: setTab,
-          items: [
-            { value: 'all', label: '全部', badge: counts.all },
-            { value: 'book', label: '全书', badge: counts.book },
-            ...ROUTES.map((route) => ({ value: route.id, label: route.label, badge: counts[route.id] || 0 })),
-          ],
-        }),
-        h('div', { className: 'nd-toolbar' },
-          h(Select, {
-            value: status,
-            onChange: setStatus,
-            options: [
-              { value: 'open', label: '待处理' },
-              { value: 'proposed', label: '已进提案' },
-              { value: 'fixed', label: '已修复' },
-              { value: 'wontfix', label: '不修' },
-              { value: 'archived', label: '已归档' },
-              { value: 'all', label: '全部状态' },
-            ],
-          }),
-          h(Select, { value: chapterFilter, onChange: setChapterFilter, options: chapterOptions }),
-          h(Btn, { small: true, onClick: toggleAll }, allChecked ? '取消全选' : '全选当前'),
-          h('span', { className: 'nd-hint' }, `已选 ${selected.length} 条${selectedGlobalCount ? `（全书级 ${selectedGlobalCount} 条）` : ''}`),
-          h(Btn, { small: true, kind: 'primary', onClick: launchProposalWorkorder, disabled: busy }, busy ? '生成中…' : '生成修改提案'),
-          h(Btn, { small: true, onClick: launchGlobalWorkorder, disabled: busy }, '全局修改意见'),
-          h(Btn, { small: true, onClick: () => openLauncher('all'), disabled: busy }, '三路审阅工作单'),
-          h(Btn, { small: true, onClick: () => openLauncher('all', 'recheck'), disabled: busy }, '冷读打分 / 复测'),
-          h(Btn, { small: true, onClick: () => go('proposals') }, '去提案页'),
-        ),
-        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
-        workorder
-          ? h(Modal, {
-              title: workorder.title,
-              wide: true,
-              onClose: () => setWorkorder(null),
-              footer: h(Fragment, null,
-                h(Btn, {
-                  onClick: async () => {
-                    const ok = await copyText(workorder.text)
-                    setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '工作单已复制，可粘到对话里' : '复制失败：请手动全选复制' })
-                  },
-                }, '复制'),
-                workorder.confirming
-                  ? h(Btn, { onClick: () => setWorkorder((prev) => (prev ? { ...prev, confirming: false } : prev)) }, '返回改内容')
-                  : null,
-                h(Btn, {
-                  kind: 'primary',
-                  disabled: workorder.sending,
-                  onClick: () => (workorder.confirming ? sendWorkorder() : setWorkorder((prev) => (prev ? { ...prev, confirming: true } : prev))),
-                }, workorder.sending ? '发送中…' : workorder.confirming ? '确定发送' : '下一步：确认发送'),
-              ),
-            },
-              h('p', { className: 'nd-hint' }, '这是给 AI 的完整工作单：审阅范围、隔离边界、提交格式都已写明。发出去后 AI 会按工作单执行（审阅用 novel_desk_review、改写提案用 novel_desk_propose），不会直接改你的正文文件。'),
-              h('div', { className: workorder.confirming ? 'nd-send-confirm' : '' },
-                workorder.confirming ? h('p', { className: 'nd-hint' }, '最后一步：确认发给谁。点「确定发送」才会真的发出去。') : null,
-                h(TargetPicker, { projectId, value: workorder.target, onChange: (next) => setWorkorder((prev) => (prev ? { ...prev, target: next } : prev)) }),
-              ),
-              h('pre', { className: 'nd-pre nd-pre-tall' }, workorder.text),
-            )
-          : null,
-        reviews.loading && !reviews.data
-          ? h(Loading, null, '正在读取审阅条目…')
-          : reviews.error
-            ? h(ErrorBox, { error: reviews.error, onRetry: reviews.reload })
-            : filtered.length === 0
-              ? h(Empty, null, '这个筛选下没有审阅条目。')
-              : h('div', { className: 'nd-review-list' },
-                  filtered.map((rv) =>
-                    h('div', { key: rv.id, className: 'nd-review-row' },
-                      h(Check, { checked: selected.includes(String(rv.id)), onChange: () => toggle(String(rv.id)) }),
-                      h('div', { className: 'nd-review-main' },
-                        h('div', { className: 'nd-review-meta' },
-                          h(Tag, { tone: 'brand' }, chapterNo(rv) === 0 ? '全书' : `第 ${chapterNo(rv)} 章`),
-                          h(Tag, { tone: rv.route === 'reader' ? 'ok' : rv.route === 'ai-style' ? 'warn' : 'muted' }, ROUTE_LABEL[rv.route] || rv.route),
-                          h(Tag, { tone: SEV_TONE[rv.severity] || 'muted' }, SEV_LABEL[rv.severity] || rv.severity || '—'),
-                          h(Tag, null, REVIEW_STATUS[rv.status || 'open'] || rv.status),
-                          h('span', { className: 'nd-hint' }, fmtAgo(rv.createdAt)),
-                        ),
-                        rv.quote ? h('blockquote', { className: 'nd-quote' }, String(rv.quote)) : h('div', { className: 'nd-hint' }, '（旧条目：无逐字引文）'),
-                        h('p', { className: 'nd-review-issue' }, String(rv.issue || '')),
-                        rv.suggestion ? h('p', { className: 'nd-review-advice' }, `改法：${String(rv.suggestion)}`) : null,
-                        chapterNo(rv) > 0 && rv.quote
-                          ? h('p', { className: 'nd-hint' }, '普通章节问题：勾选后点「生成修改提案」，AI 会按这条意见改写这一段，产出「原文 / 改为」提案；「改为」可在提案页直接改再批准。')
-                          : chapterNo(rv) === 0
-                            ? h('p', { className: 'nd-hint' }, '全书级问题：勾选后点「生成修改提案」会自动并进全局修改意见（也可以单独点「全局修改意见」），AI 会给出跨章修改提案。')
-                          : null,
-                      ),
-                      h('div', { className: 'nd-review-actions' },
-                        chapterNo(rv) > 0 ? h('button', { type: 'button', className: 'nd-linkbtn', onClick: () => go('read', { chapter: chapterNo(rv) }) }, '看正文') : null,
-                        h(Btn, { small: true, onClick: () => patchReview(rv.id, { status: 'fixed' }) }, '已处理'),
-                        h(Btn, { small: true, onClick: () => patchReview(rv.id, { status: 'wontfix' }) }, '忽略'),
-                      ),
-                    ),
-                  ),
-                ),
-      )
-    }
-
-    // ── 提案页 ────────────────────────────────────────────────
-    function proposalReasons(proposal) {
-      const out = []
-      if (!proposal || typeof proposal !== 'object') return '需要修改后重新生成'
-      if (Array.isArray(proposal.failures)) out.push(...proposal.failures.map(String))
-      const gates = proposal.gates || {}
-      if (gates.fidelity === 'fail') out.push('保真校验未通过（替换文本与当前正文不一致）')
-      if (gates.residue === 'fail') out.push('残留检查未通过')
-      if (gates.prose && gates.prose.normalized === false) out.push('正文规范化未通过')
-      if (gates.aistyle && gates.aistyle.pass === false) out.push(`AI 味分数 ${gates.aistyle.score}，未通过`)
-      if (Array.isArray(gates.failures)) out.push(...gates.failures.map(String))
-      return out.length ? out.join('；') : '需要修改后重新生成'
-    }
-
-    function GatesView({ gates }) {
-      if (!gates || typeof gates !== 'object') return null
-      const aistyle = gates.aistyle && typeof gates.aistyle === 'object' ? gates.aistyle : null
-      const prose = gates.prose && typeof gates.prose === 'object' ? gates.prose : null
-      const rows = [
-        ['正文规范化', prose ? (prose.normalized === false ? '未通过' : '通过') : '—', prose && prose.normalized !== false ? 'ok' : prose ? 'warn' : 'muted'],
-        ['保真校验', gates.fidelity === 'fail' ? '未通过' : gates.fidelity ? '通过' : '—', gates.fidelity === 'fail' ? 'warn' : gates.fidelity ? 'ok' : 'muted'],
-        ['残留检查', gates.residue === 'fail' ? '未通过' : gates.residue ? '通过' : '—', gates.residue === 'fail' ? 'warn' : gates.residue ? 'ok' : 'muted'],
-        ['AI 味', aistyle ? `${aistyle.score == null ? '—' : aistyle.score} 分${aistyle.pass === false ? '（未通过）' : aistyle.pass ? '（通过）' : ''}` : '—', aistyle && aistyle.pass === false ? 'warn' : aistyle ? 'ok' : 'muted'],
-      ]
-      return h('div', { className: 'nd-gates' },
-        h('div', { className: 'nd-side-sub' }, '闸门结果'),
-        rows.map((row) => h('div', { className: 'nd-gate-row', key: row[0] }, h('span', null, row[0]), h(Tag, { tone: row[2] }, row[1]))),
+        ) : null,
+        workorder ? h(Modal, {
+          title: workorder.title,
+          wide: true,
+          onClose: () => setWorkorder(null),
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => copyText(workorder.text) }, '复制'),
+            h(Btn, { kind: 'primary', disabled: workorder.sending, onClick: sendWorkorder }, workorder.sending ? '发送中…' : '发送到对话'),
+          ),
+        },
+          h(TargetPicker, { projectId, value: target, onChange: setTarget }),
+          h('p', { className: 'nd-hint' }, '会话建议：冷读/复测新开会话（零上下文）；同章定点修可沿用该章上次会话；全文动作沿用同一个 run 会话。选择权在你。'),
+          h('pre', { className: 'nd-pre nd-pre-tall' }, workorder.text),
+        ) : null,
       )
     }
 
@@ -3423,7 +3086,7 @@ window.__ModuleLoader__.load({
             setNotice({ tone: 'ok', text: `已采纳：${proposal.title || proposal.id}（正文已按补丁更新）` })
             setOpenId('')
           } else if (value && value.code === 'stale') {
-            setNotice({ tone: 'warn', text: '正文已变化，提案过期（stale）：请刷新后在审阅页重新生成提案。' })
+            setNotice({ tone: 'warn', text: '正文已变化，提案过期（stale）：请刷新后在意见页重新处理。' })
           } else {
             setNotice({ tone: 'warn', text: `未通过闸门（needs-fix）：${proposalReasons(updated || proposal)}` })
           }
@@ -3541,7 +3204,7 @@ window.__ModuleLoader__.load({
           : proposals.error
             ? h(ErrorBox, { error: proposals.error, onRetry: proposals.reload })
             : list.length === 0
-              ? h(Empty, null, status === 'pending' ? '没有待批准提案。在审阅页勾选条目 → 生成修改提案 / 全局修改意见，AI 提交后出现在这里。' : '这个状态下没有提案。')
+              ? h(Empty, null, status === 'pending' ? '没有待批准提案。在意见页由 AI 产出可采纳意见；旧提案仅作历史。' : '这个状态下没有提案。')
               : h('div', { className: 'nd-proposals' },
                   list.map((proposal) => {
                     const data = proposal.data || {}
@@ -3599,7 +3262,7 @@ window.__ModuleLoader__.load({
                                         : h('pre', { className: 'nd-pre' }, String(patch.after || '（留空 = 删除该段）')),
                                     ),
                                     patch.why ? h('div', { className: 'nd-diff-why' }, `理由：${patch.why}`) : null,
-                                    Array.isArray(patch.reviewIds) && patch.reviewIds.length ? h('div', { className: 'nd-hint' }, `来源审阅：${patch.reviewIds.join('、')}`) : null,
+                                    Array.isArray(patch.reviewIds) && patch.reviewIds.length ? h('div', { className: 'nd-hint' }, `来源意见：${patch.reviewIds.join('、')}`) : null,
                                   ),
                                 ))
                               : null,
@@ -5516,6 +5179,7 @@ window.__ModuleLoader__.load({
               h('div', { className: 'nd-card-head' },
                 h('h3', null, '🗄️ 账本数据库'),
                 h(Btn, { small: true, onClick: () => dbRes.reload() }, '刷新'),
+                h(Btn, { small: true, kind: 'primary', onClick: openFullSync }, '首次建账 / 全书同步'),
               ),
               h('p', { className: 'nd-hint' }, `实体 ${dbRes.data.stats.entities} ｜ 提及 ${dbRes.data.stats.mentions} ｜ 事实 ${dbRes.data.stats.facts} ｜ 事件 ${dbRes.data.stats.events} ｜ 高光 ${dbRes.data.stats.highlights} ｜ 待确认专名 ${dbRes.data.stats.unknown}`),
               Array.isArray(dbRes.data.items) && dbRes.data.items.length
@@ -5794,7 +5458,7 @@ window.__ModuleLoader__.load({
       const alignRows = align
         ? [
             { key: '章节 / 字数', text: `${fmtInt(align.chapters)} 章 · ${fmtInt(align.words)} 字` },
-            { key: '待处理审阅', text: fmtInt(align.openReviews) },
+            { key: '待处理意见', text: fmtInt(align.openReviews) },
             { key: '待批准提案', text: fmtInt(align.pendingProposals) },
             { key: '平均注意力', text: align.attentionAvg == null ? '暂无评分' : `${align.attentionAvg} 分` },
             { key: '注意力覆盖', text: `${fmtInt(align.attention && align.attention.scored)} / ${fmtInt(align.chapters)} 章` },
@@ -5848,7 +5512,7 @@ window.__ModuleLoader__.load({
             'div',
             null,
             h('h2', null, (project && project.title) || '总览'),
-            h('p', { className: 'nd-hint' }, `只读统计 · ${project && project.genre ? project.genre + ' · ' : ''}${toc.length} 章 · 写作请到「正文 / 审阅 / 提案」页`),
+            h('p', { className: 'nd-hint' }, `只读统计 · ${project && project.genre ? project.genre + ' · ' : ''}${toc.length} 章 · 写作请到「正文 / 意见 / 提案」页`),
           ),
           h('div', { className: 'nd-page-actions' },
             onNewBook ? h(Btn, { small: true, kind: 'primary', onClick: onNewBook, title: '选预设、写一段想法，创建新作品并让 AI 生成世界/人物/大纲' }, '＋ 开新书') : null,
@@ -5894,7 +5558,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'nd-stat-grid' },
           statCard('章节总数', fmtInt(toc.length), `${writtenCount} 章已成稿`),
           statCard('全书字数', fmtWords(totalWords), `约 ${fmtInt(totalWords)} 字`),
-          statCard('待处理审阅', fmtInt(openReviews.length), '四路审阅合计'),
+          statCard('待处理意见', fmtInt(openReviews.length), 'AI 意见与作者意见合计'),
           statCard('待批准提案', fmtInt(pendingProposals.length), '采纳前不会改正文'),
           statCard('平均注意力', avgScore == null ? '—' : String(avgScore), scored.length ? `${scored.length} 章有评分` : '尚无评分'),
           statCard('设定条目', fmtInt(ledgerCount), '人物 / 事实 / 事件 / 伏笔 / 冲突 / 地点'),
@@ -5940,7 +5604,7 @@ window.__ModuleLoader__.load({
           ),
           h('section', { className: 'nd-card' },
             h('div', { className: 'nd-card-head' }, h('h3', null, '🔎 待办')),
-            h('div', { className: 'nd-todo-group' }, h('span', { className: 'nd-hint' }, `待处理审阅 ${openReviews.length} 条`)),
+            h('div', { className: 'nd-todo-group' }, h('span', { className: 'nd-hint' }, `待处理意见 ${openReviews.length} 条`)),
             openReviews.length
               ? openReviews.slice(0, 6).map((rv, i) =>
                   h(
@@ -5955,7 +5619,7 @@ window.__ModuleLoader__.load({
                     h('span', { className: 'nd-todo-text' }, `第 ${chapterNo(rv) || '全书'} 章 · ${String(rv.issue || '').slice(0, 40)}`),
                   ),
                 )
-              : h('p', { className: 'nd-muted' }, '没有待处理审阅'),
+              : h('p', { className: 'nd-muted' }, '没有待处理意见'),
             h('div', { className: 'nd-todo-group' }, h('span', { className: 'nd-hint' }, `待批准提案 ${pendingProposals.length} 条`)),
             pendingProposals.length
               ? pendingProposals.slice(0, 6).map((p) =>
@@ -6086,7 +5750,7 @@ window.__ModuleLoader__.load({
         h(Field, { label: '一句话说明' }, h(TextInput, { value: draft.desc, onChange: (v) => set('desc', v), placeholder: '这个预设适合什么题材、解决什么写作问题' })),
         h(Field, { label: '风格规则（每行一条）', hint: '会被拼进 AI 工作单' }, h(TextArea, { value: draft.styleRules, rows: 4, onChange: (v) => set('styleRules', v) })),
         h(Field, { label: '禁忌（每行一条）', hint: 'AI 写了就要退回重写' }, h(TextArea, { value: draft.taboo, rows: 3, onChange: (v) => set('taboo', v) })),
-        h(Field, { label: '审阅重点（每行一条）' }, h(TextArea, { value: draft.reviewFocus, rows: 2, onChange: (v) => set('reviewFocus', v) })),
+        h(Field, { label: 'AI 意见重点（每行一条）' }, h(TextArea, { value: draft.reviewFocus, rows: 2, onChange: (v) => set('reviewFocus', v) })),
         h(Field, { label: '主角必须承担什么' }, h(TextInput, { value: draft.protagonist, onChange: (v) => set('protagonist', v) })),
         h(Field, { label: '反派/压力必须怎么升级' }, h(TextInput, { value: draft.antagonist, onChange: (v) => set('antagonist', v) })),
         h(Field, { label: '配角各自的功能' }, h(TextInput, { value: draft.supporting, onChange: (v) => set('supporting', v) })),
@@ -6360,7 +6024,7 @@ window.__ModuleLoader__.load({
                       } }, '复制绝对模板'),
                     ),
                   ),
-                  h('p', { className: 'nd-hint' }, '预设是写作约定（视角/节奏/风格/禁忌/审阅重点）；换预设不会改正文。应用后新建的 AI 工作单会带上它。'),
+                  h('p', { className: 'nd-hint' }, '预设是写作约定（视角/节奏/风格/禁忌/AI 意见重点）；换预设不会改正文。应用后新建的 AI 工作单会带上它。'),
                   h('div', { className: 'nd-preset-list' },
                     presetList.map((preset) => {
                       const active = String(preset.id) === String(activePresetId)
@@ -6373,7 +6037,7 @@ window.__ModuleLoader__.load({
                             h(Tag, null, `每章 ${toNumber(preset.chapterWords, 0)} 字`),
                             preset.pov ? h(Tag, null, String(preset.pov)) : null,
                             Array.isArray(preset.taboo) && preset.taboo.length ? h(Tag, null, `禁忌 ${preset.taboo.length} 条`) : null,
-                            Array.isArray(preset.reviewFocus) && preset.reviewFocus.length ? h(Tag, null, `审阅重点 ${preset.reviewFocus.length} 条`) : null,
+                            Array.isArray(preset.reviewFocus) && preset.reviewFocus.length ? h(Tag, null, `AI 意见重点 ${preset.reviewFocus.length} 条`) : null,
                           ),
                         ),
                         h('div', { className: 'nd-preset-actions' },
@@ -6453,7 +6117,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
