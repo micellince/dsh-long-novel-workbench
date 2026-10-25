@@ -1,322 +1,225 @@
 /**
- * 注意力一号原则（task-12）：
- * plan 提案硬校验、plan 工作单置顶 + 强制补强、context 注意力前置、
- * 交接 prompt 第一优先级、旧一键 AI（lib/ai.js）补齐、章节采纳注意力合并/告警。
+ * 0.6.2 注意力一号原则回归（ATTENTION IS ALL YOU NEED）：
+ * 所有写/改工作单第一行注入原则；写前必须先有注意力设计；run 第一步是注意力设计；
+ * AI 自定义方案必须带注意力总设计；大纲每章必须带四拍设计；冷读复测保持纯净。
  */
+
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import * as store from '../lib/store.js'
-import { apply, buildHandoffPrompt, ATTENTION_FIRST_PRINCIPLE } from '../index.js'
-import { buildAiContext, TASK_SPECS } from '../lib/ai.js'
-import { makeRoot } from './helpers.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-function useTempRoot(t, root) {
+import { TOOLS } from '../index.js'
+import * as store from '../lib/store.js'
+import {
+  ATTENTION_PRINCIPLE,
+  attentionDesignWorkorder,
+  attentionRecheckWorkorder,
+  chapterRewriteWorkorder,
+  fullBookProposalWorkorder,
+  newBookWorkorder,
+  runGoalPrompt,
+} from '../lib/prompts.js'
+
+const project = { id: 'p1', title: '夜雨将明', genre: '悬疑' }
+const chapter = { chapter: 4, title: '雨夜来客', path: 'chapters/0004.txt', words: 230 }
+const tool = (name) => {
+  const found = TOOLS.find((row) => row.name === name)
+  assert.ok(found, `缺少工具 ${name}`)
+  return found
+}
+const textOf = (out) => (typeof out === 'string' ? out : JSON.stringify(out))
+
+async function tempRoot(t) {
+  const root = await mkdtemp(join(tmpdir(), 'nd-attention-first-'))
   const previous = process.env.STORY_DESK_ROOT
   process.env.STORY_DESK_ROOT = root
-  t.after(() => {
+  t.after(async () => {
     if (previous === undefined) delete process.env.STORY_DESK_ROOT
     else process.env.STORY_DESK_ROOT = previous
+    await rm(root, { recursive: true, force: true })
   })
+  return root
 }
 
-function attentionRecord(chapter, overrides = {}) {
-  return {
-    id: `att-${String(chapter).padStart(4, '0')}`,
-    chapter,
-    type: 'event',
-    score: 70,
-    designScore: 72,
-    verdict: '会',
-    weakest: 'tension',
-    dropRisk: '第 9 段',
-    hook: '开篇钩子',
-    tension: '承压点',
-    payoff: '兑现',
-    cliff: '章末未决',
-    question: '读者想知道什么？',
-    detail: '详细说明',
-    status: 'verified',
-    ...overrides,
+test('写/改类工作单第一行就是 ATTENTION IS ALL YOU NEED', () => {
+  const prompts = [
+    runGoalPrompt({ project, run: { kind: 'continue', scope: 'book' } }),
+    runGoalPrompt({ project, run: { kind: 'expand', scope: 'range', chapter: 1, endChapter: 3 } }),
+    runGoalPrompt({ project, run: { kind: 'rewrite', variant: 'style', scope: 'book' } }),
+    runGoalPrompt({ project, run: { kind: 'rewrite', variant: 'logic', scope: 'book' } }),
+    chapterRewriteWorkorder({ project, chapter: 4, text: '雨从黄昏就开始下。' }),
+    fullBookProposalWorkorder({ project, chapters: [chapter] }),
+    newBookWorkorder({ project, preset: { id: 'preset-ai-custom', name: '自定义（让 AI 定）', custom: true }, brief: '失忆仵作追凶' }),
+    attentionDesignWorkorder({ project, chapters: [chapter] }),
+  ]
+  for (const prompt of prompts) {
+    assert.ok(prompt.startsWith(ATTENTION_PRINCIPLE), `第一行必须是原则：${prompt.slice(0, 40)}`)
+    assert.match(prompt, /ATTENTION IS ALL YOU NEED/)
   }
-}
+  // 冷读复测保持零上下文纯净，不注入原则
+  const recheck = attentionRecheckWorkorder({ project, chapters: [chapter] })
+  assert.equal(recheck.includes(ATTENTION_PRINCIPLE), false, '复测不得注入原则')
+})
 
-function captureTools() {
-  const tools = []
-  apply({ tools: { register: (tool) => tools.push(tool) }, inject: () => {}, get: () => undefined })
-  return tools
-}
+test('run 工作单带全局注意力块：曲线、疲劳、目标分、强制补强', () => {
+  const prompt = runGoalPrompt({
+    project,
+    run: { kind: 'continue', scope: 'book' },
+    attention: [
+      { chapter: 1, type: 'mystery', score: 72, designScore: 78, breakdown: { hook: 15, tension: 15, payoff: 25, cliff: 17 } },
+      { chapter: 2, type: 'event', score: 75, designScore: 80, breakdown: { hook: 16, tension: 16, payoff: 26, cliff: 17 } },
+      { chapter: 3, type: 'language', score: 55, designScore: 80, breakdown: { hook: 20, tension: 20, payoff: 10, cliff: 5 } },
+    ],
+  })
+  assert.match(prompt, /## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）/)
+  assert.match(prompt, /最近 6 章注意力曲线/)
+  assert.match(prompt, /第3章 55分\/language（设计 80，实测-设计 -25）/)
+  assert.match(prompt, /本章目标分：designScore 建议/)
+  assert.match(prompt, /## 补强要求（强制）/)
+  assert.match(prompt, /差 25 分（≥20）/)
+  assert.match(prompt, /上一章最弱一环：章末牵引（cliff）/)
+  assert.match(prompt, /## 四拍要求/)
+  // 第 0 步先设计，再读材料、再写
+  const stepIndex = prompt.indexOf('第 0 步')
+  const readIndex = prompt.indexOf('read 工具读 novel_desk_read')
+  assert.ok(stepIndex > 0, '缺「第 0 步」注意力设计')
+  assert.ok(readIndex < 0 || stepIndex < readIndex, '注意力设计必须排在读材料之前')
+})
 
-/** 建一个带章节（和可选 attention/世界/地点）的作品，并把 STORY_DESK_ROOT 指向临时根。 */
-async function makeProject(t, { name = '一号原则作品', chapters = 3, attention = [], world = null, locations = [] } = {}) {
-  const root = await makeRoot(t)
-  useTempRoot(t, root)
-  const project = await store.createProject(root, { name, genre: '武侠' })
-  for (let index = 1; index <= chapters; index += 1) {
-    await store.saveChapter(root, project.id, { id: String(index).padStart(4, '0'), title: `第${index}章`, content: `第 ${index} 章正文。` })
-  }
-  for (const row of attention) await store.upsertEntity(root, project.id, 'attention', row)
-  if (world) await store.saveWorld(root, project.id, world)
-  for (const location of locations) await store.upsertEntity(root, project.id, 'locations', location)
-  return { root, project }
-}
-
-// ── 1. plan 提案硬校验 ───────────────────────────────────────
-
-test('plan 提案硬校验：缺 data.attention 或字段不合法都抛错', async (t) => {
-  const { root, project } = await makeProject(t)
-  const valid = { type: 'event', hook: '钩子', tension: '张力', payoff: '回报', cliff: '章末', question: '问题', designScore: 80 }
-
-  const reject = async (data) => assert.rejects(
-    () => store.createProposal(root, project.id, { kind: 'plan', title: '方案', chapter: 1, data }),
-    /plan 提案必须带注意力设计（ATTENTION IS ALL YOU NEED）：data\.attention 需包含 type\/hook\/tension\/payoff\/cliff\/designScore/,
+test('注意力设计工具：缺四拍或 designScore 直接拒绝', async (t) => {
+  const root = await tempRoot(t)
+  const made = await store.createProject(root, { title: '注意力测试书' })
+  const projectId = made.id
+  const attention = tool('novel_desk_attention')
+  await assert.rejects(
+    () => attention.execute({ projectId, op: 'design', items: [{ chapter: 1, type: 'mystery', hook: '门口多了一双鞋', tension: '', payoff: '真相', cliff: '谁在屋里', designScore: 80 }] }),
+    /注意力设计未通过.*tension/,
   )
-
-  await reject({ title: '缺 attention' })
-  await reject({ title: 'attention 不是对象', attention: '无' })
-  await reject({ title: '缺 cliff', attention: { ...valid, cliff: '' } })
-  await reject({ title: '缺 hook', attention: { ...valid, hook: '   ' } })
-  await reject({ title: '缺 designScore', attention: { ...valid, designScore: undefined } })
-  await reject({ title: 'type 非法', attention: { ...valid, type: 'battle' } })
-  await reject({ title: 'designScore 越界', attention: { ...valid, designScore: 101 } })
-  await reject({ title: 'designScore 负数', attention: { ...valid, designScore: -1 } })
-  await reject({ title: 'designScore 非数字', attention: { ...valid, designScore: 'abc' } })
-
-  const accepted = await store.createProposal(root, project.id, { kind: 'plan', title: '合格方案', chapter: 1, data: { title: '第 1 章', attention: valid } })
-  assert.equal(accepted.kind, 'plan')
-  assert.equal(accepted.status, 'pending')
+  await assert.rejects(
+    () => attention.execute({ projectId, op: 'design', items: [{ chapter: 1, type: 'mystery', hook: '门口多了一双鞋', tension: '时限', payoff: '真相', cliff: '谁在屋里', designScore: 120 }] }),
+    /designScore/,
+  )
+  const ok = textOf(await attention.execute({
+    projectId,
+    op: 'design',
+    items: [{ chapter: 1, type: 'mystery', hook: '门口多了一双鞋', tension: '雨停前必须离开', payoff: '翻出旧案卷', cliff: '谁在屋里', designScore: 82 }],
+  }))
+  assert.match(ok, /已合并 1 章注意力/)
+  const rows = await store.getAttention(root, projectId)
+  assert.equal(rows[0].status, 'planned')
+  assert.equal(rows[0].designScore, 82)
 })
 
-// ── 2. plan 工作单：一号原则 + 注意力置顶 ────────────────────
+test('写正文时没有注意力设计会提醒；run 开工带全局提醒', async (t) => {
+  const root = await tempRoot(t)
+  const made = await store.createProject(root, { title: '写作提醒书' })
+  const projectId = made.id
+  const write = tool('novel_desk_write')
+  const run = tool('novel_desk_run')
 
-test('plan 工作单：原则置顶，「第一优先级：注意力」在大纲/事实之前，含曲线/疲劳/目标分/四拍', async (t) => {
-  const { root, project } = await makeProject(t, {
-    chapters: 3,
-    attention: [
-      attentionRecord(1, { score: 72, designScore: 80 }),
-      attentionRecord(2, { type: 'emotion', score: 68, designScore: 75 }),
-      attentionRecord(3, { type: 'language', score: 75, designScore: 76 }),
-    ],
+  const wrote = textOf(await write.execute({ projectId, chapter: 1, text: '陈默走了三步，停在门口。\n\n※\n\n门外没有动静。' }))
+  assert.match(wrote, /已写入第1章/)
+  assert.match(wrote, /注意力提醒：第1章没有注意力设计记录（ATTENTION IS ALL YOU NEED）/)
+
+  const started = textOf(await run.execute({ projectId, op: 'start', kind: 'continue', scope: 'book' }))
+  assert.match(started, /全局提醒（ATTENTION IS ALL YOU NEED）：本书还没有任何注意力设计/)
+  assert.match(started, /第 1 步必须是注意力设计|第一步必须是注意力设计/)
+
+  const attention = tool('novel_desk_attention')
+  await attention.execute({
+    projectId,
+    op: 'design',
+    items: [{ chapter: 1, type: 'event', hook: '门口多了一双鞋', tension: '雨停前必须离开', payoff: '翻出旧案卷', cliff: '谁在屋里', designScore: 80 }],
   })
-  await store.upsertEntity(root, project.id, 'outlines', { chapter: 4, title: '第四章大纲', summary: '大纲摘要' })
-  const tools = captureTools()
-  const planTool = tools.find((tool) => tool.name === 'novel_desk_plan')
-  const planText = await planTool.execute({ project: project.id, chapter: 4 })
-
-  assert.ok(planText.startsWith('# 工作单 · 第 4 章'), '工单标题应在最前')
-  assert.ok(planText.includes(ATTENTION_FIRST_PRINCIPLE), '工作单应注入一号原则')
-  assert.ok(planText.indexOf(ATTENTION_FIRST_PRINCIPLE) < planText.indexOf('## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）'), '原则先于注意力段')
-  const firstPriorityIndex = planText.indexOf('## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）')
-  assert.ok(firstPriorityIndex > 0)
-  assert.ok(firstPriorityIndex < planText.indexOf('## 本章大纲'), '注意力段应在大纲之前')
-  assert.ok(firstPriorityIndex < planText.indexOf('## 必须延续的既有事实'), '注意力段应在既有事实之前')
-  assert.ok(firstPriorityIndex < planText.indexOf('## 时间线（最近）'))
-  assert.ok(firstPriorityIndex < planText.indexOf('## 未回收伏笔'))
-  assert.ok(firstPriorityIndex < planText.indexOf('## 进行中的冲突'))
-  assert.ok(firstPriorityIndex < planText.indexOf('## 地点与移动'))
-  assert.ok(planText.includes('最近 6 章注意力曲线'))
-  assert.ok(planText.includes('第1章 72分/event（设计 80，实测-设计 -8）'), '曲线要含 designScore 与实测差')
-  assert.match(planText, /疲劳预警：/)
-  assert.ok(planText.includes('本章目标分：designScore 建议'))
-  assert.ok(planText.includes('主类型建议：'))
-  for (const beat of ['- hook：', '- tension：', '- payoff：', '- cliff：', '- question：']) {
-    assert.ok(planText.includes(beat), `四拍要求应包含「${beat}」`)
-  }
-  assert.match(planText, /上一章注意力：第3章 75分\/language/)
-  assert.ok(planText.includes('data.attention'), '仍要求 plan 提案带 attention 设计')
+  const restarted = textOf(await run.execute({ projectId, op: 'start', kind: 'continue', scope: 'book' }))
+  assert.match(restarted, /已有 1 章设计/)
 })
 
-test('plan 强制补强：上一章 designScore-score ≥20 或低于均值-10 时输出，数据不足不输出', async (t) => {
-  const tools = captureTools()
-  const planTool = tools.find((tool) => tool.name === 'novel_desk_plan')
-
-  // 情形一：设计没兑现（80 - 55 = 25 ≥ 20）
-  const gapCase = await makeProject(t, {
-    chapters: 1,
-    attention: [attentionRecord(1, { score: 55, designScore: 80, weakest: 'tension' })],
+test('账本提案硬校验：AI 自定义方案缺 attentionPlan 拒绝；大纲缺 attention 拒绝', async (t) => {
+  const root = await tempRoot(t)
+  const made = await store.createProject(root, { title: '提案校验书' })
+  const projectId = made.id
+  const base = { kind: 'ledger-fix', title: 'AI 自定义方案' }
+  await assert.rejects(
+    () => store.createProposal(root, projectId, {
+      ...base,
+      data: { ledgerFixes: [{ kind: 'presets', patch: { id: 'preset-ai-custom', name: 'AI 自定义方案' } }] },
+    }),
+    /AI 自定义方案必须带注意力总设计（ATTENTION IS ALL YOU NEED）/,
+  )
+  const preset = await store.createProposal(root, projectId, {
+    ...base,
+    data: {
+      ledgerFixes: [{
+        kind: 'presets',
+        patch: {
+          id: 'preset-ai-custom',
+          name: 'AI 自定义方案',
+          attentionPlan: {
+            principle: 'ATTENTION IS ALL YOU NEED',
+            targetAvg: 80,
+            openingHooks: '第一章 300 字内出现反常现场。',
+            mainTypeRotation: ['mystery', 'event', 'emotion'],
+            payoffCadence: '每 3 章一次小兑现。',
+            cliffRule: '每章末留具体未决问题。',
+          },
+        },
+      }],
+    },
   })
-  const gapPlan = await planTool.execute({ project: gapCase.project.id, chapter: 2 })
-  assert.ok(gapPlan.includes('## 补强要求（强制）'), '设计未兑现应输出强制补强段')
-  assert.ok(gapPlan.includes('差 25 分'))
-  assert.ok(gapPlan.includes('上一章最弱一环：张力（tension）'))
-  assert.ok(gapPlan.includes('本章张力必须落在主角失去什么上'))
-  assert.ok(gapPlan.indexOf('## 补强要求（强制）') < gapPlan.indexOf('## 必须延续的既有事实'), '补强段也应在既有事实之前')
+  assert.equal(preset.status, 'pending')
 
-  // 情形二：低于全书均值 10 分以上（均值 70，上一章 50）
-  const avgCase = await makeProject(t, {
-    chapters: 2,
-    attention: [
-      attentionRecord(1, { score: 90, designScore: 90, weakest: 'payoff' }),
-      attentionRecord(2, { score: 50, designScore: 55, weakest: 'cliff' }),
-    ],
+  await assert.rejects(
+    () => store.createProposal(root, projectId, {
+      kind: 'ledger-fix',
+      title: '大纲',
+      data: { ledgerFixes: [{ kind: 'outlines', patch: { chapter: 1, title: '雨夜', beats: ['a', 'b'] } }] },
+    }),
+    /大纲提案必须带每章注意力设计/,
+  )
+  const outline = await store.createProposal(root, projectId, {
+    kind: 'ledger-fix',
+    title: '大纲',
+    data: {
+      ledgerFixes: [{
+        kind: 'outlines',
+        patch: {
+          chapter: 1,
+          title: '雨夜',
+          beats: ['a', 'b'],
+          attention: { type: 'mystery', hook: '门口多了一双鞋', tension: '雨停前必须离开', payoff: '翻出旧案卷', cliff: '谁在屋里', question: '谁进过屋', designScore: 80 },
+        },
+      }],
+    },
   })
-  const avgPlan = await planTool.execute({ project: avgCase.project.id, chapter: 3 })
-  assert.ok(avgPlan.includes('## 补强要求（强制）'), '低于均值 10 分应输出强制补强')
-  assert.ok(avgPlan.includes('低于全书均值 70 分超过 10 分'))
-  assert.ok(avgPlan.includes('上一章最弱一环：章末牵引（cliff）'))
+  assert.equal(outline.status, 'pending')
+  const acceptedOutline = await store.acceptProposal(root, projectId, outline.id)
+  assert.equal(acceptedOutline.ok, true)
+  const designed = (await store.getAttention(root, projectId)).find((row) => Number(row.chapter) === 1)
+  assert.equal(designed.designScore, 80)
+  assert.equal(designed.status, 'planned')
 
-  // 情形三：数据不足（没有任何注意力记录）→ 不输出
-  const emptyCase = await makeProject(t, { chapters: 1 })
-  const emptyPlan = await planTool.execute({ project: emptyCase.project.id, chapter: 2 })
-  assert.ok(!emptyPlan.includes('## 补强要求（强制）'), '数据不足不应输出强制补强')
-  assert.ok(emptyPlan.includes('## 第一优先级：注意力'))
-})
-
-// ── 3. context 前置 ─────────────────────────────────────────
-
-test('context：一号原则在最前，注意力段在人物卡/事实之前，含「读者第一」', async (t) => {
-  const { root, project } = await makeProject(t, {
-    chapters: 2,
-    attention: [attentionRecord(1, { score: 72, designScore: 80, question: '门外是谁' })],
+  // 已有大纲条目（带 id）属于维护性修订，不强制重交四拍；否则账本同步会被整单卡死。
+  const outlineFix = await store.createProposal(root, projectId, {
+    kind: 'ledger-fix',
+    title: '大纲维护',
+    data: { ledgerFixes: [{ kind: 'outlines', patch: { id: 'ol_1', chapter: 1, summary: '补一句过场说明' } }] },
   })
-  await store.upsertEntity(root, project.id, 'characters', { name: '甲', role: '主角' })
-  await store.upsertEntity(root, project.id, 'facts', { subject: '甲', attribute: '年龄', value: '20', chapter: 1 })
-
-  const tools = captureTools()
-  const contextTool = tools.find((tool) => tool.name === 'novel_desk_context')
-  const text = await contextTool.execute({ project: project.id, recent: 0 })
-
-  assert.ok(text.includes(ATTENTION_FIRST_PRINCIPLE), 'context 必须含一号原则')
-  assert.ok(text.indexOf(ATTENTION_FIRST_PRINCIPLE) < text.indexOf('## 作品设定'), '原则应在作品设定之前')
-  const attentionIndex = text.indexOf('## 注意力（100 分制）')
-  assert.ok(attentionIndex > 0)
-  assert.ok(attentionIndex < text.indexOf('## 人物卡'), '注意力段应在人物卡之前')
-  assert.ok(attentionIndex < text.indexOf('## 事实账本'), '注意力段应在事实账本之前')
-  assert.ok(text.includes('读者第一：先看每章是否抓人，再看自洽'))
+  assert.equal(outlineFix.status, 'pending')
 })
 
-// ── 4. 交接 prompt 第一优先级 ────────────────────────────────
-
-test('交接 prompt：常规交接原则置顶；next-chapter-plan/continue-chapter 第一优先级在交接头之前', async (t) => {
-  const { root, project } = await makeProject(t, { chapters: 2, attention: [attentionRecord(1)] })
-  const bundle = await store.getBundle(root, project.id)
-
-  const fullReview = buildHandoffPrompt(bundle, { task: 'full-review' })
-  assert.ok(fullReview.startsWith(`> ${ATTENTION_FIRST_PRINCIPLE}`), '常规交接第一行应是一号原则')
-  assert.ok(fullReview.includes('【工作台交接】'))
-
-  const nextPlan = buildHandoffPrompt(bundle, { task: 'next-chapter-plan' })
-  const nextPriority = nextPlan.indexOf('## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）')
-  assert.ok(nextPriority > 0)
-  assert.ok(nextPriority < nextPlan.indexOf('【工作台交接】'), '第一优先级应在交接头之前')
-  assert.ok(nextPlan.includes('attention 设计（planned）'))
-  assert.ok(nextPlan.includes('正文必须按四拍落地'))
-
-  const continueChapter = buildHandoffPrompt(bundle, { task: 'continue-chapter' })
-  const continuePriority = continueChapter.indexOf('## 第一优先级：注意力（ATTENTION IS ALL YOU NEED）')
-  assert.ok(continuePriority > 0)
-  assert.ok(continuePriority < continueChapter.indexOf('【工作台交接】'))
-  assert.ok(continueChapter.includes('正文必须按四拍落地，章末必须留未决问题'))
-
-  const multiAgent = buildHandoffPrompt(bundle, { task: 'full-review', multiAgent: true })
-  assert.ok(multiAgent.includes('注意力设计师权重最高（10），先出设计'), 'multiAgent 派单应要求注意力设计师先出设计')
-})
-
-test('交接 prompt：零上下文 fresh-read 绝不注入一号原则（单章 + 全书内联）', async (t) => {
-  const { root, project } = await makeProject(t, { chapters: 2, attention: [attentionRecord(1)] })
-  const bundle = await store.getBundle(root, project.id)
-
-  for (const body of [{ task: 'fresh-read', chapter: 1 }, { task: 'fresh-read', scope: 'book' }]) {
-    const prompt = buildHandoffPrompt(bundle, body)
-    assert.ok(!prompt.includes('ATTENTION IS ALL YOU NEED'), 'fresh-read prompt 不得含一号原则')
-    assert.ok(!prompt.includes('创作第一原则'), 'fresh-read prompt 不得含原则文案')
-    assert.match(prompt.split('\n')[0], /^零上下文首读/, 'fresh-read 仍应以零上下文指令开头')
-  }
-})
-
-// ── 5. 旧一键 AI（lib/ai.js）补齐 ───────────────────────────
-
-test('ai.buildAiContext：注意力段与世界观段都在「已写章节」之前，含平均/未标/上一章诊断', async (t) => {
-  const { root, project } = await makeProject(t, {
-    chapters: 3,
-    attention: [
-      attentionRecord(1, { type: 'mystery', score: 72, designScore: 80 }),
-      attentionRecord(2, { type: 'emotion', score: 64, designScore: 70 }),
-      attentionRecord(3, { weakest: 'cliff', cliff: '门外是谁' }),
-    ],
-    world: { name: '大唐江湖', scale: 'realm', kind: 'mixed', era: '天宝' },
-    locations: [
-      { id: 'loc-changan', name: '长安', type: 'capital', coords: { x: 420, y: 380 }, connections: [{ to: 'loc-luoyang', distanceKm: 380 }] },
-      { id: 'loc-luoyang', name: '洛阳', type: 'city', coords: { x: 620, y: 380 }, connections: [] },
-    ],
-  })
-  await store.saveChapter(root, project.id, { id: '0003', title: '第3章', content: '正文。', location: '洛阳' })
-  const bundle = await store.getBundle(root, project.id)
-  const text = buildAiContext(bundle, null)
-
-  assert.ok(text.includes('# 注意力（第一优先级）'), '旧 AI 上下文应含注意力段')
-  assert.ok(text.includes('# 世界与地点'), '旧 AI 上下文应含世界观段')
-  assert.ok(text.indexOf('# 注意力（第一优先级）') < text.indexOf('# 已写章节'), '注意力段应在已写章节之前')
-  assert.ok(text.indexOf('# 世界与地点') < text.indexOf('# 已写章节'), '世界观段应在已写章节之前')
-  assert.match(text, /平均分：69/)
-  assert.match(text, /未标：0 章已写/)
-  assert.match(text, /上一章：第3章/)
-  assert.ok(text.includes('最弱一环：cliff'))
-  assert.ok(text.includes('大唐江湖'))
-  assert.ok(text.includes('长安（capital'))
-  assert.ok(text.includes('最近章节地点：第3章 洛阳'))
-})
-
-test('ai.TASK_SPECS：next-chapter-plan / continue-chapter 的 instruction 含注意力，schema 含 attention', () => {
-  const planSpec = TASK_SPECS['next-chapter-plan']
-  assert.match(planSpec.instruction(2), /注意力/)
-  assert.match(planSpec.instruction(2), /ATTENTION IS ALL YOU NEED|事实自洽是底线/)
-  assert.match(planSpec.schema(2), /"attention"/)
-  assert.match(planSpec.schema(2), /designScore/)
-
-  const continueSpec = TASK_SPECS['continue-chapter']
-  assert.match(continueSpec.instruction(2), /注意力/)
-  assert.match(continueSpec.instruction(2), /正文必须按四拍/)
-  assert.match(continueSpec.instruction(2), /章末必须留未决问题/)
-  assert.match(continueSpec.schema, /"attention"/)
-  assert.match(continueSpec.schema, /designScore/)
-})
-
-// ── 6. 章节采纳：注意力合并 / attentionWarning ──────────────
-
-test('章节采纳：带 data.attention 合并到已有设计记录；既无记录又无设计返回 attentionWarning', async (t) => {
-  const { root, project } = await makeProject(t, { chapters: 2 })
-  // 第 1 章已有设计（设计师产出）
-  await store.upsertEntity(root, project.id, 'attention', {
-    chapter: 1, type: 'mystery', hook: '旧钩子', tension: '旧张力', payoff: '旧回报', cliff: '旧章末', designScore: 80, status: 'planned',
-  })
-
-  // 带 data.attention：合并设计字段，不新增记录
-  const withAttention = await store.createProposal(root, project.id, {
-    kind: 'chapter',
+test('普通正文提案不受注意力硬校验影响（保持三种 kind 契约）', async (t) => {
+  const root = await tempRoot(t)
+  const made = await store.createProject(root, { title: '普通提案书' })
+  const projectId = made.id
+  const proposal = await store.createProposal(root, projectId, {
+    kind: 'patch-paragraph',
     chapter: 1,
-    title: '第 1 章正文',
-    data: { title: '第 1 章', content: '新正文。', attention: { hook: '新钩子', tension: '新张力', designScore: 88 } },
+    title: '补一句',
+    data: { patches: [{ before: '门外没有动静。', after: '门外还是没有动静。' }] },
   })
-  const merged = await store.acceptProposal(root, project.id, withAttention.id)
-  assert.equal(merged.applied.attention, 1, '章节提案里的 attention 设计应合并进账本')
-  assert.ok(!merged.attentionWarning, '带设计时不应告警')
-  let rows = await store.getEntities(root, project.id, 'attention')
-  assert.equal(rows.length, 1, '合并后仍只有一条记录')
-  assert.equal(rows[0].hook, '新钩子')
-  assert.equal(rows[0].tension, '新张力')
-  assert.equal(rows[0].designScore, 88)
-  assert.equal(rows[0].type, 'mystery', '未给的 type 应保留')
-
-  // 无记录且无 data.attention：写入正文但返回 attentionWarning，不伪造设计
-  const withoutAttention = await store.createProposal(root, project.id, {
-    kind: 'chapter',
-    chapter: 2,
-    title: '第 2 章正文',
-    data: { title: '第 2 章', content: '第二章正文。' },
-  })
-  const warned = await store.acceptProposal(root, project.id, withoutAttention.id)
-  assert.equal(warned.applied.chapter, '0002')
-  assert.equal(warned.attentionWarning, true, '无设计记录时采纳章节应返回 attentionWarning')
-  rows = await store.getEntities(root, project.id, 'attention')
-  assert.equal(rows.length, 1, '不得伪造 attention 记录')
-
-  // 已有记录但提案不带设计：不告警
-  const existingNoDesign = await store.createProposal(root, project.id, {
-    kind: 'chapter',
-    chapter: 1,
-    title: '第 1 章修订',
-    data: { title: '第 1 章', content: '再改一版。' },
-  })
-  const noWarn = await store.acceptProposal(root, project.id, existingNoDesign.id)
-  assert.ok(!noWarn.attentionWarning, '已有设计记录时不应告警')
+  assert.equal(proposal.kind, 'patch-paragraph')
+  assert.equal(proposal.status, 'pending')
 })

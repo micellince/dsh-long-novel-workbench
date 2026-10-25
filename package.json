@@ -1,11 +1,16 @@
 {
   "name": "dsh-long-novel-workbench",
-  "version": "0.5.1",
-  "description": "长篇中文小说工作台：注意力优先（每章 0–100 分）+ 事实账本/时间线/世界地点自洽 + 章节地图 + 整本书全自动生成；19 个页签、11 个 Agent 分工、8 套名家风格预设、审稿/提案/对齐与 AI 生成。",
+  "version": "0.6.11",
+  "description": "长篇中文小说工作台（DSH 插件）：正文页优先的「读—批注—审—改」工作台。连续阅读 / 页内编辑 / 沉浸模式 / 仿纸正文底 / 阅读位置三模式同步，四路同权审阅（逻辑·注意力·AI 味·读者），AI 只出提案、人逐条批，全文动作 run 与全书账本同步；ATTENTION IS ALL YOU NEED 注入所有写/改工作单。",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "check": "node --check index.js && node --check client.js && node --check lib/gates.js && node --check lib/attention.js && node --check lib/aistyle.js && node --check lib/prose.js && node --check lib/store.js && node --check lib/prompts.js && node --check lib/usage.js && node --check lib/exporters.js && node --check lib/zip.js",
+    "preflight": "node scripts/preflight.mjs",
+    "migrate": "node scripts/migrate.js",
+    "e2e": "node scripts/ui-e2e.mjs",
+    "smoke": "node scripts/ui-smoke.mjs"
   },
   "exports": {
     ".": "./index.js",
@@ -18,11 +23,12 @@
     "index.js",
     "client.js",
     "lib",
+    "scripts",
     "cordis.patch.yml",
+    "locale",
+    "icon.svg",
     "README.md",
-    "LICENSE",
-    "locale/*.json",
-    "icon.svg"
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -32,19 +38,18 @@
       "platform": "web",
       "immediately": true,
       "inject": [
-        "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-slots"
       ]
     }
   },
   "license": "MIT",
   "author": {
     "name": "micellince"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
   },
   "repository": {
     "type": "git",
@@ -69,8 +74,5 @@
     "写作",
     "长篇",
     "中文"
-  ],
-  "engines": {
-    "node": "^22.19.0 || >=24.0.0"
-  }
+  ]
 }

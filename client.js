@@ -1,8 +1,9 @@
 /**
- * 长篇中文小说工作台 · 客户端
+ * 小说工作台 0.6 · 客户端
  *
- * 侧栏入口 + 全屏工作台。React 由浏览器模块表提供，无需构建。
- * 结构与数据全部通过同源 /story-desk/api 读写。
+ * 全屏工作台：左侧 8 页导航（正文 / 审阅 / 提案 / 全文动作 / 世界地图 / 账本 / 总览 / 设置）。
+ * React 由浏览器模块表提供，无构建、无外部依赖；正文一律纯文本渲染，禁止 Markdown 解析。
+ * 所有数据走同源 RPC：POST /novel-desk/api，body { op, payload }。
  */
 
 window.__ModuleLoader__.load({
@@ -10,353 +11,149 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useState, useEffect, useCallback, useRef } = React
+    const { useState, useEffect, useMemo, useRef, useCallback, memo } = React
+    const Fragment = React.Fragment
 
-    // ── 全局开关 ──────────────────────────────────────────────
-    let clientCtx = null
-    const ui = { open: false, listeners: new Set() }
-    function setOpen(value) {
-      ui.open = value
-      for (const fn of ui.listeners) fn()
-    }
-    function useOpen() {
-      const [, force] = React.useReducer((x) => x + 1, 0)
-      useEffect(() => {
-        ui.listeners.add(force)
-        return () => ui.listeners.delete(force)
-      }, [])
-      return ui.open
+    // ── 常量 ──────────────────────────────────────────────────
+    const LS = {
+      project: 'nd.project',
+      page: 'nd.page',
+      mode: 'nd.mode',
+      pos: 'nd.pos.',
+      tocWidth: 'nd.toc',
+      immersive: 'nd.immersive',
     }
 
-    // ── 工作台 → 对话 交接 ───────────────────────────────────
-    async function sendToChat(payload) {
-      const target = payload.newSession === true
-      const value = await api('chat.send', { ...payload, newSession: target })
-      setOpen(false)
-      if ((target || value?.newSession) && value?.sessionId) {
-        try {
-          clientCtx?.get?.('uiWorkspace')?.openSession(value.sessionId)
-        } catch {
-          // 新会话已创建并收到消息；打不开视图也不丢
-        }
-      }
-      return value
-    }
-
-    // ── 会话目标：清单发到哪个对话 ────────────────────────────
-    // DSH 的「当前会话」= 主视图 retain 的那个（宿主自己的 DocumentTitle 也这么判断）
-    function sessionSnapshot() {
-      try {
-        return clientCtx?.get?.('sessions')?.list?.getSnapshot?.() ?? null
-      } catch {
-        return null
-      }
-    }
-    function sessionTitleOf(sessionId, fromRpc = '') {
-      if (fromRpc) return fromRpc
-      const state = sessionSnapshot()
-      return (sessionId && state?.byId?.[sessionId]?.title) || ''
-    }
-    function currentMainSessionId() {
-      const state = sessionSnapshot()
-      const rows = Object.values(state?.byId ?? {}).filter((row) => (row?.retainedBy?.mainView ?? 0) > 0)
-      if (rows.length === 0) return ''
-      rows.sort((a, b) => (Date.parse(b.updatedAt ?? 0) || 0) - (Date.parse(a.updatedAt ?? 0) || 0))
-      return rows[0]?.id ?? ''
-    }
-    function relativeTime(value) {
-      const ms = Date.parse(value ?? '')
-      if (!Number.isFinite(ms)) return ''
-      const diff = Math.max(0, Date.now() - ms)
-      if (diff < 60000) return '刚刚'
-      if (diff < 3600000) return `${Math.round(diff / 60000)} 分钟前`
-      if (diff < 86400000) return `${Math.round(diff / 3600000)} 小时前`
-      return `${Math.round(diff / 86400000)} 天前`
-    }
-
-    // ── API ───────────────────────────────────────────────────
-    async function api(op, payload = {}) {
-      const res = await fetch('/novel-desk/api', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ op, ...payload }),
-      })
-      const data = await res.json().catch(() => null)
-      if (!data || data.ok !== true) throw new Error(data?.error?.message || `请求失败（${res.status}）`)
-      return data.value
-    }
-
-    // ── 基础控件 ──────────────────────────────────────────────
-    function Btn({ children, onClick, kind, small, title, disabled, type }) {
-      return h(
-        'button',
-        {
-          type: type || 'button',
-          className: `sd-btn${kind ? ' sd-btn-' + kind : ''}${small ? ' sd-btn-sm' : ''}`,
-          onClick,
-          title,
-          disabled,
-        },
-        children,
-      )
-    }
-    function IconBtn({ children, onClick, title }) {
-      return h('button', { type: 'button', className: 'sd-iconbtn', onClick, title }, children)
-    }
-    function Field({ label, hint, children }) {
-      return h('label', { className: 'sd-field' }, h('span', { className: 'sd-label' }, label), hint ? h('span', { className: 'sd-hint' }, hint) : null, children)
-    }
-    function TextInput({ value, onChange, placeholder, type, min, max }) {
-      return h('input', {
-        className: 'sd-input',
-        type: type || 'text',
-        value: value ?? '',
-        min,
-        max,
-        placeholder: placeholder || '',
-        onChange: (e) => onChange(e.target.value),
-      })
-    }
-    function TextArea({ value, onChange, rows, placeholder }) {
-      return h('textarea', {
-        className: 'sd-input sd-textarea',
-        rows: rows || 3,
-        value: value ?? '',
-        placeholder: placeholder || '',
-        onChange: (e) => onChange(e.target.value),
-      })
-    }
-    function Select({ value, onChange, options }) {
-      return h(
-        'select',
-        { className: 'sd-input', value: value ?? '', onChange: (e) => onChange(e.target.value) },
-        options.map((o) => h('option', { key: o.value, value: o.value }, o.label)),
-      )
-    }
-    function Tag({ children, tone }) {
-      return h('span', { className: `sd-tag${tone ? ' sd-tag-' + tone : ''}` }, children)
-    }
-    function Empty({ children }) {
-      return h('div', { className: 'sd-empty' }, children)
-    }
-
-    // ── 世界 / 地点常量（契约见 docs/WORLD-MODEL.md）───────────
-    const WORLD_SCALE_OPTIONS = [
-      ['city', '一座城'],
-      ['region', '一个地区'],
-      ['continent', '一整块大陆'],
-      ['realm', '多界 / 天下'],
+    const PAGES = [
+      { id: 'read', label: '正文', icon: '📖', group: '正文' },
+      { id: 'reviews', label: '审阅', icon: '🔎', group: '正文' },
+      { id: 'proposals', label: '提案', icon: '📋', group: '正文' },
+      { id: 'run', label: '全文动作', icon: '🛠️', group: '正文' },
+      { id: 'ledger', label: '账本', icon: '🗂️', group: '资料' },
+      { id: 'overview', label: '总览', icon: '📊', group: '系统' },
+      { id: 'settings', label: '设置', icon: '⚙️', group: '系统' },
     ]
-    const WORLD_KIND_OPTIONS = [
-      ['historical', '现实历史'],
-      ['fictional', '架空'],
-      ['mixed', '混合'],
+    const PAGE_LABEL = Object.fromEntries(PAGES.map((p) => [p.id, p.label]))
+
+    const MODES = [
+      { id: 'read', label: '阅读' },
+      { id: 'edit', label: '编辑' },
+      { id: 'reader', label: '审阅' },
+    ]
+
+    const ROUTES = [
+      { id: 'logic', label: '逻辑', icon: '🧩' },
+      { id: 'attention', label: '注意力', icon: '⚡' },
+      { id: 'ai-style', label: 'AI 味', icon: '🤖' },
+      { id: 'reader', label: '读者', icon: '👀' },
+    ]
+    const ROUTE_LABEL = Object.fromEntries(ROUTES.map((r) => [r.id, r.label]))
+
+    const SEVERITIES = [
+      { id: 'blocker', label: '阻断', tone: 'error' },
+      { id: 'major', label: '严重', tone: 'warn' },
+      { id: 'minor', label: '轻微', tone: 'muted' },
+      { id: 'suggestion', label: '建议', tone: 'muted' },
+    ]
+    const SEV_LABEL = Object.fromEntries(SEVERITIES.map((s) => [s.id, s.label]))
+    const SEV_TONE = Object.fromEntries(SEVERITIES.map((s) => [s.id, s.tone]))
+
+    const REVIEW_STATUS = { open: '待处理', fixed: '已修复', wontfix: '不修', archived: '已归档', proposed: '已进提案' }
+    const PROPOSAL_KIND = { 'patch-paragraph': '段落补丁', 'rewrite-chapter': '整章重写', 'ledger-fix': '账本修订', 'book-fix': '全书修改' }
+    const PROPOSAL_KINDS = Object.keys(PROPOSAL_KIND)
+    const PROPOSAL_STATUS = { pending: '待批准', accepted: '已采纳', rejected: '已驳回', revised: '已修订', 'needs-fix': '未通过闸门' }
+    // 账本修订项：与 lib/store.js 的 ledgerFixesOf 同口径，兼容 data.ledgerFixes / data.items / data.kind+items
+    const LEDGER_FIX_KINDS = ['world', 'facts', 'characters', 'events', 'locations', 'foreshadow', 'conflicts', 'highlights', 'outlines', 'presets']
+    function proposalLedgerFixes(data) {
+      const payload = data && typeof data === 'object' ? data : {}
+      const declared = LEDGER_FIX_KINDS.includes(String(payload.kind || '')) ? String(payload.kind) : ''
+      const rows = Array.isArray(payload.ledgerFixes) ? payload.ledgerFixes : Array.isArray(payload.items) ? payload.items : []
+      const patchOf = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null)
+      if (rows.length === 0) {
+        if (declared && patchOf(payload.patch)) return [{ kind: declared, patch: patchOf(payload.patch) }]
+        return []
+      }
+      const bare = Boolean(declared) && rows.every((row) => !(patchOf(row) && (patchOf(row.patch) || patchOf(row.item))))
+      return rows.map((row) => {
+        const item = patchOf(row) || {}
+        if (bare) return { kind: declared, patch: item }
+        const kind = String(item.kind || '')
+        const patch = patchOf(item.patch) || patchOf(item.item)
+        if (patch) return { ...item, kind, patch }
+        const rest = { ...item }
+        delete rest.kind
+        return { kind, patch: rest }
+      })
+    }
+    function ledgerFixSummary(fix) {
+      const text = JSON.stringify(fix.patch || {})
+      const label = fix.id || fix.patch?.id || fix.patch?.name || fix.patch?.title || fix.patch?.subject || ''
+      return `${fix.kind || '?'}${label ? ` · ${label}` : ''} → ${text.length > 240 ? `${text.slice(0, 240)}…` : text}`
+    }
+    const RUN_KIND = { continue: '从头写', expand: '扩写', rewrite: '改写', rephrase: '改写' }
+    const RUN_VARIANT = { style: '文风', logic: '逻辑与事实', structure: '结构与节奏' }
+    const RUN_STATUS = { idle: '未开始', preparing: '准备中', ready: '已就绪', running: '进行中', paused: '已暂停', done: '已完成', failed: '失败' }
+    const RUN_STATUS_TONE = { idle: 'muted', preparing: 'brand', ready: 'brand', running: 'ok', paused: 'warn', done: 'ok', failed: 'error' }
+    const DEFAULT_STAGES = {
+      continue: ['先定注意力设计', '读大纲与账本', '规划本章场景', '逐章写作', '闸门校验', '本章自检'],
+      expand: ['先定注意力设计', '定位扩写点', '生成扩写方案', '逐章扩写', '闸门校验'],
+      'rewrite:style': ['先定注意力设计', '文风校准', '逐章改写', '闸门校验'],
+      'rewrite:logic': ['先定注意力设计', '通读与事实核对', '生成改写方案', '逐章重写', '闸门校验'],
+      'rewrite:structure': ['先定注意力设计', '结构梳理', '生成结构调整方案', '逐章重构', '闸门校验'],
+      rewrite: ['先定注意力设计', '通读与事实核对', '生成改写方案', '逐章重写', '闸门校验'],
+    }
+    const runKindLabel = (run) => {
+      const kind = String(run?.kind ?? 'rewrite')
+      const dial = kind === 'rephrase' ? 'style' : String(run?.variant ?? '')
+      return `${RUN_KIND[kind] ?? kind}${dial ? `（${RUN_VARIANT[dial] ?? dial}）` : ''}`
+    }
+    const runScopeLabel = (run) => {
+      const scope = String(run?.scope ?? 'book')
+      if (scope === 'book') return '全书'
+      if (scope === 'range') return `第${run?.chapter ?? '?'}–${run?.endChapter ?? run?.chapter ?? '?'}章`
+      return run?.chapter ? `第${run.chapter}章` : '—'
+    }
+    const runStageTitles = (run) => {
+      const kind = String(run?.kind ?? 'rewrite')
+      const dial = kind === 'rephrase' ? 'style' : String(run?.variant ?? '')
+      return DEFAULT_STAGES[kind === 'rewrite' && dial ? `rewrite:${dial}` : kind] ?? DEFAULT_STAGES.rewrite
+    }
+    const ATTENTION_BEATS = [
+      { id: 'hook', label: '钩子', max: 20 },
+      { id: 'tension', label: '张力', max: 20 },
+      { id: 'payoff', label: '回报', max: 30 },
+      { id: 'cliff', label: '章末牵引', max: 30 },
     ]
     const LOCATION_TYPES = [
-      ['capital', '都城'],
-      ['city', '城市'],
-      ['town', '城镇'],
-      ['village', '村庄'],
-      ['pass', '关隘'],
-      ['temple', '寺庙'],
-      ['mountain', '山岭'],
-      ['river', '河流'],
-      ['sea', '海域'],
-      ['other', '其他'],
+      ['capital', '都城'], ['city', '城市'], ['town', '城镇'], ['village', '村庄'],
+      ['pass', '关隘'], ['temple', '寺庙'], ['mountain', '山岭'], ['river', '河流'], ['sea', '海域'], ['other', '其他'],
     ]
     const LOCATION_TYPE_LABEL = Object.fromEntries(LOCATION_TYPES)
-    const LOCATION_TYPE_CLASS = Object.fromEntries(LOCATION_TYPES.map(([value]) => [value, `sd-loc-type-${value}`]))
-    const LOCATION_MODE_OPTIONS = [['walk', '步行'], ['horse', '骑马'], ['boat', '行船']]
-    const LOCATION_MODE_LABEL = Object.fromEntries(LOCATION_MODE_OPTIONS)
-    // 清单一律是 AI 唯一入口：世界页的两个 AI 动作都只「加入清单」。
-    const WORLD_CART = {
-      build: { kind: 'task', id: 'world-build', task: 'world-build', title: 'AI 生成世界地图' },
-      infer: { kind: 'task', id: 'world-infer', task: 'world-infer', title: 'AI 反推地点清单' },
-    }
-    // 新建作品向导的世界设定选项（城市日常不是 world.kind 契约值，只用于发给 AI 的指令）。
-    const CREATE_WORLD_KINDS = [['historical', '现实历史'], ['fictional', '架空'], ['mixed', '混合'], ['urban', '城市日常']]
-    const CREATE_WORLD_SCALES = [['city', '城市'], ['region', '地区'], ['continent', '大陆']]
+    const CHAPTER_STATUS = { draft: '草稿', written: '已写', reviewed: '已审', revised: '已改', done: '定稿', final: '定稿' }
+    const CHAPTER_STATUS_TONE = { draft: 'muted', written: 'brand', reviewed: 'ok', revised: 'warn', done: 'ok' }
 
-    // ── 注意力（⚡ ATTENTION）常量 ────────────────────────────
-    // 每章一条：主类型 + 0–100 总分（冷读实测）+ 目标分 + 四拍 + 弃读点。
-    // 伏笔 / 冲突 / 高光不改数据，注意力页按章号实时聚合。
-    const ATTENTION_TYPES = [
-      ['event', '事件'],
-      ['emotion', '情感'],
-      ['language', '语言'],
-      ['mystery', '悬念'],
-      ['relationship', '关系'],
-    ]
-    const ATTENTION_TYPE_LABEL = Object.fromEntries(ATTENTION_TYPES)
-    const ATTENTION_TYPE_CLASS = Object.fromEntries(ATTENTION_TYPES.map(([value]) => [value, `sd-att-c-${value}`]))
-    const ATTENTION_VERDICT_OPTIONS = [['会', '会'], ['犹豫', '犹豫'], ['不会', '不会']]
-    const ATTENTION_VERDICT_TONE = { 会: 'success', 犹豫: 'warn', 不会: 'error' }
-    const ATTENTION_WEAKEST_OPTIONS = [['hook', '钩子'], ['tension', '张力'], ['payoff', '回报'], ['cliff', '章末牵引']]
-    const ATTENTION_WEAKEST_LABEL = Object.fromEntries(ATTENTION_WEAKEST_OPTIONS)
-    const ATTENTION_STATUS_OPTIONS = [['planned', '计划'], ['drafted', '已写'], ['verified', '已验证']]
-    const ATTENTION_STATUS_LABEL = Object.fromEntries(ATTENTION_STATUS_OPTIONS)
-    // 四拍：钩子 → 张力 → 回报 → 章末牵引（卡片展示；emotion 是补充字段）
-    const ATTENTION_BEATS = [
-      ['hook', '钩子', '开篇 3 行内抛出的问题 / 画面'],
-      ['tension', '张力', '本章承压点：主角失去 / 被逼什么'],
-      ['payoff', '回报', '本章兑现了什么：爽点 / 揭示 / 情绪释放'],
-      ['cliff', '章末牵引', '章末留下的未决问题'],
-    ]
-    // 职责拆分：设计（类型/四拍/读者问题/目标分）由注意力设计师产出，总分由独立审稿人冷读。
-    // 老作品补齐设计统一走清单任务（清单是唯一 AI 入口），不直接发对话。
-    const ATTENTION_DESIGN_CART = { kind: 'task', id: 'attention-design', task: 'attention-design', title: 'AI 补齐注意力机制（逐章设计）' }
-    // 判断「有设计」只看设计字段：type / hook / tension / payoff / cliff 至少两项非空。
-    const ATTENTION_DESIGN_FIELDS = ['type', 'hook', 'tension', 'payoff', 'cliff']
-    // 一号原则（工作台常驻条 / 总览 hero / 注意力页 / 分工页共用文案）
-    const PRINCIPLE_SLOGAN = '⚡ ATTENTION IS ALL YOU NEED'
-    const PRINCIPLE_SUB = '怎么吸引读者怎么来 · 一切为读者服务'
-    const PRINCIPLE_HINT = '先抓人，再自洽：每章必须有核心注意力；事实自洽是底线，不是目标。'
-    const PRINCIPLE_REVIEW_HINT = '评的是读者会不会读下去，不是文笔好不好；低分不是错，是下一章要补强的地方。'
-    const PRINCIPLE_AGENTS_LINE = '注意力设计师权重最高（10）：每章先出注意力设计，再谈情节。'
-
-    // ── 整本书流水线（FULLBOOK PIPELINE）常量 ─────────────────
-    const PIPELINE_STATUS_META = {
-      idle: { label: '未开始', tone: 'muted' },
-      preparing: { label: '准备中', tone: 'brand' },
-      ready: { label: '已就绪', tone: 'brand' },
-      running: { label: '生成中', tone: 'success' },
-      paused: { label: '已暂停', tone: 'warn' },
-      done: { label: '已完成', tone: 'success' },
-      aborted: { label: '已停止', tone: 'error' },
-      stuck: { label: '流程卡住', tone: 'warn' },
-    }
-    const PIPELINE_STAGE_STATUS_META = {
-      pending: { icon: '○', label: '待开始', tone: 'muted' },
-      running: { icon: '◐', label: '进行中', tone: 'brand' },
-      done: { icon: '✓', label: '完成', tone: 'success' },
-      failed: { icon: '✕', label: '失败', tone: 'error' },
-      skipped: { icon: '−', label: '跳过', tone: 'muted' },
-    }
-    const PIPELINE_POLL_MS = 10000
-    // 收尾阶段：老 pipeline 可能只给 id/kind，没有 name，前端补中文名。
-    const PIPELINE_STAGE_NAME = {
-      'final-cleanup': '收尾：补齐账本 + 清理残留',
-      cleanup: '收尾：补齐账本 + 清理残留',
-    }
-
-    // ── 扩写（EXPANSION）常量 ─────────────────────────────────
-    const EXPANSION_STATUS_META = {
-      idle: { label: '未开始', tone: 'muted' },
-      planning: { label: 'AI 出方案中', tone: 'brand' },
-      'plan-ready': { label: '方案待确认', tone: 'brand' },
-      'waiting-outline': { label: '等待确认大纲', tone: 'warn' },
-      structuring: { label: '补地基中', tone: 'brand' },
-      running: { label: '扩写中', tone: 'success' },
-      paused: { label: '已暂停', tone: 'warn' },
-      done: { label: '已完成', tone: 'success' },
-      stuck: { label: '流程卡住', tone: 'warn' },
-    }
-    const EXPANSION_MODE_OPTIONS = [['book', '全部扩写'], ['chapter', '扩写本章']]
-    const EXPANSION_ADDITION_OPTIONS = [
-      ['subplot', '旁线'],
-      ['person', '新人物'],
-      ['place', '新地点'],
-      ['foreshadow', '新伏笔'],
-      ['conflict', '新冲突'],
-    ]
-    const EXPANSION_POLL_MS = 10000
-
-    // ── 数据类型定义 ──────────────────────────────────────────
-    const KIND_META = {
+    // 账本六类实体的表格列与编辑字段（字段沿用 0.5.x，旧数据原样兼容）
+    const LEDGER_KINDS = ['facts', 'characters', 'events', 'foreshadow', 'conflicts', 'locations', 'highlights', 'outlines']
+    const LEDGER_META = {
       facts: {
-        title: '事实账本',
-        icon: '⚖️',
-        desc: '记录“谁·什么属性·什么值·从哪一章开始”，同一属性的不同取值会被自动标为冲突。',
-        columns: [
-          { k: 'subject', t: '主体' },
-          { k: 'attribute', t: '属性' },
-          { k: 'value', t: '取值' },
-          { k: 'chapter', t: '章', w: '60px' },
-          { k: 'validFrom', t: '生效区间', w: '96px', format: (v, item) => formatFactRange(item.validFrom, item.validTo) },
+        title: '事实', icon: '⚖️',
+        cols: [
+          { k: 'subject', t: '主体' }, { k: 'attribute', t: '属性' },
+          { k: 'value', t: '取值' }, { k: 'chapter', t: '章', w: '60px' },
         ],
         fields: [
           { k: 'subject', t: '主体', type: 'text', required: true, ph: '人物 / 地点 / 组织 / 物品' },
           { k: 'attribute', t: '属性', type: 'text', required: true, ph: '年龄 / 身份 / 持有物 / 所在地' },
           { k: 'value', t: '取值', type: 'text', required: true },
           { k: 'chapter', t: '首次出现章', type: 'number' },
-          { k: 'validFrom', t: '生效章（可选）', type: 'number', ph: '从第几章起有效，空 = 第 1 章' },
-          { k: 'validTo', t: '失效章（可选）', type: 'number', ph: '到第几章为止，空 = 一直有效' },
-          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
-          { k: 'tags', t: '标签', type: 'tags', ph: '逗号分隔' },
-        ],
-      },
-      events: {
-        title: '时间线',
-        icon: '🕰️',
-        desc: '按章推进的事件；故事内时间用于排序，参与人物用于一致性检查。',
-        columns: [
-          { k: 'chapter', t: '章', w: '60px' },
-          { k: 'storyTime', t: '故事时间' },
-          { k: 'title', t: '事件' },
-          { k: 'location', t: '地点' },
-        ],
-        fields: [
-          { k: 'title', t: '事件', type: 'text', required: true },
-          { k: 'chapter', t: '章号', type: 'number' },
-          { k: 'storyTime', t: '故事内时间', type: 'text', ph: '如 天宝十五载六月 / 第三日清晨' },
-          { k: 'location', t: '地点', type: 'text' },
-          { k: 'participants', t: '参与人物', type: 'tags' },
-          { k: 'volume', t: '卷（可选）', type: 'text', ph: '如 1 / 第一卷；有值时泳道按卷分道' },
-          { k: 'summary', t: '经过', type: 'textarea', rows: 3 },
-          { k: 'consequences', t: '后果', type: 'textarea', rows: 2 },
-          { k: 'importance', t: '重要度', type: 'select', options: [['normal', '一般'], ['major', '关键'], ['climax', '高潮']] },
-        ],
-      },
-      foreshadow: {
-        title: '伏笔',
-        icon: '🧩',
-        desc: '埋设章 → 回收章。超过计划回收章仍未标为“已回收”会报警。',
-        columns: [
-          { k: 'title', t: '伏笔' },
-          { k: 'setupChapter', t: '埋设', w: '60px' },
-          { k: 'payoffChapter', t: '回收', w: '60px' },
-          { k: 'status', t: '状态', w: '80px' },
-        ],
-        fields: [
-          { k: 'title', t: '伏笔', type: 'text', required: true },
-          { k: 'setupChapter', t: '埋设章', type: 'number' },
-          { k: 'payoffChapter', t: '计划回收章', type: 'number' },
-          { k: 'status', t: '状态', type: 'select', options: [['open', '未回收'], ['paid', '已回收'], ['dropped', '已放弃']] },
-          { k: 'plantedText', t: '埋设原文', type: 'textarea', rows: 2 },
-          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
-        ],
-      },
-      conflicts: {
-        title: '冲突',
-        icon: '⚔️',
-        desc: '故事里的核心矛盾：谁和谁、赌注是什么、如何升级、计划何时解决。',
-        columns: [
-          { k: 'title', t: '冲突' },
-          { k: 'type', t: '类型', w: '90px' },
-          { k: 'status', t: '状态', w: '80px' },
-          { k: 'stakes', t: '赌注' },
-        ],
-        fields: [
-          { k: 'title', t: '冲突', type: 'text', required: true },
-          { k: 'type', t: '类型', type: 'select', options: [['internal', '内心'], ['interpersonal', '人际'], ['society', '社会'], ['environment', '环境']] },
-          { k: 'parties', t: '相关方', type: 'tags' },
-          { k: 'stakes', t: '赌注', type: 'text', ph: '失败会失去什么' },
-          { k: 'escalation', t: '升级方式', type: 'textarea', rows: 2 },
-          { k: 'status', t: '状态', type: 'select', options: [['active', '进行中'], ['resolved', '已解决'], ['dormant', '潜伏']] },
-          { k: 'resolveChapter', t: '计划解决章', type: 'number' },
+          { k: 'validFrom', t: '生效章', type: 'number' },
+          { k: 'validTo', t: '失效章', type: 'number' },
           { k: 'note', t: '备注', type: 'textarea', rows: 2 },
         ],
       },
       characters: {
-        title: '人物',
-        icon: '👤',
-        desc: '人物卡：目标、动机、缺陷、弧光、关系。人物列表与卡片按重要性排序（主角 > 反派 > 配角 > 龙套，再按出场章数 / 冲突数）；章节里引用但未建卡的人物会被提示。',
-        columns: [
-          { k: 'name', t: '姓名' },
-          { k: 'role', t: '定位', w: '100px' },
-          { k: 'goal', t: '目标' },
-          { k: 'flaw', t: '缺陷' },
-        ],
+        title: '人物', icon: '👤',
+        cols: [{ k: 'name', t: '姓名' }, { k: 'role', t: '定位', w: '90px' }, { k: 'goal', t: '目标' }, { k: 'flaw', t: '缺陷' }],
         fields: [
           { k: 'name', t: '姓名', type: 'text', required: true },
           { k: 'role', t: '定位', type: 'select', options: [['protagonist', '主角'], ['antagonist', '反派'], ['supporting', '配角'], ['minor', '龙套']] },
@@ -368,4547 +165,153 @@ window.__ModuleLoader__.load({
           { k: 'motivation', t: '动机', type: 'textarea', rows: 2 },
           { k: 'flaw', t: '缺陷', type: 'text' },
           { k: 'arc', t: '人物弧光', type: 'textarea', rows: 3 },
-          { k: 'relationships', t: '关系', type: 'tags', ph: '如 华羽生(师徒)、柳含烟(恋人)' },
-          { k: 'tags', t: '标签', type: 'tags' },
+          { k: 'relationships', t: '关系', type: 'tags', ph: '用「、」分隔' },
+        ],
+      },
+      events: {
+        title: '事件', icon: '🕰️',
+        cols: [{ k: 'chapter', t: '章', w: '60px' }, { k: 'storyTime', t: '故事时间' }, { k: 'title', t: '事件' }, { k: 'location', t: '地点' }],
+        fields: [
+          { k: 'title', t: '事件', type: 'text', required: true },
+          { k: 'chapter', t: '章号', type: 'number' },
+          { k: 'storyTime', t: '故事内时间', type: 'text', ph: '如 天宝十五载六月 / 第三日清晨' },
+          { k: 'location', t: '地点', type: 'text' },
+          { k: 'participants', t: '参与人物', type: 'tags', ph: '用「、」分隔' },
+          { k: 'summary', t: '经过', type: 'textarea', rows: 3 },
+          { k: 'consequences', t: '后果', type: 'textarea', rows: 2 },
+          { k: 'importance', t: '重要度', type: 'select', options: [['normal', '一般'], ['major', '关键'], ['climax', '高潮']] },
+        ],
+      },
+      foreshadow: {
+        title: '伏笔', icon: '🧩',
+        cols: [{ k: 'title', t: '伏笔' }, { k: 'setupChapter', t: '埋设', w: '70px' }, { k: 'payoffChapter', t: '回收', w: '70px' }, { k: 'status', t: '状态', w: '90px' }],
+        fields: [
+          { k: 'title', t: '伏笔', type: 'text', required: true },
+          { k: 'setupChapter', t: '埋设章', type: 'number' },
+          { k: 'payoffChapter', t: '计划回收章', type: 'number' },
+          { k: 'status', t: '状态', type: 'select', options: [['open', '未回收'], ['paid', '已回收'], ['dropped', '已放弃']] },
+          { k: 'plantedText', t: '埋设原文', type: 'textarea', rows: 2 },
+          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
+        ],
+      },
+      conflicts: {
+        title: '冲突', icon: '⚔️',
+        cols: [{ k: 'title', t: '冲突' }, { k: 'type', t: '类型', w: '90px' }, { k: 'status', t: '状态', w: '90px' }, { k: 'stakes', t: '赌注' }],
+        fields: [
+          { k: 'title', t: '冲突', type: 'text', required: true },
+          { k: 'type', t: '类型', type: 'select', options: [['internal', '内心'], ['interpersonal', '人际'], ['society', '社会'], ['environment', '环境']] },
+          { k: 'parties', t: '相关方', type: 'tags', ph: '用「、」分隔' },
+          { k: 'stakes', t: '赌注', type: 'text', ph: '失败会失去什么' },
+          { k: 'escalation', t: '升级方式', type: 'textarea', rows: 2 },
+          { k: 'status', t: '状态', type: 'select', options: [['active', '进行中'], ['resolved', '已解决'], ['dormant', '潜伏']] },
+          { k: 'resolveChapter', t: '计划解决章', type: 'number' },
+          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
         ],
       },
       locations: {
-        title: '地点',
-        icon: '🏙️',
-        desc: '世界里的地点：名称 / 别名 / 类型 / 坐标 / 区域 / 首现章 / 连接道路。世界页使用专用地图编辑器（拖拽坐标与连接编辑），这里供其他入口复用简版列表与表单。',
-        columns: [
+        title: '地点', icon: '🏙️',
+        cols: [
           { k: 'name', t: '地点' },
-          { k: 'type', t: '类型', w: '90px', format: (v) => LOCATION_TYPE_LABEL[v] ?? v ?? '其他' },
-          { k: 'coords', t: '坐标', w: '96px', format: (v) => (v && Number.isFinite(Number(v.x)) && Number.isFinite(Number(v.y)) ? `${Number(v.x)}, ${Number(v.y)}` : '—') },
+          { k: 'type', t: '类型', w: '90px', options: LOCATION_TYPES },
           { k: 'region', t: '区域' },
+          { k: 'coords', t: '坐标', w: '100px', format: (v) => (v && Number.isFinite(Number(v.x)) && Number.isFinite(Number(v.y)) ? `${Math.round(Number(v.x))}, ${Math.round(Number(v.y))}` : '—') },
           { k: 'firstChapter', t: '首现章', w: '70px' },
         ],
         fields: [
           { k: 'name', t: '名称', type: 'text', required: true },
-          { k: 'aliases', t: '别名', type: 'tags', ph: '如 京兆府、西京' },
+          { k: 'aliases', t: '别名', type: 'tags', ph: '用「、」分隔' },
           { k: 'type', t: '类型', type: 'select', options: LOCATION_TYPES },
           { k: 'region', t: '区域', type: 'text', ph: '如 关内道 / 北境' },
+          { k: 'coords.x', t: '地图 X（0–1000）', type: 'number' },
+          { k: 'coords.y', t: '地图 Y（0–1000）', type: 'number' },
           { k: 'firstChapter', t: '首现章', type: 'number' },
           { k: 'note', t: '备注', type: 'textarea', rows: 2 },
         ],
       },
       highlights: {
-        title: '高光',
-        icon: '✨',
-        desc: '收集值得保留的段落：好对白、名场面、反转、情绪爆点。',
-        columns: [
-          { k: 'chapter', t: '章', w: '60px' },
-          { k: 'type', t: '类型', w: '90px' },
-          { k: 'text', t: '原文' },
+        title: '高光', icon: '✨',
+        cols: [
+          { k: 'chapter', t: '章', w: '60px' }, { k: 'type', t: '类型', w: '90px' },
+          { k: 'title', t: '高光' }, { k: 'text', t: '原文' },
         ],
         fields: [
+          { k: 'title', t: '标题', type: 'text', required: true },
           { k: 'chapter', t: '章号', type: 'number' },
-          { k: 'type', t: '类型', type: 'select', options: [['dialogue', '对白'], ['description', '描写'], ['twist', '反转'], ['emotion', '情绪'], ['action', '动作']] },
-          { k: 'text', t: '原文', type: 'textarea', rows: 4, required: true },
-          { k: 'note', t: '为什么好', type: 'textarea', rows: 2 },
-        ],
-      },
-      attention: {
-        title: '注意力',
-        icon: '⚡',
-        desc: '每章一条注意力记录：设计（主类型、四拍、读者问题、目标分）由注意力设计师产出（写大纲 / 下一章方案时自动带，老作品用清单补齐）；0–100 总分与详细说明由独立审稿人冷读。伏笔 / 冲突 / 高光按章号自动聚合。',
-        columns: [
-          { k: 'chapter', t: '章', w: '56px' },
-          { k: 'type', t: '类型', w: '76px', format: (v) => ATTENTION_TYPE_LABEL[v] ?? v ?? '—' },
-          { k: 'score', t: '总分', w: '60px', format: (v) => (v === '' || v === null || v === undefined ? '—' : String(v)) },
-          { k: 'designScore', t: '目标分', w: '64px', format: (v) => (v === '' || v === null || v === undefined ? '—' : String(v)) },
-          { k: 'verdict', t: '下一章意愿', w: '84px' },
-        ],
-        fields: [
-          { k: 'chapter', t: '章号', type: 'number', required: true },
-          { k: 'type', t: '类型', type: 'select', options: ATTENTION_TYPES },
-          { k: 'score', t: '总分（0–100）', type: 'number', ph: '冷读实测；没读过就留空' },
-          { k: 'designScore', t: '目标分（0–100）', type: 'number', ph: '设计时定下的目标分' },
-          { k: 'verdict', t: '下一章意愿', type: 'select', options: ATTENTION_VERDICT_OPTIONS },
-          { k: 'weakest', t: '最弱一环', type: 'select', options: ATTENTION_WEAKEST_OPTIONS },
-          { k: 'hook', t: '钩子', type: 'textarea', rows: 2, ph: '开篇 3 行内抛出的问题 / 画面' },
-          { k: 'tension', t: '张力', type: 'textarea', rows: 2, ph: '本章承压点：主角失去 / 被逼什么' },
-          { k: 'payoff', t: '回报', type: 'textarea', rows: 2, ph: '本章兑现了什么：爽点 / 揭示 / 情绪释放' },
-          { k: 'cliff', t: '章末牵引', type: 'textarea', rows: 2, ph: '章末留下的未决问题' },
-          { k: 'emotion', t: '情绪（补充）', type: 'textarea', rows: 2, ph: '本章主情绪 / 情绪走向' },
-          { k: 'question', t: '读者最想知道', type: 'text', ph: '读到这里，读者最想知道的一句话' },
-          { k: 'dropRisk', t: '弃读点（位置 + 原因）', type: 'textarea', rows: 2, ph: '如：第 9 段回忆插叙约 600 字，与当下无关' },
-          { k: 'detail', t: '详细说明', type: 'textarea', rows: 6, ph: '四拍逐条给依据、引用原文；最弱一环；弃读点；下一章意愿' },
-          { k: 'status', t: '状态', type: 'select', options: ATTENTION_STATUS_OPTIONS },
-          { k: 'note', t: '备注', type: 'textarea', rows: 2 },
-        ],
-      },
-      reviews: {
-        title: '审稿',
-        icon: '📝',
-        desc: '人工或 AI 的审稿意见：维度、严重度、问题、建议、状态。可以只处理 blocker/major。',
-        columns: [
-          { k: 'chapter', t: '章', w: '56px' },
-          { k: 'dimension', t: '维度', w: '90px' },
-          { k: 'severity', t: '严重度', w: '80px', format: (v) => ({ blocker: '阻断', major: '严重', minor: '一般', suggestion: '建议' }[v] ?? v ?? '—') },
-          { k: 'issue', t: '问题' },
-          { k: 'status', t: '状态', w: '80px', format: (v) => ({ open: '待处理', fixed: '已修', wontfix: '忽略' }[v] ?? v ?? '待处理') },
-        ],
-        fields: [
-          { k: 'chapter', t: '章号', type: 'number' },
-          { k: 'dimension', t: '维度', type: 'select', options: [['情节', '情节'], ['人物', '人物'], ['文笔', '文笔'], ['连续性', '连续性'], ['节奏', '节奏'], ['对话', '对话'], ['世界观', '世界观'], ['主题', '主题'], ['首读', '首读']] },
-          { k: 'severity', t: '严重度', type: 'select', options: [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']] },
-          { k: 'issue', t: '问题（引用原文）', type: 'textarea', rows: 3, required: true },
-          { k: 'suggestion', t: '修改建议', type: 'textarea', rows: 3 },
-          { k: 'status', t: '状态', type: 'select', options: [['open', '待处理'], ['fixed', '已修'], ['wontfix', '忽略']] },
-          { k: 'source', t: '来源', type: 'text', ph: 'manual / ai' },
-        ],
-      },
-      agents: {
-        title: 'Agent 分工',
-        icon: '🤖',
-        desc: '11 个角色的职责与输入输出。总编派单，各角色按契约产出，审稿与写作上下文都会带上这份分工（含零上下文独立审稿人、权重最高的注意力设计师）。注意力设计师权重最高（10）：每章先出注意力设计，再谈情节。',
-        columns: [
-          { k: 'order', t: '#', w: '40px' },
-          { k: 'weight', t: '权重', w: '56px', render: (item) => agentWeightCell(item.weight) },
-          { k: 'name', t: '角色', w: '120px' },
-          { k: 'duty', t: '职责' },
-          { k: 'outputs', t: '产出' },
-        ],
-        fields: [
-          { k: 'order', t: '顺序', type: 'number' },
-          { k: 'name', t: '角色名', type: 'text', required: true },
-          { k: 'duty', t: '职责', type: 'textarea', rows: 2 },
-          { k: 'inputs', t: '输入', type: 'text' },
-          { k: 'outputs', t: '产出', type: 'text' },
+          { k: 'type', t: '类型', type: 'select', options: [['description', '描写'], ['dialogue', '对白'], ['action', '动作'], ['emotion', '情绪'], ['idea', '立意']] },
+          { k: 'text', t: '原文', type: 'textarea', rows: 3 },
+          { k: 'quote', t: '逐字引文', type: 'textarea', rows: 2 },
+          { k: 'why', t: '为什么好', type: 'textarea', rows: 2 },
         ],
       },
       outlines: {
-        title: '章节大纲',
-        icon: '🗂️',
-        desc: '这本书的章节骨架：每章标题、摘要、节拍、状态。AI 写下一章方案时会优先读这里。',
-        columns: [
-          { k: 'chapter', t: '章', w: '56px' },
-          { k: 'title', t: '标题' },
-          { k: 'summary', t: '摘要' },
-          { k: 'status', t: '状态', w: '80px', format: (v) => ({ planned: '计划', drafted: '已写', done: '完成' }[v] ?? v ?? '计划') },
+        title: '大纲', icon: '🧭',
+        cols: [
+          { k: 'chapter', t: '章', w: '60px' }, { k: 'title', t: '标题' },
+          { k: 'summary', t: '梗概' }, { k: 'status', t: '状态', w: '90px' },
         ],
         fields: [
           { k: 'chapter', t: '章号', type: 'number' },
           { k: 'title', t: '标题', type: 'text', required: true },
-          { k: 'summary', t: '摘要', type: 'textarea', rows: 3 },
-          { k: 'beats', t: '节拍', type: 'lines', ph: '每行一个节拍' },
-          { k: 'status', t: '状态', type: 'select', options: [['planned', '计划'], ['drafted', '已写'], ['done', '完成']] },
-        ],
-      },
-      presets: {
-        title: '写作预设',
-        icon: '🎛️',
-        desc: '写作方案：类型、视角、时态、基调、计划章数、每章字数、总字数、结构、风格规则、禁忌、审稿重点。Agent 写作与审稿都会读取。',
-        columns: [
-          { k: 'name', t: '预设' },
-          { k: 'genre', t: '类型' },
-          { k: 'pov', t: '视角' },
-          { k: 'tone', t: '基调' },
-          { k: 'plannedChapters', t: '计划章数', w: '80px' },
-        ],
-        fields: [
-          { k: 'name', t: '预设名称', type: 'text', required: true },
-          { k: 'genre', t: '类型', type: 'text', ph: '武侠 / 科幻 / 悬疑 / 言情…' },
-          { k: 'pov', t: '视角', type: 'text', ph: '第一人称 / 第三人称限知 / 全知' },
-          { k: 'tense', t: '时态', type: 'text', ph: '过去时 / 现在时' },
-          { k: 'tone', t: '基调', type: 'text', ph: '冷峻 / 幽默 / 典雅…' },
-          { k: 'plannedChapters', t: '计划章数', type: 'number', ph: '如 80' },
-          { k: 'chapterWords', t: '每章字数', type: 'number', ph: '如 3000' },
-          { k: 'totalWords', t: '总字数', type: 'number', ph: '如 240000' },
-          { k: 'structure', t: '结构模板', type: 'textarea', rows: 3, ph: '三幕 + 起承转合：第一幕 20%…' },
-          { k: 'reviewFocus', t: '审稿重点', type: 'lines', ph: '每行一条：情节因果 / 人物动机 / 连续性…' },
-          { k: 'styleRules', t: '风格规则', type: 'lines', ph: '每行一条，如：禁止心理独白' },
-          { k: 'taboo', t: '禁忌', type: 'lines', ph: '每行一条' },
-          { k: 'exampleText', t: '示例文本', type: 'textarea', rows: 4 },
+          { k: 'summary', t: '梗概', type: 'textarea', rows: 4 },
+          { k: 'status', t: '状态', type: 'select', options: [['planned', '计划'], ['draft', '草稿'], ['done', '完成'], ['cut', '已砍']] },
+          { k: 'source', t: '来源', type: 'text', ph: 'import / ai / author' },
         ],
       },
     }
 
-    // 侧边栏分组：页签一个都不删，只重排 + 加组标题（组标题不可点）。
-    // 顺序：总览（独立）→ 注意力 → 正文 → 验收 → 工具。
-    const NAV_GROUPS = [
-      {
-        id: 'home',
-        label: '',
-        tabs: [{ id: 'overview', label: '总览', icon: '📊' }],
-      },
-      {
-        id: 'attention',
-        label: '注意力',
-        tabs: [
-          { id: 'attention', label: '注意力', icon: '⚡' },
-          { id: 'foreshadow', label: '伏笔', icon: '🧩' },
-          { id: 'conflicts', label: '冲突', icon: '⚔️' },
-          { id: 'highlights', label: '高光', icon: '✨' },
-        ],
-      },
-      {
-        id: 'body',
-        label: '正文',
-        tabs: [
-          { id: 'chapters', label: '章节', icon: '📄' },
-          { id: 'map', label: '地图', icon: '🗺️' },
-          { id: 'world', label: '世界', icon: '🌍' },
-          { id: 'characters', label: '人物', icon: '👤' },
-          { id: 'timeline', label: '时间线', icon: '🕰️' },
-          { id: 'facts', label: '事实账本', icon: '⚖️' },
-        ],
-      },
-      {
-        id: 'acceptance',
-        label: '验收',
-        tabs: [
-          { id: 'reviews', label: '审稿', icon: '📝' },
-          { id: 'proposals', label: '提案', icon: '📥' },
-          { id: 'alignment', label: '对齐', icon: '🎯' },
-        ],
-      },
-      {
-        id: 'tools',
-        label: '工具',
-        tabs: [
-          { id: 'dashboard', label: '仪表盘', icon: '📈' },
-          { id: 'pipeline', label: '整本书', icon: '📚' },
-          { id: 'agents', label: '分工', icon: '🤖' },
-          { id: 'presets', label: '预设', icon: '🎛️' },
-          { id: 'settings', label: '设置', icon: '⚙️' },
-        ],
-      },
-    ]
-
-    // 扁平页签表：保留原有 `TABS` 形状，供需要全量页签的地方使用。
-    const TABS = NAV_GROUPS.flatMap((group) => group.tabs)
-
-    /** 侧栏导航：按 NAV_GROUPS 渲染，组标题 `.sd-nav-group` 是分隔行（不可点）。 */
-    function Nav({ tab, onPick }) {
-      return h('nav', { className: 'sd-nav' }, NAV_GROUPS.map((group, groupIndex) => h(
-        React.Fragment,
-        { key: group.id || `group-${groupIndex}` },
-        group.label ? h('div', { className: 'sd-nav-group' }, group.label) : null,
-        group.tabs.map((t) => h('button', {
-          key: t.id,
-          type: 'button',
-          className: `sd-nav-item${tab === t.id ? ' sd-nav-active' : ''}`,
-          onClick: () => onPick(t.id),
-        }, h('span', { className: 'sd-nav-icon' }, t.icon), h('span', null, t.label))),
-      )))
-    }
-
-    const STATUS_LABEL = { draft: '草稿', revised: '修订', final: '定稿' }
-    const ROLE_LABEL = { protagonist: '主角', antagonist: '反派', supporting: '配角', minor: '龙套' }
-    const FOCUS_LABEL = { open: '未回收', paid: '已回收', dropped: '已放弃' }
-    const CONFLICT_STATUS = { active: '进行中', resolved: '已解决', dormant: '潜伏' }
-    const EVENT_IMPORTANCE = { normal: '一般', major: '关键', climax: '高潮' }
-
-    function displayValue(key, value) {
-      if (value === undefined || value === null || value === '') return '—'
-      if (Array.isArray(value)) return value.join('、')
-      const maps = { status: { ...STATUS_LABEL, ...FOCUS_LABEL, ...CONFLICT_STATUS }, role: ROLE_LABEL, importance: EVENT_IMPORTANCE, type: { internal: '内心', interpersonal: '人际', society: '社会', environment: '环境', dialogue: '对白', description: '描写', twist: '反转', emotion: '情绪', action: '动作' } }
-      return maps[key]?.[value] ?? String(value)
-    }
-
-    // ── 注意力：取数与统计（纯前端算，不改数据）─────────────────
-    function attentionRows(bundle) {
-      return (bundle?.attention ?? [])
-        .filter((row) => row && Number.isFinite(Number(row.chapter)))
-        .slice()
-        .sort((a, b) => Number(a.chapter) - Number(b.chapter))
-    }
-    function attentionHasScore(row) {
-      return !!row && row.score !== '' && row.score !== null && row.score !== undefined && Number.isFinite(Number(row.score))
-    }
-    function attentionHasDesign(row) {
-      return !!row && row.designScore !== '' && row.designScore !== null && row.designScore !== undefined && Number.isFinite(Number(row.designScore))
-    }
-    /** 设计字段是否已填：type/hook/tension/payoff/cliff 至少两项非空。 */
-    function attentionHasDesignContent(row) {
-      if (!row) return false
-      return ATTENTION_DESIGN_FIELDS.filter((key) => String(row[key] ?? '').trim() !== '').length >= 2
-    }
-    /**
-     * 设计 / 实测闭环状态（任务 6 规则）：
-     * - 设计 + 实测 → 已闭环（绿）
-     * - 只有设计 → 待冷读（蓝）
-     * - 只有实测 → 缺设计（黄）
-     * - 都没有 → 空白（灰）
-     */
-    function attentionStatusOf(row) {
-      const hasDesign = attentionHasDesignContent(row)
-      const hasScore = attentionHasScore(row)
-      if (hasDesign && hasScore) return { key: 'closed', label: '已闭环' }
-      if (hasDesign) return { key: 'waiting', label: '待冷读' }
-      if (hasScore) return { key: 'nodesign', label: '缺设计' }
-      return { key: 'blank', label: '空白' }
-    }
-    function attentionAverage(rows) {
-      const values = rows.filter(attentionHasScore).map((row) => Number(row.score))
-      if (values.length === 0) return null
-      return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length)
-    }
-    function attentionLowest(rows, count = 3) {
-      return rows
-        .filter(attentionHasScore)
-        .slice()
-        .sort((a, b) => Number(a.score) - Number(b.score) || Number(a.chapter) - Number(b.chapter))
-        .slice(0, count)
-    }
-    /** 有正文（content 非空）但还没有 attention 记录的章节，按章号升序。 */
-    function attentionUnmarkedChapters(bundle) {
-      const marked = new Set(attentionRows(bundle).map((row) => Number(row.chapter)))
-      return [...(bundle?.chapters ?? [])]
-        .filter((chapter) => String(chapter.content ?? '').trim().length > 0 && !marked.has(Number(chapter.id)))
-        .sort((a, b) => Number(a.id) - Number(b.id))
-    }
-    /**
-     * 疲劳 / 骤降预警（不花 token 的纯前端规则）：
-     * - 同一主类型连续 > 3 章（章号必须连续）
-     * - 相邻章总分下降 ≥ 15
-     */
-    function attentionWarnings(rows) {
-      const list = []
-      let runType = ''
-      let runLength = 0
-      let runStart = null
-      let prevChapter = null
-      for (const row of rows) {
-        const chapter = Number(row.chapter)
-        const type = row.type || ''
-        const sameRun = !!type && type === runType && prevChapter !== null && chapter === prevChapter + 1
-        if (sameRun) runLength += 1
-        else {
-          runType = type
-          runLength = type ? 1 : 0
-          runStart = chapter
-        }
-        prevChapter = chapter
-        if (runLength === 4) {
-          list.push({ kind: 'fatigue', text: `第 ${runStart}–${chapter} 章连续 ${runLength} 章都是「${ATTENTION_TYPE_LABEL[runType] ?? runType}」型，换一换主类型` })
-        }
-      }
-      for (let index = 1; index < rows.length; index += 1) {
-        const prev = rows[index - 1]
-        const curr = rows[index]
-        if (Number(curr.chapter) !== Number(prev.chapter) + 1) continue
-        if (!attentionHasScore(prev) || !attentionHasScore(curr)) continue
-        const drop = Number(prev.score) - Number(curr.score)
-        if (drop >= 15) list.push({ kind: 'drop', text: `第 ${prev.chapter} → ${curr.chapter} 章骤降 ${drop} 分（${prev.score} → ${curr.score}）` })
-      }
-      return list
-    }
-    function attentionStats(bundle) {
-      const rows = attentionRows(bundle)
-      return {
-        rows,
-        scored: rows.filter(attentionHasScore),
-        average: attentionAverage(rows),
-        lowest: attentionLowest(rows, 3),
-        unmarked: attentionUnmarkedChapters(bundle),
-        warnings: attentionWarnings(rows),
-      }
-    }
-    /** 按章号聚合子项：伏笔（埋 / 收）、冲突（本章引爆）、高光（本章）。 */
-    function attentionSubItems(bundle, chapter) {
-      const target = Number(chapter)
-      const isChapter = (value) => value !== undefined && value !== null && value !== '' && Number(value) === target
-      const foreshadow = bundle?.foreshadow ?? []
-      return {
-        plants: foreshadow.filter((row) => isChapter(row.setupChapter)),
-        payoffs: foreshadow.filter((row) => isChapter(row.payoffChapter)),
-        conflicts: (bundle?.conflicts ?? []).filter((row) => isChapter(row.resolveChapter)),
-        highlights: (bundle?.highlights ?? []).filter((row) => isChapter(row.chapter)),
-      }
-    }
-    /** 分数分档配色：0–39 读不下去 / 40–59 平淡 / 60–79 合格 / 80–100 强吸引。 */
-    function attentionScoreTone(score) {
-      if (score === null || score === undefined || !Number.isFinite(Number(score))) return ''
-      const value = Number(score)
-      if (value < 40) return ' sd-att-tone-low'
-      if (value < 60) return ' sd-att-tone-mid'
-      if (value < 80) return ' sd-att-tone-ok'
-      return ' sd-att-tone-top'
-    }
-    /** 分工页「权重」单元格：weight=10 用品牌色小徽章标出。 */
-    function agentWeightCell(weight) {
-      const empty = weight === undefined || weight === null || weight === ''
-      const value = empty ? null : Number(weight)
-      if (value === 10) return h('span', { className: 'sd-weight sd-weight-hi', title: '最高权重角色（注意力设计师）· 第一优先级' }, '10')
-      return h('span', { className: 'sd-weight', title: '权重越高，派单与汇总越靠前' }, empty || !Number.isFinite(value) ? '—' : String(value))
-    }
-
-    // ── 编辑器 ────────────────────────────────────────────────
-    function EntityEditor({ kind, item, projectId, onClose, onSaved }) {
-      const meta = KIND_META[kind]
-      const [form, setForm] = useState(() => ({ ...item }))
-      const [busy, setBusy] = useState(false)
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-
-      const save = async () => {
-        const missing = meta.fields.filter((f) => f.required && !String(form[f.k] ?? '').trim())
-        if (missing.length > 0) {
-          window.alert(`请填写：${missing.map((f) => f.t).join('、')}`)
-          return
-        }
-        setBusy(true)
-        try {
-          await api('entity.upsert', { projectId, kind, item: cleanEntityPayload(kind, form) })
-          onSaved()
-          onClose()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-
-      return h(
-        'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h(
-          'div',
-          { className: 'sd-modal' },
-          h('div', { className: 'sd-modal-head' }, h('strong', null, `${item.id ? '编辑' : '新增'} · ${meta.title}`), h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h(
-            'div',
-            { className: 'sd-modal-body' },
-            h('div', { className: 'sd-form' }, meta.fields.map((f) => h(Field, { key: f.k, label: f.t + (f.required ? ' *' : '') }, renderInput(f, form, set)))),
-          ),
-          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: onClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存')),
-        ),
-      )
-    }
-
-    function renderInput(field, form, set) {
-      const value = form[field.k]
-      if (field.type === 'textarea') return h(TextArea, { value, rows: field.rows || 3, placeholder: field.ph, onChange: (v) => set(field.k, v) })
-      if (field.type === 'select') {
-        const options = field.options.map(([v, label]) => ({ value: v, label }))
-        return h(Select, { value: value || field.options[0][0], options, onChange: (v) => set(field.k, v) })
-      }
-      if (field.type === 'tags') {
-        const text = Array.isArray(value) ? value.join('、') : value ?? ''
-        return h(TextInput, { value: text, placeholder: field.ph, onChange: (v) => set(field.k, v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean)) })
-      }
-      if (field.type === 'lines') {
-        const text = Array.isArray(value) ? value.join('\n') : value ?? ''
-        return h(TextArea, { value: text, rows: 3, placeholder: field.ph, onChange: (v) => set(field.k, v.split('\n').map((s) => s.trim()).filter(Boolean)) })
-      }
-      if (field.type === 'number') return h(TextInput, { value, type: 'number', placeholder: field.ph, onChange: (v) => set(field.k, v === '' ? '' : Number(v)) })
-      return h(TextInput, { value, placeholder: field.ph, onChange: (v) => set(field.k, v) })
-    }
-
-    // ── 零上下文首读（第 10 个角色：独立审稿人）───────────────
-    function sortedChapterRows(bundle) {
-      return [...(bundle?.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
-    }
-
-    /**
-     * 独立审稿人高亮卡：不依赖 agents 记录是否存在，任何情况下都显示。
-     * compact = true 时是总览页的紧凑入口（单章固定最后一章，另给「全书」按钮）。
-     * 发送后由 sendToChat 负责关面板/开新会话；这里只拼 payload，不拼 prompt。
-     */
-    function FreshReadCard({ bundle, projectId, compact = false }) {
-      const chapters = sortedChapterRows(bundle)
-      const last = chapters.length > 0 ? chapters[chapters.length - 1] : null
-      const lastId = last ? String(last.id) : ''
-      const [picked, setPicked] = useState(lastId)
-      const [scope, setScope] = useState('chapter')
-      const [busy, setBusy] = useState(false)
-      useEffect(() => setPicked(lastId), [lastId])
-      const totalChars = chapters.reduce((n, c) => n + String(c.content ?? '').length, 0)
-      const isBook = scope === 'book'
-      const target = compact ? lastId : picked
-      const label = (chapter) => `第 ${Number(chapter.id)} 章 · ${chapter.title || '未命名'}`
-      const rangeText = chapters.length === 0
-        ? '这本书还没有章节'
-        : `全书 ${chapters.length} 章 · ${(totalChars / 10000).toFixed(1)} 万字`
-      const bookHint = totalChars > 100000 ? '，会拆成多批由子 Agent 分别读，耗时与费用更高' : ''
-      const send = async (nextScope) => {
-        const useBook = nextScope === 'book'
-        if (!useBook && !target) return
-        if (useBook && chapters.length === 0) return
-        setBusy(true)
-        try {
-          await sendToChat({
-            projectId,
-            task: 'fresh-read',
-            scope: useBook ? 'book' : 'chapter',
-            ...(useBook ? {} : { chapter: Number(target) }),
-            newSession: true,
-          })
-        } catch (error) {
-          window.alert(`带正文进新会话失败：${error.message}`)
-        } finally {
-          setBusy(false)
-        }
-      }
-      const options = chapters.map((c) => ({ value: String(c.id), label: label(c) }))
-      if (compact) {
-        return h('div', { className: 'sd-fresh sd-fresh-compact sd-mt' },
-          h('span', { className: 'sd-fresh-badge' }, '零上下文'),
-          h('div', { className: 'sd-fresh-compact-text' },
-            h('strong', null, '零上下文首读'),
-            h('span', { className: 'sd-hint' }, last ? '不读账本/大纲/人物卡，只拿正文，模拟第一次读到它的读者。' : '这本书还没有章节，写完第 1 章就能发首读。')),
-          h(Btn, {
-            small: true,
-            disabled: !last || busy,
-            onClick: () => send('chapter'),
-            title: last ? `${label(last)}` : '还没有章节',
-          }, busy ? '发送中…' : '首读最后一章'),
-          h(Btn, {
-            kind: 'primary',
-            small: true,
-            disabled: chapters.length === 0 || busy,
-            onClick: () => send('book'),
-            title: rangeText,
-          }, busy ? '发送中…' : '首读全书'))
-      }
-      return h('div', { className: 'sd-fresh' },
-        h('div', { className: 'sd-fresh-head' },
-          h('span', { className: 'sd-fresh-badge' }, '零上下文'),
-          h('strong', { className: 'sd-fresh-title' }, '独立审稿人 · 零上下文首读'),
-          h('span', { className: 'sd-fresh-rank' }, '分工表第 10 位')),
-        h('p', { className: 'sd-fresh-desc' }, '不读账本 / 预设 / 大纲 / 人物卡，只拿正文，模拟第一次读到的读者，给综合意见；可分岔路 / 弃读点。单章看这一章抓不抓人，全书看整体能不能读下去。'),
-        h('div', { className: 'sd-fresh-actions' },
-          h(ViewToggle, {
-            value: scope,
-            onChange: setScope,
-            options: [{ value: 'chapter', label: '读一章' }, { value: 'book', label: '读全书' }],
-          }),
-          isBook
-            ? h('span', { className: 'sd-fresh-pick-label' }, rangeText + bookHint)
-            : h('label', { className: 'sd-fresh-pick' },
-                h('span', { className: 'sd-fresh-pick-label' }, '选一章'),
-                h('select', {
-                  className: 'sd-input sd-fresh-select',
-                  value: picked,
-                  disabled: chapters.length === 0,
-                  title: chapters.length === 0 ? '还没有章节' : '选择要首读的章节',
-                  onChange: (e) => setPicked(e.target.value),
-                }, options.map((o) => h('option', { key: o.value, value: o.value }, o.label)))),
-          h(Btn, { kind: 'primary', disabled: chapters.length === 0 || busy, onClick: () => send(scope) },
-            busy ? '发送中…' : isBook ? '带全书进新会话 ▸' : '带这章进新会话 ▸'),
-          chapters.length === 0 ? h('span', { className: 'sd-hint' }, '这本书还没有章节，先写完第 1 章再发首读。') : null),
-      )
-    }
-
-    // ── 通用数据页 ─────────────────────────────────────────────
-    function EntityTab({ kind, bundle, projectId, onChanged, onAddCart }) {
-      const meta = KIND_META[kind]
-      const [editing, setEditing] = useState(null)
-      const [mode, setMode] = useState('list')
-      const [detailId, setDetailId] = useState(null)
-      const items = bundle[kind] ?? []
-      const isCharacters = kind === 'characters'
-      const listItems = isCharacters ? sortCharactersByImportance(items, bundle) : items
-      const detail = isCharacters && detailId !== null ? items.find((item) => String(item.id) === String(detailId)) : null
-      const grid = meta.columns.map((c) => c.w || '1fr').join(' ') + (isCharacters ? ' 136px' : ' 96px')
-
-      const remove = async (item) => {
-        if (!window.confirm(`删除这条${meta.title}？\n${item.title || item.name || item.id}`)) return
-        try {
-          await api('entity.delete', { projectId, kind, entityId: item.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h(
-          'div',
-          { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc)),
-          h(
-            'div',
-            { className: 'sd-pagehead-actions' },
-            isCharacters
-              ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'card', label: '卡片' }, { value: 'graph', label: '关系图' }] })
-              : kind === 'facts'
-                ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'subject', label: '按主体' }] })
-                : kind === 'conflicts'
-                  ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'party', label: '按参与方' }] })
-                  : kind === 'foreshadow'
-                    ? h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '平表' }, { value: 'arc', label: '按回收段' }] })
-                    : null,
-            onAddCart && ['characters', 'foreshadow', 'highlights', 'facts', 'events', 'conflicts', 'outlines'].includes(kind)
-              ? h(Btn, { onClick: () => onAddCart({ kind: 'task', id: `enrich-${kind}`, task: `enrich-${kind}`, title: `AI 丰富${meta.title}` }) }, `＋ 加入清单：AI 丰富${meta.title}`)
-              : null,
-            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'),
-          ),
-        ),
-        kind === 'agents'
-          ? h('p', { className: 'sd-principle-inline' },
-              h('strong', null, PRINCIPLE_SLOGAN),
-              h('span', null, PRINCIPLE_AGENTS_LINE))
-          : null,
-        kind === 'agents' ? h(FreshReadCard, { bundle, projectId }) : null,
-        kind === 'facts' && mode === 'subject'
-          ? h(FactsBySubject, { bundle, projectId, onChanged })
-          : kind === 'conflicts' && mode === 'party'
-          ? h(ConflictsByParty, { bundle, projectId, onChanged })
-          : kind === 'foreshadow' && mode === 'arc'
-          ? h(ForeshadowByArc, { bundle, projectId, onChanged })
-          : isCharacters && mode === 'card'
-          ? h(CharacterCards, { characters: items, bundle, onOpenDetail: (character) => setDetailId(character.id) })
-          : isCharacters && mode === 'graph'
-          ? h(RelationshipGraph, { characters: items, onEdit: (item) => setEditing(item), onCreate: (name) => setEditing({ name }) })
-          : listItems.length === 0
-          ? h(Empty, null, `还没有${meta.title}记录。点右上角「新增」开始。`)
-          : h(
-              'div',
-              { className: 'sd-table' },
-              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } }, meta.columns.map((c) => h('div', { key: c.k }, c.t)), h('div', { className: 'sd-actions-col' }, '操作')),
-              listItems.map((item) =>
-                h(
-                  'div',
-                  { key: item.id, className: `sd-row${kind === 'agents' && Number(item.weight) >= 10 ? ' sd-row-hi' : ''}`, style: { gridTemplateColumns: grid } },
-                  meta.columns.map((c) => {
-                    if (c.render) return h('div', { key: c.k, className: 'sd-cell' }, c.render(item))
-                    const text = c.format ? String(c.format(item[c.k], item)) : displayValue(c.k, item[c.k])
-                    return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
-                  }),
-                  h(
-                    'div',
-                    { className: 'sd-row-actions' },
-                    isCharacters ? h(Btn, { small: true, onClick: () => setDetailId(item.id) }, '详情') : null,
-                    h(Btn, { small: true, onClick: () => setEditing(item) }, '编辑'),
-                    h(Btn, { small: true, kind: 'danger', onClick: () => remove(item) }, '删除'),
-                  ),
-                ),
-              ),
-            ),
-        detail ? h(CharacterDetail, { character: detail, bundle, projectId, onClose: () => setDetailId(null), onSaved: onChanged }) : null,
-        editing !== null ? h(EntityEditor, { kind, item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ── 事实账本：按主体合并（避免几十条事实散成一张平表）────────
-    /** 纯函数：把事实按主体分组；query 命中主体/属性/取值。 */
-    function groupFactsBySubject(facts, query = '') {
-      const keyword = String(query ?? '').trim().toLowerCase()
-      const groups = new Map()
-      for (const fact of facts ?? []) {
-        const subject = String(fact.subject ?? '').trim() || '未署名'
-        const attribute = String(fact.attribute ?? '').trim() || '未署名属性'
-        const haystack = `${subject} ${attribute} ${fact.value ?? ''} ${fact.note ?? ''}`.toLowerCase()
-        if (keyword && !haystack.includes(keyword)) continue
-        if (!groups.has(subject)) groups.set(subject, { subject, attributes: new Map(), count: 0, latestChapter: 0 })
-        const group = groups.get(subject)
-        if (!group.attributes.has(attribute)) group.attributes.set(attribute, [])
-        group.attributes.get(attribute).push(fact)
-        group.count += 1
-        group.latestChapter = Math.max(group.latestChapter, Number(fact.chapter) || Number(fact.validFrom) || 0)
-      }
-      return [...groups.values()].sort((a, b) => b.latestChapter - a.latestChapter || b.count - a.count || a.subject.localeCompare(b.subject, 'zh'))
-    }
-
-    function FactsBySubject({ bundle, projectId, onChanged }) {
-      const [query, setQuery] = useState('')
-      const [open, setOpen] = useState(() => new Set())
-      const [editing, setEditing] = useState(null)
-      const facts = bundle.facts ?? []
-      const groups = groupFactsBySubject(facts, query)
-      const conflictKeys = new Set((bundle.checks ?? [])
-        .filter((check) => String(check.id || '').startsWith('fact-conflict:'))
-        .map((check) => String(check.id).slice('fact-conflict:'.length)))
-      const subjectConflicts = (group) => [...group.attributes.keys()].some((attribute) => conflictKeys.has(`${group.subject}::${attribute}`))
-      const toggle = (subject) => setOpen((prev) => {
-        const next = new Set(prev)
-        if (next.has(subject)) next.delete(subject)
-        else next.add(subject)
-        return next
-      })
-      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.subject))
-      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.subject)))
-      const remove = async (fact) => {
-        if (!window.confirm(`删除这条事实？
-${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'facts', entityId: fact.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const renderFactRow = (fact) => h('div', { key: fact.id, className: 'sd-facts-row' },
-        h('div', { className: 'sd-facts-value' }, String(fact.value ?? '—')),
-        h('div', { className: 'sd-facts-chapter' }, fact.chapter ? `第 ${fact.chapter} 章` : '—'),
-        h('div', { className: 'sd-facts-range' }, formatFactRange(fact.validFrom, fact.validTo)),
-        h('div', { className: 'sd-facts-note', title: fact.note ?? '' }, String(fact.note ?? '')),
-        h('div', { className: 'sd-facts-actions' },
-          h(Btn, { small: true, onClick: () => setEditing(fact) }, '编辑'),
-          h(Btn, { small: true, kind: 'danger', onClick: () => remove(fact) }, '删除')))
-      if (facts.length === 0) return h(Empty, null, '还没有事实记录。点右上角「新增」或「加入清单：AI 丰富事实账本」。')
-      return h('div', { className: 'sd-facts-wrap' },
-        h('div', { className: 'sd-facts-toolbar' },
-          h('input', { className: 'sd-input sd-facts-search', value: query, placeholder: '搜索主体 / 属性 / 取值…', onChange: (e) => setQuery(e.target.value) }),
-          h('span', { className: 'sd-hint' }, `${facts.length} 条事实 · ${groups.length} 个主体`),
-          h('div', { className: 'sd-facts-toolbar-actions' },
-            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
-            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        groups.length === 0
-          ? h(Empty, null, '没有匹配的事实。')
-          : groups.map((group) => {
-              const isOpen = open.has(group.subject)
-              const hasConflict = subjectConflicts(group)
-              return h('div', { key: group.subject, className: `sd-facts-group${hasConflict ? ' sd-facts-group-conflict' : ''}` },
-                h('button', { type: 'button', className: 'sd-facts-head', onClick: () => toggle(group.subject) },
-                  h('span', { className: 'sd-facts-caret' }, isOpen ? '▾' : '▸'),
-                  h('span', { className: 'sd-facts-subject' }, group.subject),
-                  h(Tag, { tone: 'muted' }, `${group.count} 条`),
-                  group.attributes.size > 1 ? h(Tag, { tone: 'muted' }, `${group.attributes.size} 个属性`) : null,
-                  group.latestChapter > 0 ? h(Tag, { tone: 'brand' }, `最近第 ${group.latestChapter} 章`) : null,
-                  hasConflict ? h(Tag, { tone: 'error' }, '有冲突') : null,
-                  h('span', { className: 'sd-facts-head-hint' }, isOpen ? '收起' : '展开')),
-                isOpen ? h('div', { className: 'sd-facts-body' },
-                  [...group.attributes.entries()].map(([attribute, rows]) => h('div', { key: attribute, className: 'sd-facts-attr' },
-                    h('div', { className: 'sd-facts-attr-head' },
-                      h('span', { className: 'sd-facts-attr-name' }, attribute),
-                      conflictKeys.has(`${group.subject}::${attribute}`) ? h(Tag, { tone: 'error' }, '取值冲突') : null),
-                    h('div', { className: 'sd-facts-rows' }, rows.map(renderFactRow)),
-                    h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({ subject: group.subject, attribute }) }, '＋ 加一条'))),
-                  h('div', { className: 'sd-facts-group-actions' },
-                    h(Btn, { small: true, onClick: () => setEditing({ subject: group.subject }) }, `＋ 新增「${group.subject}」的事实`)))
-                  : null)
-            }),
-        editing !== null ? h(EntityEditor, { kind: 'facts', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ── 人物：重要性排序 / 角色配色 / 数据聚合 ─────────────────
-    const ROLE_IMPORTANCE = { protagonist: 4, antagonist: 3, supporting: 2, minor: 1 }
-    function characterRoleKey(role) {
-      return Object.prototype.hasOwnProperty.call(ROLE_IMPORTANCE, role) ? role : 'other'
-    }
-    /** 出场章节：章节元数据 characters 优先；无命中回退 events.participants。 */
-    function characterAppearanceChapters(character, bundle) {
-      const name = String(character?.name ?? '').trim()
-      const chapters = [...(bundle?.chapters ?? [])].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))
-      const chapterById = new Map(chapters.map((chapter) => [Number(chapter.id), chapter]))
-      const byMeta = name === '' ? [] : chapters.filter((chapter) => relationshipList(chapter.characters).includes(name))
-      const byEvents = name === '' ? [] : [...new Set((bundle?.events ?? [])
-        .filter((event) => relationshipList(event.participants).includes(name))
-        .map((event) => Number(event.chapter))
-        .filter((value) => Number.isFinite(value) && value > 0))].sort((a, b) => a - b)
-      const source = byMeta.length > 0 ? 'chapters' : byEvents.length > 0 ? 'events' : 'none'
-      const list = byMeta.length > 0
-        ? byMeta.map((chapter) => ({ chapter: Number(chapter.id), title: chapter.title || '' }))
-        : byEvents.map((chapter) => ({ chapter, title: chapterById.get(chapter)?.title || '' }))
-      return { list, source }
-    }
-    function characterRelatedFacts(character, bundle) {
-      const name = String(character?.name ?? '').trim()
-      if (name === '') return []
-      return (bundle?.facts ?? []).filter((fact) => String(fact.subject ?? '').trim() === name)
-    }
-    function characterRelatedConflicts(character, bundle) {
-      const name = String(character?.name ?? '').trim()
-      if (name === '') return []
-      return (bundle?.conflicts ?? []).filter((conflict) => relationshipList(conflict.parties).includes(name))
-    }
-    function characterRelatedHighlights(character, bundle, appearanceChapters) {
-      const name = String(character?.name ?? '').trim()
-      if (name === '') return []
-      const chapters = appearanceChapters ?? new Set(characterAppearanceChapters(character, bundle).list.map((item) => item.chapter))
-      return (bundle?.highlights ?? [])
-        .filter((highlight) => chapters.has(Number(highlight.chapter)) && String(highlight.quote ?? highlight.text ?? '').includes(name))
-        .slice(0, 5)
-    }
-    /** 注意力均分：该人物出场章里 bundle.attention 的 score 平均（整数，无则 null）。 */
-    function characterAttentionAverage(character, bundle) {
-      const chapters = new Set(characterAppearanceChapters(character, bundle).list.map((item) => item.chapter))
-      if (chapters.size === 0) return null
-      const scores = attentionRows(bundle)
-        .filter((row) => chapters.has(Number(row.chapter)) && attentionHasScore(row))
-        .map((row) => Number(row.score))
-      if (scores.length === 0) return null
-      return Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length)
-    }
-    /**
-     * 重要性排序：role 权重（主角 4 > 反派 3 > 配角 2 > 龙套 1 > 其他 0）
-     * → 出场章数降序 → 参与冲突数降序 → 名字 zh 排序。
-     */
-    function characterImportance(character, bundle) {
-      return {
-        role: ROLE_IMPORTANCE[character?.role] ?? 0,
-        appearances: characterAppearanceChapters(character, bundle).list.length,
-        conflicts: characterRelatedConflicts(character, bundle).length,
-      }
-    }
-    function sortCharactersByImportance(items, bundle) {
-      return [...(items ?? [])].sort((a, b) => {
-        const left = characterImportance(a, bundle)
-        const right = characterImportance(b, bundle)
-        return right.role - left.role
-          || right.appearances - left.appearances
-          || right.conflicts - left.conflicts
-          || String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN')
-      })
-    }
-
-    // ── 人物：详情卡 ──────────────────────────────────────────
-    const CHARACTER_BASIC_FIELDS = [
-      ['goal', '目标'],
-      ['motivation', '动机'],
-      ['flaw', '缺陷'],
-      ['personality', '性格'],
-      ['arc', '人物弧光'],
-      ['appearance', '外貌'],
-      ['age', '年龄'],
-      ['gender', '性别'],
-      ['note', '备注'],
-    ]
-    // 详情卡左栏只放这六张字段卡；年龄 / 性别 / 备注在头部 meta 行展示。
-    const CHARACTER_CORE_FIELDS = CHARACTER_BASIC_FIELDS.filter(([key]) => ['goal', 'motivation', 'flaw', 'personality', 'arc', 'appearance'].includes(key))
-
-    function CharacterDetail({ character, bundle, projectId, onClose, onSaved }) {
-      const [editing, setEditing] = useState(null)
-      const name = String(character.name ?? '').trim()
-      const roleKey = characterRoleKey(character.role)
-      const roleLabel = ROLE_LABEL[character.role] ?? character.role ?? '未定位'
-      const appearance = characterAppearanceChapters(character, bundle)
-      const appearances = appearance.list
-      const appearanceChapters = new Set(appearances.map((item) => item.chapter))
-      const relationships = relationshipList(character.relationships)
-      const tags = relationshipList(character.tags)
-      const facts = characterRelatedFacts(character, bundle)
-      const factGroups = new Map()
-      for (const fact of facts) {
-        const attribute = String(fact.attribute ?? '').trim() || '未署名属性'
-        if (!factGroups.has(attribute)) factGroups.set(attribute, [])
-        factGroups.get(attribute).push(fact)
-      }
-      const conflicts = characterRelatedConflicts(character, bundle)
-      const highlights = characterRelatedHighlights(character, bundle, appearanceChapters)
-      const attentionAverage = characterAttentionAverage(character, bundle)
-      const extraMeta = [['年龄', character.age], ['性别', character.gender], ['备注', character.note]]
-        .filter(([, value]) => String(value ?? '').trim() !== '')
-      const numbers = [
-        ['出场章节', String(appearances.length), '章'],
-        ['参与冲突', String(conflicts.length), '条'],
-        ['相关事实', String(facts.length), '条'],
-        ['相关高光', String(highlights.length), '条'],
-        ['注意力均分', attentionAverage === null ? '—' : String(attentionAverage), attentionAverage === null ? '' : '/100'],
-      ]
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide sd-char-detail' },
-          h('div', { className: `sd-char-detail-head sd-char-role-${roleKey}` },
-            h('div', { className: 'sd-char-avatar-lg' }, name.slice(0, 1) || '?'),
-            h('div', { className: 'sd-char-detail-ident' },
-              h('div', { className: 'sd-char-detail-name' }, name || '未命名人物'),
-              h('div', { className: 'sd-char-detail-badges' },
-                h('span', { className: 'sd-char-role-badge' }, roleLabel),
-                tags.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value))),
-              extraMeta.length > 0
-                ? h('div', { className: 'sd-char-detail-meta' }, extraMeta.map(([label, value]) => h('span', { key: label, className: 'sd-char-detail-meta-item' }, `${label}：${value}`)))
-                : null),
-            h('div', { className: 'sd-char-detail-actions' },
-              h(Btn, { small: true, onClick: () => setEditing(character) }, '编辑'),
-              h(IconBtn, { onClick: onClose, title: '关闭' }, '✕'))),
-          h('div', { className: 'sd-char-numbers' }, numbers.map(([label, value, unit]) => h('div', { key: label, className: 'sd-char-number' },
-            h('div', { className: 'sd-char-number-value' }, value, unit ? h('span', { className: 'sd-char-number-unit' }, unit) : null),
-            h('div', { className: 'sd-char-number-label' }, label)))),
-          h('div', { className: 'sd-modal-body sd-char-body' },
-            h('div', { className: 'sd-char-detail-cols' },
-              h('div', { className: 'sd-char-col' },
-                h('h3', { className: 'sd-char-section-title' }, '基础'),
-                CHARACTER_CORE_FIELDS.map(([key, label]) => h('div', { key, className: 'sd-char-field sd-char-basic-field' },
-                  h('div', { className: 'sd-char-field-label' }, label),
-                  h('div', { className: 'sd-char-field-value' }, String(character[key] ?? '').trim() || '—')))),
-              h('div', { className: 'sd-char-col' },
-                h('section', { className: 'sd-char-section' },
-                  h('h3', { className: 'sd-char-section-title' }, `关系（${relationships.length}）`),
-                  relationships.length === 0
-                    ? h('div', { className: 'sd-hint' }, '—')
-                    : h('div', { className: 'sd-char-tags' }, relationships.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))),
-                h('section', { className: 'sd-char-section' },
-                  h('h3', { className: 'sd-char-section-title' }, `出场章节（${appearances.length}）`),
-                  appearances.length === 0
-                    ? h('div', { className: 'sd-hint' }, '—')
-                    : h('div', { className: 'sd-char-chips' }, appearances.map((item) => h('span', { key: item.chapter, className: 'sd-char-chip', title: item.title || '' },
-                        `第 ${item.chapter} 章${item.title ? ` · ${item.title}` : ''}`))),
-                  appearance.source === 'events' ? h('div', { className: 'sd-hint' }, '章节元数据没有引用这个名字，以上章号来自事件参与人。') : null),
-                h('section', { className: 'sd-char-section' },
-                  h('h3', { className: 'sd-char-section-title' }, `相关事实（${facts.length}）`),
-                  facts.length === 0
-                    ? h('div', { className: 'sd-hint' }, '—')
-                    : [...factGroups.entries()].map(([attribute, rows]) => h('div', { key: attribute, className: 'sd-char-fact-group' },
-                        h('div', { className: 'sd-char-fact-head' }, attribute, h(Tag, { tone: 'muted' }, `${rows.length} 条`)),
-                        rows.map((fact) => h('div', { key: fact.id, className: 'sd-char-fact-row' },
-                          h('span', { className: 'sd-char-fact-value' }, String(fact.value ?? '—')),
-                          h('span', { className: 'sd-char-fact-meta' }, [
-                            fact.chapter ? `第 ${fact.chapter} 章` : '',
-                            formatFactRange(fact.validFrom, fact.validTo),
-                          ].filter(Boolean).join(' · '))))))),
-                h('section', { className: 'sd-char-section' },
-                  h('h3', { className: 'sd-char-section-title' }, `相关冲突（${conflicts.length}）`),
-                  conflicts.length === 0
-                    ? h('div', { className: 'sd-hint' }, '—')
-                    : conflicts.map((conflict) => h('div', { key: conflict.id, className: 'sd-char-row' },
-                        h('span', { className: 'sd-char-row-main' }, conflict.title || '未命名冲突'),
-                        h('span', { className: 'sd-char-row-meta' }, [
-                          CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '',
-                          displayValue('type', conflict.type),
-                          conflict.resolveChapter ? `第 ${conflict.resolveChapter} 章解决` : '',
-                        ].filter((value) => value && value !== '—').join(' · '))))),
-                h('section', { className: 'sd-char-section' },
-                  h('h3', { className: 'sd-char-section-title' }, `相关高光（${highlights.length}）`),
-                  highlights.length === 0
-                    ? h('div', { className: 'sd-hint' }, '—')
-                    : highlights.map((highlight) => h('div', { key: highlight.id, className: 'sd-char-row' },
-                        h('span', { className: 'sd-char-row-main' }, String(highlight.quote ?? highlight.text ?? '')),
-                        h('span', { className: 'sd-char-row-meta' }, [
-                          `第 ${highlight.chapter} 章`,
-                          displayValue('type', highlight.type),
-                        ].filter((value) => value && value !== '—').join(' · ')))))))),
-        ),
-        editing !== null ? h(EntityEditor, { kind: 'characters', item: editing, projectId, onClose: () => setEditing(null), onSaved }) : null,
-      )
-    }
-
-    /** 卡片视图：按重要性排序的游戏风人物卡网格。 */
-    function CharacterCards({ characters, bundle, onOpenDetail }) {
-      const sorted = sortCharactersByImportance(characters, bundle)
-      if (sorted.length === 0) return h(Empty, null, '还没有人物。点右上角「＋ 新增」开始。')
-      return h('div', { className: 'sd-charcards' }, sorted.map((character) => {
-        const name = String(character.name ?? '').trim()
-        const roleKey = characterRoleKey(character.role)
-        const relationships = relationshipList(character.relationships).slice(0, 3)
-        const tags = relationshipList(character.tags)
-        const appearances = characterAppearanceChapters(character, bundle).list.length
-        const conflicts = characterRelatedConflicts(character, bundle).length
-        const facts = characterRelatedFacts(character, bundle).length
-        const attention = characterAttentionAverage(character, bundle)
-        return h('button', {
-          key: character.id,
-          type: 'button',
-          className: `sd-char-card sd-char-role-${roleKey}`,
-          title: `打开 ${name || '未命名人物'} 的人物卡`,
-          onClick: () => onOpenDetail(character),
-        },
-          h('span', { className: 'sd-char-card-head' },
-            h('span', { className: 'sd-char-card-avatar' }, name.slice(0, 1) || '?'),
-            h('span', { className: 'sd-char-card-ident' },
-              h('span', { className: 'sd-char-card-name' }, name || '未命名人物'),
-              h('span', { className: 'sd-char-card-role' }, ROLE_LABEL[character.role] ?? character.role ?? '未定位')),
-            h('span', { className: `sd-char-card-att${attention === null ? ' sd-char-card-att-empty' : ''}` }, attention === null ? '⚡ —' : `⚡ ${attention}`)),
-          tags.length > 0
-            ? h('span', { className: 'sd-char-card-tags' }, tags.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))
-            : null,
-          h('span', { className: 'sd-char-card-stats' },
-            h('span', null, `出场 ${appearances} 章`),
-            h('span', null, `冲突 ${conflicts}`),
-            h('span', null, `事实 ${facts}`)),
-          relationships.length > 0
-            ? h('span', { className: 'sd-char-card-rel' },
-                h('span', { className: 'sd-char-card-rel-label' }, '关系'),
-                relationships.map((value, index) => h(Tag, { key: `${value}-${index}`, tone: 'muted' }, value)))
-            : h('span', { className: 'sd-char-card-rel sd-hint' }, '暂无关系'))
-      }))
-    }
-
-    // ── 冲突：按参与方合并（平表之外的合并视图）──────────────────
-    /** 纯函数：按 parties 组合分组；parties 排序后 join('×')，空值归「未署名参与方」。 */
-    function groupConflictsByParty(conflicts, query = '') {
-      const keyword = String(query ?? '').trim().toLowerCase()
-      const groups = new Map()
-      for (const conflict of conflicts ?? []) {
-        const parties = relationshipList(conflict.parties).sort((a, b) => a.localeCompare(b, 'zh-CN'))
-        const key = parties.length > 0 ? parties.join('×') : '未署名参与方'
-        const haystack = [
-          conflict.title,
-          parties.join(' '),
-          displayValue('type', conflict.type),
-          conflict.stakes,
-          conflict.escalation,
-          conflict.note,
-        ].filter(Boolean).join(' ').toLowerCase()
-        if (keyword && !haystack.includes(keyword)) continue
-        if (!groups.has(key)) groups.set(key, { key, parties, items: [] })
-        groups.get(key).items.push(conflict)
-      }
-      return [...groups.values()].sort((a, b) => b.items.length - a.items.length || a.key.localeCompare(b.key, 'zh-CN'))
-    }
-
-    function ConflictsByParty({ bundle, projectId, onChanged }) {
-      const [query, setQuery] = useState('')
-      const [open, setOpen] = useState(() => new Set())
-      const [editing, setEditing] = useState(null)
-      const conflicts = bundle.conflicts ?? []
-      const groups = groupConflictsByParty(conflicts, query)
-      const activeOf = (items) => items.filter((item) => item.status === 'active').length
-      const resolvedOf = (items) => items.filter((item) => item.status === 'resolved').length
-      const toggle = (key) => setOpen((prev) => {
-        const next = new Set(prev)
-        if (next.has(key)) next.delete(key)
-        else next.add(key)
-        return next
-      })
-      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.key))
-      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.key)))
-      const remove = async (conflict) => {
-        if (!window.confirm(`删除这条冲突？\n${conflict.title || conflict.id}`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'conflicts', entityId: conflict.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const renderRow = (conflict) => h('div', { key: conflict.id, className: 'sd-conf-row' },
-        h('div', { className: 'sd-conf-row-head' },
-          h('strong', { className: 'sd-conf-title' }, conflict.title || '未命名冲突'),
-          h(Tag, { tone: 'muted' }, displayValue('type', conflict.type)),
-          h(Tag, { tone: conflict.status === 'active' ? 'brand' : 'muted' }, CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '—'),
-          conflict.resolveChapter ? h(Tag, { tone: 'muted' }, `第 ${conflict.resolveChapter} 章解决`) : null,
-          h('div', { className: 'sd-conf-actions' },
-            h(Btn, { small: true, onClick: () => setEditing(conflict) }, '编辑'),
-            h(Btn, { small: true, kind: 'danger', onClick: () => remove(conflict) }, '删除'))),
-        conflict.stakes ? h('div', { className: 'sd-conf-line' }, h('span', null, '赌注'), String(conflict.stakes)) : null,
-        conflict.escalation ? h('div', { className: 'sd-conf-line' }, h('span', null, '升级'), String(conflict.escalation)) : null,
-        conflict.note ? h('div', { className: 'sd-conf-line sd-conf-line-note' }, h('span', null, '备注'), String(conflict.note)) : null)
-      if (conflicts.length === 0) return h(Empty, null, '还没有冲突记录。点「＋ 新增」或去平表添加。')
-      return h('div', { className: 'sd-conf-wrap' },
-        h('div', { className: 'sd-conf-toolbar' },
-          h('input', { className: 'sd-input sd-conf-search', value: query, placeholder: '搜索标题 / 参与方 / 类型 / 赌注…', onChange: (e) => setQuery(e.target.value) }),
-          h('span', { className: 'sd-hint' }, `${conflicts.length} 条冲突 · ${groups.length} 组参与方`),
-          h('div', { className: 'sd-conf-toolbar-actions' },
-            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
-            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        groups.length === 0
-          ? h(Empty, null, '没有匹配的冲突。')
-          : groups.map((group) => {
-              const isOpen = open.has(group.key)
-              return h('div', { key: group.key, className: 'sd-conf-group' },
-                h('button', { type: 'button', className: 'sd-conf-head', onClick: () => toggle(group.key) },
-                  h('span', { className: 'sd-conf-caret' }, isOpen ? '▾' : '▸'),
-                  h('span', { className: 'sd-conf-parties' }, group.key),
-                  h(Tag, { tone: 'muted' }, `${group.items.length} 条`),
-                  activeOf(group.items) > 0 ? h(Tag, { tone: 'brand' }, `进行中 ${activeOf(group.items)}`) : null,
-                  resolvedOf(group.items) > 0 ? h(Tag, { tone: 'muted' }, `已解决 ${resolvedOf(group.items)}`) : null,
-                  h('span', { className: 'sd-conf-head-hint' }, isOpen ? '收起' : '展开')),
-                isOpen ? h('div', { className: 'sd-conf-body' }, group.items.map(renderRow)) : null)
-            }),
-        editing !== null ? h(EntityEditor, { kind: 'conflicts', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ── 伏笔：按回收段合并（每 10 章一段）──────────────────────
-    const FORESHADOW_ARC_SIZE = 10
-    function foreshadowArcRange(payoffChapter) {
-      const chapter = Number(payoffChapter)
-      if (!Number.isFinite(chapter) || chapter <= 0) return null
-      const start = Math.floor((chapter - 1) / FORESHADOW_ARC_SIZE) * FORESHADOW_ARC_SIZE + 1
-      return { start, end: start + FORESHADOW_ARC_SIZE - 1 }
-    }
-    /** 纯函数：按回收章所在 10 章段分组；无效/0 归「未定回收」排最后。 */
-    function groupForeshadowByArc(items, query = '') {
-      const keyword = String(query ?? '').trim().toLowerCase()
-      const groups = new Map()
-      for (const item of items ?? []) {
-        const haystack = `${item.title ?? ''} ${item.plantedText ?? ''} ${item.note ?? ''}`.toLowerCase()
-        if (keyword && !haystack.includes(keyword)) continue
-        const range = foreshadowArcRange(item.payoffChapter)
-        const key = range ? `arc-${range.start}` : 'undecided'
-        if (!groups.has(key)) groups.set(key, { key, start: range ? range.start : null, end: range ? range.end : null, items: [] })
-        groups.get(key).items.push(item)
-      }
-      const list = [...groups.values()]
-      const decided = list.filter((group) => group.start !== null).sort((a, b) => a.start - b.start)
-      const undecided = list.filter((group) => group.start === null)
-      return [...decided, ...undecided]
-    }
-
-    function ForeshadowByArc({ bundle, projectId, onChanged }) {
-      const [query, setQuery] = useState('')
-      const [open, setOpen] = useState(() => new Set())
-      const [editing, setEditing] = useState(null)
-      const foreshadow = bundle.foreshadow ?? []
-      const groups = groupForeshadowByArc(foreshadow, query)
-      const paidOf = (items) => items.filter((item) => item.status === 'paid').length
-      const toggle = (key) => setOpen((prev) => {
-        const next = new Set(prev)
-        if (next.has(key)) next.delete(key)
-        else next.add(key)
-        return next
-      })
-      const allOpen = groups.length > 0 && groups.every((group) => open.has(group.key))
-      const toggleAll = () => setOpen(allOpen ? new Set() : new Set(groups.map((group) => group.key)))
-      const remove = async (item) => {
-        if (!window.confirm(`删除这条伏笔？\n${item.title || item.id}`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'foreshadow', entityId: item.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const renderRow = (item) => h('div', { key: item.id, className: 'sd-fore-row' },
-        h('div', { className: 'sd-fore-row-head' },
-          h('strong', { className: 'sd-fore-title' }, item.title || '未命名伏笔'),
-          h(Tag, { tone: item.status === 'paid' ? 'success' : item.status === 'dropped' ? 'muted' : 'brand' }, FOCUS_LABEL[item.status] ?? item.status ?? '未回收'),
-          h('span', { className: 'sd-fore-meta' }, [
-            item.setupChapter ? `第 ${item.setupChapter} 章` : '未定埋设',
-            '→',
-            item.payoffChapter ? `第 ${item.payoffChapter} 章` : '未定回收',
-          ].join(' ')),
-          h('div', { className: 'sd-fore-actions' },
-            h(Btn, { small: true, onClick: () => setEditing(item) }, '编辑'),
-            h(Btn, { small: true, kind: 'danger', onClick: () => remove(item) }, '删除'))),
-        String(item.plantedText ?? '').trim() ? h('div', { className: 'sd-fore-text', title: String(item.plantedText) }, String(item.plantedText)) : null,
-        String(item.note ?? '').trim() ? h('div', { className: 'sd-fore-note', title: String(item.note) }, String(item.note)) : null)
-      if (foreshadow.length === 0) return h(Empty, null, '还没有伏笔记录。点「＋ 新增」或去平表添加。')
-      return h('div', { className: 'sd-fore-wrap' },
-        h('div', { className: 'sd-fore-toolbar' },
-          h('input', { className: 'sd-input sd-fore-search', value: query, placeholder: '搜索伏笔 / 埋设原文 / 备注…', onChange: (e) => setQuery(e.target.value) }),
-          h('span', { className: 'sd-hint' }, `${foreshadow.length} 条伏笔 · ${groups.length} 个回收段`),
-          h('div', { className: 'sd-fore-toolbar-actions' },
-            h(Btn, { small: true, onClick: toggleAll }, allOpen ? '收起全部' : '展开全部'),
-            h(Btn, { small: true, kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        groups.length === 0
-          ? h(Empty, null, '没有匹配的伏笔。')
-          : groups.map((group) => {
-              const isOpen = open.has(group.key)
-              const paid = paidOf(group.items)
-              return h('div', { key: group.key, className: 'sd-fore-group' },
-                h('button', { type: 'button', className: 'sd-fore-head', onClick: () => toggle(group.key) },
-                  h('span', { className: 'sd-fore-caret' }, isOpen ? '▾' : '▸'),
-                  h('span', { className: 'sd-fore-arc' }, group.start === null ? '未定回收' : `第 ${group.start}–${group.end} 章回收`),
-                  h(Tag, { tone: 'muted' }, `${group.items.length} 条`),
-                  h(Tag, { tone: 'success' }, `已回收 ${paid}`),
-                  h(Tag, { tone: 'muted' }, `未回收 ${group.items.length - paid}`),
-                  h('span', { className: 'sd-fore-head-hint' }, isOpen ? '收起' : '展开')),
-                isOpen ? h('div', { className: 'sd-fore-body' }, group.items.map(renderRow)) : null)
-            }),
-        editing !== null ? h(EntityEditor, { kind: 'foreshadow', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ── 章节页 ────────────────────────────────────────────────
-    function DashboardTab({ bundle, projectId }) {
-      const [data, setData] = useState(null)
-      const [error, setError] = useState('')
-      const [busy, setBusy] = useState(false)
-      const load = useCallback(async () => {
-        setBusy(true)
-        try {
-          const value = await api('usage.summary', { projectId })
-          setData(value)
-          setError('')
-        } catch (err) {
-          setError(err.message)
-        } finally {
-          setBusy(false)
-        }
-      }, [projectId])
-      useEffect(() => { load() }, [load])
-      const fmt = (n) => {
-        const value = Number(n) || 0
-        if (value >= 1000000) return (value / 1000000).toFixed(2) + 'M'
-        if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
-        return String(value)
-      }
-      const pct = (part, total) => (total > 0 ? Math.round((part / total) * 100) : 0)
-      const copySnapshot = async () => {
-        const openForeshadow = (bundle.foreshadow ?? []).filter((f) => f.status !== 'paid' && f.status !== 'dropped').length
-        const last = (bundle.chapters ?? []).slice(-1)[0]
-        const text = [
-          `【作品】《${bundle.project.name}》（projectId: ${bundle.project.id}）`,
-          `【进度】${bundle.chapters.length} 章 / ${bundle.stats.words} 字`,
-          `【账本】人物 ${bundle.characters.length} ｜ 大纲 ${bundle.outlines.length} ｜ 事件 ${bundle.events.length} ｜ 事实 ${bundle.facts.length} ｜ 伏笔 ${bundle.foreshadow.length}（未回收 ${openForeshadow}）`,
-          `【待处理】提案 ${bundle.stats.pendingProposals} ｜ 审稿 ${bundle.stats.openReviews}`,
-          last ? `【最近一章】第 ${last.id} 章《${last.title}》` : '【最近一章】（还没有章节）',
-          '',
-          '请用 novel_desk_* 工具读取/操作这个作品；需要写入正文或账本时，先用提案/审稿，等我确认。',
-        ].join('\n')
-        try {
-          await navigator.clipboard.writeText(text)
-          window.alert('项目快照已复制。到左侧对话里粘贴，就能带着同一份上下文继续聊。')
-        } catch {
-          window.prompt('复制下面的项目快照，粘贴到左侧对话：', text)
-        }
-      }
-      const wb = data?.workbench
-      const chat = data?.chat
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '📊 仪表盘'), h('p', { className: 'sd-desc' }, '这个项目的上下文、两条 AI 通道和 token 消耗。工作台调用是「一次性」，对话是「多轮会话」，两边不共享历史。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: copySnapshot }, '复制项目快照到对话'),
-            h(Btn, { onClick: load, disabled: busy }, busy ? '刷新中…' : '刷新'))),
-        error ? h('div', { className: 'sd-error sd-error-inline' }, `读取失败：${error}`) : null,
-        data ? h('div', null,
-          h(WriterStats, { data }),
-          h('div', { className: 'sd-hint', style: { marginTop: 6 } }, `当前上下文约 ${fmt(data.context.tokens)} token（${data.context.chars} 字符，${data.context.parts.length} 个区块）`),
-          h('div', { className: 'sd-dash-grid' },
-            h('div', { className: 'sd-section' },
-              h('h3', { className: 'sd-h3' }, '上下文构成'),
-              h('div', { className: 'sd-table' },
-                h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.4fr 1fr 1fr' } }, h('div', null, '区块'), h('div', null, '字符'), h('div', null, '估算 token')),
-                data.context.parts.map((part, i) => h('div', { key: i, className: 'sd-row', style: { gridTemplateColumns: '1.4fr 1fr 1fr' } },
-                  h('div', { className: 'sd-cell' }, part.title),
-                  h('div', { className: 'sd-cell' }, String(part.chars)),
-                  h('div', { className: 'sd-cell' }, fmt(part.tokens)))))),
-            h('div', { className: 'sd-section' },
-              h('h3', { className: 'sd-h3' }, '工作台消耗 · 按任务'),
-              wb.byTask.length === 0 ? h('p', { className: 'sd-hint' }, '还没有工作台 AI 调用记录。生成方案、审阅、按意见修改后这里会出现。') : h('div', { className: 'sd-table' },
-                h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.4fr 60px 90px 80px' } }, h('div', null, '任务'), h('div', null, '次数'), h('div', null, 'token'), h('div', null, '耗时')),
-                wb.byTask.map((row) => h('div', { key: row.task, className: 'sd-row', style: { gridTemplateColumns: '1.4fr 60px 90px 80px' } },
-                  h('div', { className: 'sd-cell' }, row.task),
-                  h('div', { className: 'sd-cell' }, String(row.calls)),
-                  h('div', { className: 'sd-cell' }, fmt(row.totalTokens)),
-                  h('div', { className: 'sd-cell' }, `${(row.durationMs / 1000).toFixed(1)}s`)))))),
-          h('div', { className: 'sd-section' },
-            h('h3', { className: 'sd-h3' }, '最近工作台调用'),
-            wb.recent.length === 0 ? h('p', { className: 'sd-hint' }, '暂无记录。') : h('div', { className: 'sd-table' },
-              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '110px 1.2fr 90px 90px 70px 60px' } }, h('div', null, '时间'), h('div', null, '任务'), h('div', null, '输入'), h('div', null, '输出'), h('div', null, '耗时'), h('div', null, '状态')),
-              wb.recent.map((row) => h('div', { key: row.id, className: 'sd-row', style: { gridTemplateColumns: '110px 1.2fr 90px 90px 70px 60px' } },
-                h('div', { className: 'sd-cell' }, new Date(row.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })),
-                h('div', { className: 'sd-cell' }, `${row.task}${row.chapter ? ` · 第${row.chapter}章` : ''}`),
-                h('div', { className: 'sd-cell' }, fmt(row.inputTokens)),
-                h('div', { className: 'sd-cell' }, fmt(row.outputTokens)),
-                h('div', { className: 'sd-cell' }, `${(row.durationMs / 1000).toFixed(1)}s`),
-                h('div', { className: 'sd-cell' }, row.ok ? '✅' : '❌'))))),
-          h('div', { className: 'sd-section' },
-            h('h3', { className: 'sd-h3' }, `对话消耗 · ${chat.cwd || '未关联工作区'}`),
-            chat.sessions.length === 0 ? h('p', { className: 'sd-hint' }, chat.note || '没有找到这个工作区目录的 DSH 会话日志。') : h('div', { className: 'sd-table' },
-              h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '1.2fr 70px 90px 80px 90px' } }, h('div', null, '会话'), h('div', null, '轮次'), h('div', null, 'token'), h('div', null, '费用'), h('div', null, '最近')),
-              chat.sessions.map((session) => h('div', { key: session.id, className: 'sd-row', style: { gridTemplateColumns: '1.2fr 70px 90px 80px 90px' } },
-                h('div', { className: 'sd-cell', title: session.id }, session.id.slice(0, 18) + '…'),
-                h('div', { className: 'sd-cell' }, String(session.messages)),
-                h('div', { className: 'sd-cell', title: `本体 ${session.totalTokens} token` }, fmt(session.familyTokens ?? session.totalTokens)),
-                h('div', { className: 'sd-cell', title: `${session.model ?? ''} · 本体 ¥${(session.costCNY ?? 0).toFixed(2)}，含子 Agent` }, (session.familyCostCNY ?? session.costCNY) == null ? '—' : `¥${(session.familyCostCNY ?? session.costCNY).toFixed(2)}`),
-                h('div', { className: 'sd-cell' }, session.lastAt ? new Date(session.lastAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'))),
-              chat.subagents && chat.subagents.count > 0 ? h('div', { className: 'sd-row', style: { gridTemplateColumns: '1.2fr 70px 90px 80px 90px' } },
-                h('div', { className: 'sd-cell' }, `子 Agent × ${chat.subagents.count}`),
-                h('div', { className: 'sd-cell' }, '—'),
-                h('div', { className: 'sd-cell' }, fmt(chat.subagents.totalTokens)),
-                h('div', { className: 'sd-cell' }, `¥${(chat.subagents.costCNY ?? 0).toFixed(2)}`),
-                h('div', { className: 'sd-cell' }, '已计入总费用')) : null)),
-          h('div', { className: 'sd-dash-note' },
-            h('strong', null, '两条通道怎么配合：'),
-            h('div', null, '① 工作台 AI：点按钮 → 一次独立调用，上下文由项目拼装，适合「改这一段 / 审这一章 / 补一条账本」，结果进提案。'),
-            h('div', null, '② DSH 对话：左侧多轮会话，适合「把整本书的问题一次分析完」，可以调 novel_desk_* 工具读写项目。'),
-            h('div', null, '③ 往返方式：工作台「复制项目快照到对话」→ 对话里继续分析 → 让 Agent 用 novel_desk_propose 写回提案 → 回工作台采纳。'),
-            h('div', { className: 'sd-hint' }, '费用按 models.dev 挂牌价估算：DeepSeek 工作日 09:00–12:00、14:00–18:00 全价，其余半价；根会话单独列；子 Agent 是独立子会话，token 和费用已计入总额。'),
-          ),
-        ) : h(Empty, null, busy ? '正在读取用量…' : '暂无仪表盘数据。'),
-      )
-    }
-
-    function ChaptersTab({ bundle, projectId, onChanged, onExpandChapter, initialView = 'chapters' }) {
-      const [view, setView] = useState(initialView)
-      const [editing, setEditing] = useState(null)
-      const [outlineEditing, setOutlineEditing] = useState(null)
-      const chapters = bundle.chapters ?? []
-      const outlines = [...(bundle.outlines ?? [])].sort((a, b) => Number(a.chapter) - Number(b.chapter))
-
-      const removeChapter = async (chapter) => {
-        if (!window.confirm(`删除第 ${chapter.id} 章《${chapter.title}》？`)) return
-        try {
-          await api('chapter.delete', { projectId, chapterId: chapter.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const removeOutline = async (outline) => {
-        if (!window.confirm(`删除第 ${outline.chapter} 章大纲？`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'outlines', entityId: outline.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null,
-            h('h2', { className: 'sd-h2' }, view === 'chapters' ? '📄 章节' : '🗂️ 章节大纲'),
-            h('p', { className: 'sd-desc' }, view === 'chapters'
-              ? `共 ${chapters.length} 章，${bundle.stats.words} 字。章节正文保存为 projects/<id>/chapters/NNNN.md。`
-              : `共 ${outlines.length} 章大纲。写下一章方案时 AI 会优先读这里。`)),
-          h('div', { className: 'sd-pagehead-actions' },
-            h('div', { className: 'sd-segmented' },
-              h('button', { type: 'button', className: view === 'chapters' ? 'sd-seg-active' : '', onClick: () => setView('chapters') }, '章节'),
-              h('button', { type: 'button', className: view === 'outlines' ? 'sd-seg-active' : '', onClick: () => setView('outlines') }, '大纲')),
-            view === 'chapters'
-              ? h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新建章节')
-              : h(Btn, { kind: 'primary', onClick: () => setOutlineEditing({}) }, '＋ 新增大纲'))),
-        view === 'chapters'
-          ? (chapters.length === 0
-              ? h(Empty, null, '还没有章节。新建一章，或让 Agent 调用 novel_desk_upsert 前先建章节。')
-              : h('div', { className: 'sd-chapter-list' },
-                  chapters.map((chapter) => h('div', { key: chapter.id, className: 'sd-chapter' },
-                    h('div', { className: 'sd-chapter-id' }, chapter.id),
-                    h('div', { className: 'sd-chapter-main', onClick: () => setEditing(chapter) },
-                      h('div', { className: 'sd-chapter-title' }, chapter.title),
-                      h('div', { className: 'sd-chapter-meta' }, `${chapter.words} 字 ｜ ${STATUS_LABEL[chapter.status] || chapter.status}${chapter.storyTime ? ' ｜ ' + chapter.storyTime : ''}${chapter.summary ? ' ｜ ' + chapter.summary : ''}`)),
-                    h('div', { className: 'sd-chapter-actions' },
-                      h(Btn, { small: true, onClick: () => setEditing(chapter) }, '打开'),
-                      onExpandChapter ? h(Btn, { small: true, onClick: () => onExpandChapter(Number(chapter.id)) }, '扩写本章') : null,
-                      h(Btn, { small: true, kind: 'danger', onClick: () => removeChapter(chapter) }, '删除'))))))
-          : (outlines.length === 0
-              ? h(Empty, null, '还没有章节大纲。可以手动新增，也可以在导入作品包时从 大纲.md 自动导入。')
-              : h('div', { className: 'sd-table' },
-                  h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '56px 1fr 1.4fr 80px 96px' } },
-                    h('div', null, '章'), h('div', null, '标题'), h('div', null, '摘要'), h('div', null, '状态'), h('div', { className: 'sd-actions-col' }, '操作')),
-                  outlines.map((outline) => h('div', { key: outline.id ?? outline.chapter, className: 'sd-row', style: { gridTemplateColumns: '56px 1fr 1.4fr 80px 96px' } },
-                    h('div', { className: 'sd-cell' }, String(outline.chapter)),
-                    h('div', { className: 'sd-cell', title: outline.title }, outline.title),
-                    h('div', { className: 'sd-cell', title: outline.summary }, outline.summary || '—'),
-                    h('div', { className: 'sd-cell' }, { planned: '计划', drafted: '已写', done: '完成' }[outline.status] ?? '计划'),
-                    h('div', { className: 'sd-row-actions' },
-                      h(Btn, { small: true, onClick: () => setOutlineEditing(outline) }, '编辑'),
-                      h(Btn, { small: true, kind: 'danger', onClick: () => removeOutline(outline) }, '删除')))))),
-        editing !== null ? h(ChapterEditor, { chapter: editing, projectId, onExpandChapter, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-        outlineEditing !== null ? h(EntityEditor, { kind: 'outlines', item: outlineEditing, projectId, onClose: () => setOutlineEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    function ChapterEditor({ chapter, projectId, onClose, onSaved, onExpandChapter }) {
-      const [form, setForm] = useState(() => ({ ...chapter }))
-      const [busy, setBusy] = useState(false)
-      const [autoState, setAutoState] = useState('')
-      const [historyOpen, setHistoryOpen] = useState(false)
-      const [notice, setNotice] = useState('')
-      const formRef = useRef(form)
-      formRef.current = form
-      const lastSavedRef = useRef(JSON.stringify({ ...chapter }))
-      const timerRef = useRef(null)
-      const onSavedRef = useRef(onSaved)
-      onSavedRef.current = onSaved
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const words = React.useMemo(() => {
-        const text = String(form.content ?? '')
-        const cjk = (text.match(/[\u3400-\u4dbf\u4e00-\u9fff]/g) ?? []).length
-        const latin = (text.match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g) ?? []).length
-        return cjk + latin
-      }, [form.content])
-      const dirty = JSON.stringify(form) !== lastSavedRef.current
-
-      // 内容改动后 5 秒防抖自动保存（只对已存在的章节；新章节首次保存仍走手动）
-      useEffect(() => {
-        if (!form.id) return undefined
-        if (JSON.stringify(formRef.current) === lastSavedRef.current) {
-          setAutoState('')
-          return undefined
-        }
-        setAutoState('未保存…')
-        clearTimeout(timerRef.current)
-        timerRef.current = setTimeout(async () => {
-          const payload = formRef.current
-          if (!payload.id || JSON.stringify(payload) === lastSavedRef.current) return
-          setAutoState('保存中…')
-          try {
-            await api('chapter.save', { projectId, chapter: payload })
-            lastSavedRef.current = JSON.stringify(payload)
-            setAutoState(`已自动保存 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`)
-            onSavedRef.current?.()
-          } catch (error) {
-            setAutoState('自动保存失败')
-            window.alert('自动保存失败：' + error.message)
-          }
-        }, 5000)
-        return () => clearTimeout(timerRef.current)
-      }, [form, projectId])
-
-      const requestClose = () => {
-        clearTimeout(timerRef.current)
-        if (dirty && !window.confirm('还有未保存的改动，确定关闭？')) return
-        onClose()
-      }
-
-      const save = async () => {
-        setBusy(true)
-        clearTimeout(timerRef.current)
-        const payload = { ...form, status: form.status || 'draft' }
-        try {
-          await api('chapter.save', { projectId, chapter: payload })
-          lastSavedRef.current = JSON.stringify(payload)
-          setAutoState('')
-          onSaved()
-          onClose()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-
-      const expandChapter = async () => {
-        if (!form.id || !onExpandChapter) return
-        clearTimeout(timerRef.current)
-        if (dirty) {
-          try {
-            const payload = { ...form, status: form.status || 'draft' }
-            await api('chapter.save', { projectId, chapter: payload })
-            lastSavedRef.current = JSON.stringify(payload)
-            onSavedRef.current?.()
-          } catch (error) {
-            window.alert('保存失败，未能进入扩写：' + error.message)
-            return
-          }
-        }
-        onExpandChapter(Number(form.id))
-      }
-
-      const handleRestored = (restored) => {
-        if (restored && typeof restored === 'object' && Object.keys(restored).length > 0) {
-          const next = { ...formRef.current, ...restored }
-          setForm(next)
-          lastSavedRef.current = JSON.stringify(next)
-        }
-        setAutoState('')
-        setNotice('已恢复历史版本，编辑器内容已同步。')
-        onSavedRef.current?.()
-      }
-
-      return h(
-        React.Fragment,
-        null,
-        h(
-          'div',
-          { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && requestClose() },
-          h(
-            'div',
-            { className: 'sd-modal sd-modal-wide' },
-            h(
-              'div',
-              { className: 'sd-modal-head' },
-              h('strong', null, form.id ? `编辑 · 第 ${form.id} 章` : '新建章节'),
-              autoState ? h('span', { className: 'sd-hint sd-autosave' }, autoState) : null,
-              h('span', { className: 'sd-hint' }, `${words} 字`),
-              form.id ? h(Btn, { small: true, onClick: () => setHistoryOpen(true) }, '历史版本') : null,
-              form.id && onExpandChapter ? h(Btn, { small: true, onClick: expandChapter, disabled: busy }, '扩写本章') : null,
-              h(IconBtn, { onClick: requestClose, title: '关闭' }, '✕'),
-            ),
-            h(
-              'div',
-              { className: 'sd-modal-body' },
-              notice ? h('div', { className: 'sd-notice' }, notice) : null,
-              h(
-                'div',
-                { className: 'sd-form sd-form-2' },
-                h(Field, { label: '标题' }, h(TextInput, { value: form.title, onChange: (v) => set('title', v), placeholder: '章节标题' })),
-                h(Field, { label: '状态' }, h(Select, { value: form.status || 'draft', options: [['draft', '草稿'], ['revised', '修订'], ['final', '定稿']], onChange: (v) => set('status', v) })),
-                h(Field, { label: '故事内时间' }, h(TextInput, { value: form.storyTime, onChange: (v) => set('storyTime', v) })),
-                h(Field, { label: '地点' }, h(TextInput, { value: form.location, onChange: (v) => set('location', v) })),
-                h(Field, { label: '出场人物', hint: '逗号分隔' }, h(TextInput, { value: Array.isArray(form.characters) ? form.characters.join('、') : form.characters ?? '', onChange: (v) => set('characters', v.split(/[、,，]/).map((s) => s.trim()).filter(Boolean)) })),
-                h(Field, { label: '摘要' }, h(TextInput, { value: form.summary, onChange: (v) => set('summary', v), placeholder: '一句话概括本章' })),
-              ),
-              h(Field, { label: '正文', hint: form.id ? '改动后 5 秒自动保存；关闭前若仍有未保存改动会提示' : '新章节请点「保存」' }, h(TextArea, { value: form.content, rows: 20, placeholder: '在这里写正文，或让 Agent 生成后提交。', onChange: (v) => set('content', v) })),
-            ),
-            h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: requestClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存')),
-          ),
-        ),
-        historyOpen && form.id
-          ? h(ChapterHistoryDialog, { projectId, chapterId: String(form.id), currentContent: form.content, onClose: () => setHistoryOpen(false), onRestored: (restored) => { setHistoryOpen(false); handleRestored(restored) } })
-          : null,
-      )
-    }
-
-    // ── 时间线页 ──────────────────────────────────────────────
-    // ── 章节地图（只读进度地图）────────────────────────────────
-    const MAP_STATUS_LABEL = { draft: '草稿', revised: '修订', final: '定稿', planned: '计划' }
-    const MAP_LEGEND_STATUS = [
-      ['draft', '草稿'],
-      ['revised', '修订'],
-      ['final', '定稿'],
-      ['planned', '计划章（虚线）'],
-    ]
-
-    function chapterMapIsWritten(chapter) {
-      const content = chapter?.content
-      if (content === undefined || content === null) return Number(chapter?.words) > 0
-      return String(content).trim().length > 0
-    }
-
-    function chapterMapStatusKey(entry) {
-      if (entry.planned) return 'planned'
-      return MAP_STATUS_LABEL[entry.status] ? entry.status : 'draft'
-    }
-
-    function formatMapWords(words) {
-      const value = Number(words) || 0
-      if (value >= 10000) return (value / 10000).toFixed(1) + ' 万'
-      if (value >= 1000) return (value / 1000).toFixed(1) + 'k'
-      return String(value)
-    }
-
-    function chapterMapAttentionTone(attention) {
-      if (!attention) return 'none'
-      if (!attentionHasScore(attention)) return 'untested'
-      const score = Number(attention.score)
-      if (score < 60) return 'low'
-      if (score < 80) return 'mid'
-      return 'high'
-    }
-
-    /**
-     * 纯函数：把 chapters / outlines / attention / events / conflicts(收束章) /
-     * foreshadow(埋收章) / highlights 按章号聚合成地图节点（章号升序）。
-     * 节点集合只来自 chapters + outlines；找不到所属章的素材不生成节点（仍计入统计条覆盖数）。
-     */
-    function buildChapterMapEntries(bundle) {
-      const entryMap = new Map()
-      const ensure = (chapterNumber) => {
-        const number = Number(chapterNumber)
-        if (!Number.isFinite(number) || number <= 0) return null
-        if (!entryMap.has(number)) {
-          entryMap.set(number, {
-            chapter: number,
-            title: '',
-            status: 'draft',
-            words: 0,
-            summary: '',
-            outlineSummary: '',
-            location: '',
-            written: false,
-            hasChapter: false,
-            hasOutline: false,
-            outline: null,
-            planned: false,
-            attention: null,
-            events: [],
-            conflicts: [],
-            plants: [],
-            payoffs: [],
-            highlights: [],
-          })
-        }
-        return entryMap.get(number)
-      }
-      for (const chapter of bundle?.chapters ?? []) {
-        const entry = ensure(chapter?.id)
-        if (!entry) continue
-        entry.hasChapter = true
-        entry.written = chapterMapIsWritten(chapter)
-        entry.status = MAP_STATUS_LABEL[chapter.status] ? chapter.status : 'draft'
-        entry.title = String(chapter.title ?? '').trim() || entry.title
-        entry.words = Number(chapter.words) || 0
-        entry.summary = String(chapter.summary ?? '')
-        entry.location = String(chapter.location ?? '').trim()
-      }
-      for (const outline of bundle?.outlines ?? []) {
-        const entry = ensure(outline?.chapter)
-        if (!entry) continue
-        entry.hasOutline = true
-        entry.outline = outline
-        entry.title = entry.title || String(outline.title ?? '').trim()
-        entry.outlineSummary = String(outline.summary ?? '')
-      }
-      for (const entry of entryMap.values()) entry.planned = entry.hasOutline && !entry.written
-      const attach = (chapterNumber, key, value) => {
-        const entry = entryMap.get(Number(chapterNumber))
-        if (entry) entry[key].push(value)
-      }
-      for (const event of bundle?.events ?? []) attach(event.chapter, 'events', event)
-      for (const conflict of bundle?.conflicts ?? []) attach(conflict.resolveChapter, 'conflicts', conflict)
-      for (const item of bundle?.foreshadow ?? []) {
-        attach(item.setupChapter, 'plants', item)
-        attach(item.payoffChapter, 'payoffs', item)
-      }
-      for (const highlight of bundle?.highlights ?? []) attach(highlight.chapter, 'highlights', highlight)
-      for (const record of attentionRows(bundle)) {
-        const entry = entryMap.get(Number(record.chapter))
-        if (entry) entry.attention = record
-      }
-      // 章节没有 location 时回退到本章第一个带地点的事件
-      for (const entry of entryMap.values()) {
-        if (!entry.location) {
-          const eventWithLocation = entry.events.find((event) => String(event.location ?? '').trim() !== '')
-          entry.location = String(eventWithLocation?.location ?? '').trim()
-        }
-      }
-      return [...entryMap.values()].sort((a, b) => a.chapter - b.chapter)
-    }
-
-    function chapterMapStats(bundle, entries) {
-      const chapters = bundle?.chapters ?? []
-      const target = Number(bundle?.project?.targetChapters) || 0
-      const written = chapters.filter(chapterMapIsWritten).length
-      const planned = entries.filter((entry) => entry.planned).length
-      const words = chapters.reduce((sum, chapter) => sum + (Number(chapter.words) || 0), 0)
-      const attention = attentionAverage(attentionRows(bundle))
-      return {
-        written,
-        totalChapters: chapters.length,
-        planned,
-        target,
-        words,
-        attention,
-        attentionCount: attentionRows(bundle).filter(attentionHasScore).length,
-        events: (bundle?.events ?? []).length,
-        conflicts: (bundle?.conflicts ?? []).filter((conflict) => Number(conflict.resolveChapter) > 0).length,
-        foreshadow: (bundle?.foreshadow ?? []).filter((item) => Number(item.setupChapter) > 0 || Number(item.payoffChapter) > 0).length,
-        highlights: (bundle?.highlights ?? []).length,
-      }
-    }
-
-    /** 蛇形分页：按 rowSize 切行，奇数行交给 CSS 反向（direction:rtl）。 */
-    function chunkChapterMapRows(entries, rowSize) {
-      const size = Math.max(1, Number(rowSize) || 12)
-      const rows = []
-      for (let index = 0; index < entries.length; index += size) rows.push(entries.slice(index, index + size))
-      return rows
-    }
-
-    function useMapColumns() {
-      const readColumns = () => (typeof window !== 'undefined' && Number(window.innerWidth) > 0 && Number(window.innerWidth) <= 900 ? 6 : 12)
-      const [columns, setColumns] = useState(readColumns)
-      useEffect(() => {
-        if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined
-        const update = () => setColumns(readColumns())
-        window.addEventListener('resize', update)
-        return () => window.removeEventListener('resize', update)
-      }, [])
-      return columns
-    }
-
-    function ChapterMapDetail({ entry, onClose, onGoTab, locations, onFocusLocation }) {
-      const statusKey = chapterMapStatusKey(entry)
-      const record = entry.attention
-      const matchedLocation = findLocationByName(locations, entry.location)
-      const section = (title, content) => h('section', { className: 'sd-map-section' },
-        h('h3', { className: 'sd-map-section-title' }, title),
-        content)
-      const rowLine = (main, meta, key) => h('div', { key, className: 'sd-map-rowline' },
-        h('span', { className: 'sd-map-rowline-main' }, main),
-        meta ? h('span', { className: 'sd-map-rowline-meta' }, meta) : null)
-      const empty = () => h('div', { className: 'sd-map-empty' }, '—')
-      const verdict = record?.verdict ?? ''
-      const designScore = record && record.designScore !== '' && record.designScore !== null && record.designScore !== undefined ? String(record.designScore) : ''
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide sd-map-detail' },
-          h('div', { className: 'sd-modal-head sd-map-detail-head' },
-            h('strong', { className: 'sd-map-detail-title' }, `第 ${entry.chapter} 章${entry.title ? `《${entry.title}》` : ''}`),
-            h(Tag, { tone: statusKey === 'planned' ? 'muted' : 'brand' }, MAP_STATUS_LABEL[statusKey]),
-            entry.written ? h(Tag, { tone: 'muted' }, `${formatMapWords(entry.words)} 字`) : null,
-            h('div', { className: 'sd-map-detail-actions' },
-              matchedLocation && onFocusLocation ? h(Btn, { small: true, onClick: () => onFocusLocation(matchedLocation.name) }, '在世界地图中查看') : null,
-              onGoTab ? h(Btn, { small: true, kind: 'primary', onClick: () => onGoTab('chapters') }, '打开章节页') : null,
-              h(Btn, { small: true, onClick: onClose }, '关闭'))),
-          h('div', { className: 'sd-modal-body sd-map-detail-body' },
-            section('章节信息', h('div', { className: 'sd-map-detail-meta' }, [
-              `状态：${MAP_STATUS_LABEL[statusKey]}`,
-              `字数：${entry.written ? formatMapWords(entry.words) + ' 字' : '—'}`,
-              entry.hasOutline ? '有大纲' : '无大纲',
-              `地点：${entry.location || '—'}`,
-            ].join(' · '))),
-            section('章节摘要', entry.summary ? h('div', { className: 'sd-map-text' }, entry.summary) : empty()),
-            entry.hasOutline ? section('大纲摘要', entry.outlineSummary ? h('div', { className: 'sd-map-text' }, entry.outlineSummary) : empty()) : null,
-            section('注意力', record
-              ? h('div', { className: 'sd-map-att' },
-                  h('div', { className: 'sd-map-att-head' },
-                    h('span', { className: `sd-map-att-score${attentionHasScore(record) ? ' sd-map-att-score-' + chapterMapAttentionTone(record) : ''}` }, attentionHasScore(record) ? `${Number(record.score)} 分` : '未测'),
-                    h('span', { className: 'sd-map-att-meta' }, [
-                      ATTENTION_TYPE_LABEL[record.type] ?? '未分型',
-                      verdict ? `下一章：${verdict}` : '',
-                      designScore ? `目标 ${designScore}` : '',
-                    ].filter(Boolean).join(' · '))),
-                  rowLine('最弱一环', record.weakest ? ATTENTION_WEAKEST_LABEL[record.weakest] ?? record.weakest : '—'),
-                  rowLine('章末牵引', String(record.cliff ?? '').trim() || '—'),
-                  record.dropRisk ? rowLine('弃读点', record.dropRisk) : null)
-              : h('div', { className: 'sd-map-empty' }, '未标注意力（冷读后回填 score，或在编辑器里手动补一条）。')),
-            section(`本章事件（${entry.events.length}）`, entry.events.length === 0
-              ? empty()
-              : entry.events.map((event, index) => rowLine(event.title || event.id || '未命名事件', event.storyTime || '', event.id ?? `event-${index}`))),
-            section(`本章冲突（${entry.conflicts.length}）`, entry.conflicts.length === 0
-              ? empty()
-              : entry.conflicts.map((conflict, index) => rowLine(conflict.title || '未命名冲突', CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '', conflict.id ?? `conflict-${index}`))),
-            section(`本章伏笔（埋 ${entry.plants.length} / 收 ${entry.payoffs.length}）`, entry.plants.length + entry.payoffs.length === 0
-              ? empty()
-              : h('div', null,
-                  entry.plants.map((item, index) => rowLine(`埋：${item.title ?? '未命名'}`, Number(item.payoffChapter) > 0 ? `→ 第 ${item.payoffChapter} 章回收` : '→ 未定回收', `plant-${item.id ?? index}`)),
-                  entry.payoffs.map((item) => rowLine(`收：${item.title ?? '未命名'}`, Number(item.setupChapter) > 0 ? `第 ${item.setupChapter} 章 →` : '未定埋设 →')))),
-            section(`本章高光（${entry.highlights.length}）`, entry.highlights.length === 0
-              ? empty()
-              : entry.highlights.map((highlight, index) => rowLine(highlight.title || highlight.quote || highlight.text || '未命名高光', displayValue('type', highlight.type) === '—' ? '' : displayValue('type', highlight.type), highlight.id ?? `highlight-${index}`))),
-          ),
-        ),
-      )
-    }
-
-    function ChapterMapTab({ bundle, projectId, onGoTab, onFocusLocation }) {
-      const [detailChapter, setDetailChapter] = useState(null)
-      const [viewOpen, setViewOpen] = useState(false)
-      const entries = buildChapterMapEntries(bundle)
-      const stats = chapterMapStats(bundle, entries)
-      const columns = useMapColumns()
-      const rows = chunkChapterMapRows(entries, columns)
-      const detail = detailChapter === null ? null : entries.find((entry) => entry.chapter === Number(detailChapter)) ?? null
-      const nodeTitle = (entry) => {
-        const attention = entry.attention
-        const attentionText = attention ? (attentionHasScore(attention) ? `${Number(attention.score)} 分` : '未测') : '未标'
-        const parts = [
-          `第 ${entry.chapter} 章${entry.title ? `《${entry.title}》` : ''}`,
-          MAP_STATUS_LABEL[chapterMapStatusKey(entry)],
-          `注意力 ${attentionText}`,
-        ]
-        if (entry.events.length) parts.push(`事件 ${entry.events.length}`)
-        if (entry.conflicts.length) parts.push(`冲突收束 ${entry.conflicts.length}`)
-        if (entry.plants.length + entry.payoffs.length) parts.push(`伏笔 ${entry.plants.length + entry.payoffs.length}`)
-        if (entry.highlights.length) parts.push(`高光 ${entry.highlights.length}`)
-        if (entry.words) parts.push(`${formatMapWords(entry.words)} 字`)
-        return parts.join(' · ')
-      }
-      if (entries.length === 0) {
-        return h('div', { className: 'sd-page' },
-          h('div', { className: 'sd-pagehead' },
-            h('div', null, h('h2', { className: 'sd-h2' }, '🗺️ 地图'), h('p', { className: 'sd-desc' }, '章节地图：按章号排成蛇形进度地图，节点汇总状态、注意力分与事件 / 冲突 / 伏笔 / 高光。只读，AI 入口仍在清单。')),
-            h('div', { className: 'sd-pagehead-actions' },
-              h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'))),
-          h(Empty, null, '还没有章节。先在章节页写第 1 章，或让 AI 生成大纲。'),
-          viewOpen ? h(HtmlViewDialog, { title: '🗺️ 章节地图 · 只读视图', path: novelDeskViewPath('map', projectId), onClose: () => setViewOpen(false) }) : null)
-      }
-      const statusSwatch = (statusKey) => h('span', { className: `sd-map-swatch sd-map-swatch-${statusKey}` })
-      const attentionSwatch = (tone) => h('span', { className: `sd-map-swatch sd-map-swatch-att-${tone}` })
-      return h('div', { className: 'sd-page sd-map-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null,
-            h('h2', { className: 'sd-h2' }, '🗺️ 地图'),
-            h('p', { className: 'sd-desc' }, `章节地图：按章号排成蛇形进度地图（${entries.length} 个节点），节点汇总状态、注意力分与事件 / 冲突 / 伏笔 / 高光。只读；写作与 AI 入口仍在章节页与清单。`)),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'),
-            onGoTab ? h(Btn, { onClick: () => onGoTab('chapters') }, '去章节页写下一章') : null)),
-        h('div', { className: 'sd-map-stats' },
-          h('div', { className: 'sd-map-stat' },
-            h('div', { className: 'sd-map-stat-label' }, '已写章节'),
-            h('div', { className: 'sd-map-stat-big' }, String(stats.written)),
-            h('div', { className: 'sd-map-stat-hint' }, `章节记录 ${stats.totalChapters} 章`)),
-          h('div', { className: 'sd-map-stat' },
-            h('div', { className: 'sd-map-stat-label' }, '计划章节'),
-            h('div', { className: 'sd-map-stat-big' }, String(stats.planned)),
-            h('div', { className: 'sd-map-stat-hint' }, stats.target > 0 ? `目标 ${stats.target} 章` : '来自大纲')),
-          h('div', { className: 'sd-map-stat' },
-            h('div', { className: 'sd-map-stat-label' }, '总字数'),
-            h('div', { className: 'sd-map-stat-big' }, formatMapWords(stats.words)),
-            h('div', { className: 'sd-map-stat-hint' }, '正文累计')),
-          h('div', { className: 'sd-map-stat' },
-            h('div', { className: 'sd-map-stat-label' }, '平均注意力分'),
-            h('div', { className: `sd-map-stat-big${attentionScoreTone(stats.attention)}` }, stats.attention === null ? '—' : String(stats.attention)),
-            h('div', { className: 'sd-map-stat-hint' }, `${stats.attentionCount} 章有实测分`)),
-          h('div', { className: 'sd-map-stat sd-map-stat-cover' },
-            h('div', { className: 'sd-map-stat-label' }, '素材覆盖'),
-            h('div', { className: 'sd-map-cover' },
-              h('span', null, `事件 ${stats.events}`),
-              h('span', null, `冲突收束 ${stats.conflicts}`),
-              h('span', null, `伏笔埋收 ${stats.foreshadow}`),
-              h('span', null, `高光 ${stats.highlights}`)))),
-        h('div', { className: 'sd-map-legend' },
-          h('span', { className: 'sd-map-legend-title' }, '状态'),
-          MAP_LEGEND_STATUS.map(([key, label]) => h('span', { key, className: 'sd-map-legend-item' }, statusSwatch(key), label)),
-          h('span', { className: 'sd-map-legend-sep' }, '·'),
-          h('span', { className: 'sd-map-legend-title' }, '注意力'),
-          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('low'), '<60 红'),
-          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('mid'), '60–79 黄'),
-          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('high'), '≥80 绿'),
-          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('untested'), '未测'),
-          h('span', { className: 'sd-map-legend-item' }, attentionSwatch('none'), '未标')),
-        h('div', { className: 'sd-map-board' }, rows.map((row, rowIndex) => h('div', { key: `row-${rowIndex}`, className: `sd-map-row${rowIndex % 2 === 1 ? ' sd-map-row-rev' : ''}` },
-          row.map((entry) => {
-            const statusKey = chapterMapStatusKey(entry)
-            const attention = entry.attention
-            const tone = chapterMapAttentionTone(attention)
-            const attentionLabel = attention
-              ? (attentionHasScore(attention) ? String(Number(attention.score)) : '未测')
-              : '未标'
-            const badges = [
-              entry.events.length ? { key: 'event', label: '事', count: entry.events.length, title: `事件 ${entry.events.length} 条：${entry.events.map((item) => item.title ?? '未命名').join('、')}` } : null,
-              entry.conflicts.length ? { key: 'conflict', label: '冲', count: entry.conflicts.length, title: `冲突收束 ${entry.conflicts.length} 条：${entry.conflicts.map((item) => item.title ?? '未命名').join('、')}` } : null,
-              entry.plants.length + entry.payoffs.length ? { key: 'foreshadow', label: '伏', count: entry.plants.length + entry.payoffs.length, title: `伏笔 埋 ${entry.plants.length} / 收 ${entry.payoffs.length}` } : null,
-              entry.highlights.length ? { key: 'highlight', label: '高', count: entry.highlights.length, title: `高光 ${entry.highlights.length} 条` } : null,
-            ].filter(Boolean)
-            return h('button', {
-              key: entry.chapter,
-              type: 'button',
-              className: `sd-mapnode sd-mapnode-status-${statusKey}`,
-              title: nodeTitle(entry),
-              onClick: () => setDetailChapter(entry.chapter),
-            },
-              h('span', { className: 'sd-mapnode-top' },
-                h('span', { className: 'sd-mapnode-chapter' }, String(entry.chapter)),
-                h('span', { className: `sd-mapnode-att sd-mapnode-att-${tone}` }, attentionLabel)),
-              h('span', { className: 'sd-mapnode-title', title: entry.title || '' }, entry.title || '未命名'),
-              h('span', { className: 'sd-mapnode-meta' },
-                h('span', { className: 'sd-mapnode-status' }, MAP_STATUS_LABEL[statusKey]),
-                h('span', { className: 'sd-mapnode-words' }, entry.words ? `${formatMapWords(entry.words)} 字` : '—')),
-              badges.length > 0
-                ? h('span', { className: 'sd-mapnode-badges' }, badges.map((badge) => h('span', { key: badge.key, className: `sd-mapnode-badge sd-mapnode-badge-${badge.key}`, title: badge.title }, `${badge.label}${badge.count}`)))
-                : null)
-          })))),
-        detail ? h(ChapterMapDetail, { entry: detail, onClose: () => setDetailChapter(null), onGoTab, locations: bundle.locations ?? [], onFocusLocation }) : null,
-        viewOpen ? h(HtmlViewDialog, { title: '🗺️ 章节地图 · 只读视图', path: novelDeskViewPath('map', projectId), onClose: () => setViewOpen(false) }) : null,
-      )
-    }
-
-    // ── 世界 / 地点：辅助函数 + 世界页 + 地点编辑器 + 只读视图 ─────
-    function novelDeskViewPath(view, projectId) {
-      return `/novel-desk/view/${view}?projectId=${encodeURIComponent(String(projectId ?? ''))}`
-    }
-
-    function worldMapSize(world) {
-      const w = Number(world?.mapSize?.w)
-      const h = Number(world?.mapSize?.h)
-      return {
-        w: Number.isFinite(w) && w > 0 ? w : 1000,
-        h: Number.isFinite(h) && h > 0 ? h : 1000,
-      }
-    }
-
-    function clampWorldCoord(value, max) {
-      const n = Number(value)
-      if (!Number.isFinite(n)) return 0
-      const limit = Number.isFinite(Number(max)) && Number(max) > 0 ? Number(max) : 1000
-      return Math.min(limit, Math.max(0, n))
-    }
-
-    function locationCoords(location, world) {
-      const size = worldMapSize(world)
-      return {
-        x: clampWorldCoord(location?.coords?.x, size.w),
-        y: clampWorldCoord(location?.coords?.y, size.h),
-      }
-    }
-
-    /** 地点名 / 别名匹配（章节、事件里的 location 文本 → locations 实体）。 */
-    function findLocationByName(locations, name) {
-      const target = String(name ?? '').trim()
-      if (target === '') return null
-      return (locations ?? []).find((location) => {
-        if (String(location?.name ?? '').trim() === target) return true
-        return relationshipList(location?.aliases).includes(target)
-      }) ?? null
-    }
-
-    /** 连接双向只画一次：按 id 排序去重，避免 A→B / B→A 两条线重叠。 */
-    function buildWorldEdges(locations) {
-      const byId = new Map((locations ?? []).map((location) => [String(location.id), location]))
-      const seen = new Set()
-      const edges = []
-      for (const location of locations ?? []) {
-        for (const connection of location.connections ?? []) {
-          const fromId = String(location.id)
-          const toId = String(connection?.to ?? '')
-          if (!byId.has(toId) || fromId === toId) continue
-          const key = [fromId, toId].sort().join('|')
-          if (seen.has(key)) continue
-          seen.add(key)
-          edges.push({ id: key, from: location, to: byId.get(toId), connection })
-        }
-      }
-      return edges
-    }
-
-    function normalizeWorldForm(world) {
-      const size = worldMapSize(world)
-      const travel = world?.travelModel ?? {}
-      return {
-        id: world?.id ?? 'world',
-        name: String(world?.name ?? ''),
-        scale: WORLD_SCALE_OPTIONS.some(([value]) => value === world?.scale) ? world.scale : 'region',
-        kind: WORLD_KIND_OPTIONS.some(([value]) => value === world?.kind) ? world.kind : 'mixed',
-        era: String(world?.era ?? ''),
-        mapSize: size,
-        travelModel: {
-          walkKmPerDay: Number(travel.walkKmPerDay) || 30,
-          horseKmPerDay: Number(travel.horseKmPerDay) || 80,
-          boatKmPerDay: Number(travel.boatKmPerDay) || 60,
-        },
-        locked: world?.locked === true,
-        note: String(world?.note ?? ''),
-      }
-    }
-
-    function worldBuildInstruction(kind, scale, era) {
-      const kindLabel = CREATE_WORLD_KINDS.find(([value]) => value === kind)?.[1] ?? '混合'
-      const scaleLabel = CREATE_WORLD_SCALES.find(([value]) => value === scale)?.[1] ?? '地区'
-      const eraText = String(era ?? '').trim() || '未指定'
-      return `背景：${kindLabel}；尺度：${scaleLabel}；时代：${eraText}`
-    }
-
-    function HtmlViewDialog({ title, path, onClose }) {
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide sd-htmlview' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, title || '只读视图'),
-            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h('div', { className: 'sd-htmlview-body' },
-            h('iframe', { className: 'sd-htmlview-frame', src: path, title: title || '只读视图' })),
-          h('div', { className: 'sd-modal-foot sd-htmlview-foot' },
-            h('span', { className: 'sd-hint' }, '同源只读 HTML，可直接用浏览器打印。'),
-            h(Btn, { onClick: onClose }, '关闭'))),
-      )
-    }
-
-    function LocationEditor({ location, locations, world, projectId, onClose, onSaved }) {
-      const size = worldMapSize(world)
-      const otherLocations = (locations ?? []).filter((item) => String(item.id) !== String(location?.id ?? ''))
-      const [form, setForm] = useState(() => ({
-        name: String(location?.name ?? ''),
-        aliases: relationshipList(location?.aliases),
-        type: LOCATION_TYPE_LABEL[location?.type] ? location.type : 'other',
-        coords: locationCoords(location, world),
-        region: String(location?.region ?? ''),
-        firstChapter: location?.firstChapter === 0 || location?.firstChapter ? String(location.firstChapter) : '',
-        note: String(location?.note ?? ''),
-        connections: (location?.connections ?? []).map((connection) => ({
-          to: String(connection?.to ?? ''),
-          distanceKm: connection?.distanceKm === undefined || connection?.distanceKm === null ? '' : String(connection.distanceKm),
-          days: connection?.days === undefined || connection?.days === null ? '' : String(connection.days),
-          mode: LOCATION_MODE_LABEL[connection?.mode] ? connection.mode : 'walk',
-          bearing: String(connection?.bearing ?? ''),
-        })),
-      }))
-      const [busy, setBusy] = useState(false)
-      const setFormField = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const setCoord = (key, value) => setForm((prev) => ({ ...prev, coords: { ...prev.coords, [key]: value } }))
-      const setConnection = (index, key, value) => setForm((prev) => ({
-        ...prev,
-        connections: prev.connections.map((connection, position) => (position === index ? { ...connection, [key]: value } : connection)),
-      }))
-      const addConnection = () => setForm((prev) => ({
-        ...prev,
-        connections: [...prev.connections, { to: otherLocations[0]?.id ? String(otherLocations[0].id) : '', distanceKm: '', days: '', mode: 'walk', bearing: '' }],
-      }))
-      const removeConnection = (index) => setForm((prev) => ({ ...prev, connections: prev.connections.filter((connection, position) => position !== index) }))
-      const aliasesText = relationshipList(form.aliases).join('、')
-      const save = async () => {
-        if (!String(form.name).trim()) {
-          window.alert('请填写地点名称')
-          return
-        }
-        setBusy(true)
-        try {
-          const item = {
-            ...(location ?? {}),
-            name: String(form.name).trim(),
-            aliases: relationshipList(form.aliases),
-            type: form.type,
-            coords: {
-              x: clampWorldCoord(form.coords.x, size.w),
-              y: clampWorldCoord(form.coords.y, size.h),
-            },
-            region: String(form.region ?? '').trim(),
-            firstChapter: String(form.firstChapter ?? '').trim() === '' ? null : Number(form.firstChapter) || 0,
-            note: String(form.note ?? ''),
-            connections: form.connections
-              .filter((connection) => connection.to)
-              .map((connection) => ({
-                to: connection.to,
-                distanceKm: Number(connection.distanceKm) || 0,
-                days: Number(connection.days) || 0,
-                mode: connection.mode,
-                bearing: String(connection.bearing ?? '').trim(),
-              })),
-          }
-          await api('entity.upsert', { projectId, kind: 'locations', item })
-          onSaved()
-          onClose()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide sd-loc-editor' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, location?.id ? `编辑地点 · ${location.name || ''}` : '新增地点'),
-            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body sd-loc-editor-body' },
-            h('div', { className: 'sd-loc-form-grid' },
-              h(Field, { label: '名称 *' }, h(TextInput, { value: form.name, onChange: (value) => setFormField('name', value), placeholder: '如：长安' })),
-              h(Field, { label: '别名', hint: '逗号 / 顿号分隔' }, h(TextInput, { value: aliasesText, onChange: (value) => setFormField('aliases', value.split(/[、,，]/).map((part) => part.trim()).filter(Boolean)), placeholder: '如 京兆府、西京' })),
-              h(Field, { label: '类型' }, h(Select, { value: form.type, onChange: (value) => setFormField('type', value), options: LOCATION_TYPES.map(([value, label]) => ({ value, label })) })),
-              h(Field, { label: '区域' }, h(TextInput, { value: form.region, onChange: (value) => setFormField('region', value), placeholder: '如 关内道 / 北境' })),
-              h(Field, { label: '首现章' }, h(TextInput, { value: form.firstChapter, type: 'number', onChange: (value) => setFormField('firstChapter', value) })),
-              h(Field, { label: '坐标 X', hint: `0–${size.w}` }, h(TextInput, { value: form.coords.x, type: 'number', onChange: (value) => setCoord('x', value) })),
-              h(Field, { label: '坐标 Y', hint: `0–${size.h}` }, h(TextInput, { value: form.coords.y, type: 'number', onChange: (value) => setCoord('y', value) })),
-              h(Field, { label: '备注' }, h(TextArea, { value: form.note, rows: 2, onChange: (value) => setFormField('note', value) }))),
-            h('div', { className: 'sd-loc-conn-head' },
-              h('h3', { className: 'sd-h3' }, `连接道路（${form.connections.length}）`),
-              h(Btn, { small: true, onClick: addConnection, disabled: otherLocations.length === 0 }, '＋ 添加连接')),
-            otherLocations.length === 0
-              ? h('div', { className: 'sd-hint' }, '至少再有一个地点才能建立连接。')
-              : form.connections.length === 0
-                ? h('div', { className: 'sd-hint' }, '还没有连接。添加后地图会画线并标注距离 / 天数。')
-                : h('div', { className: 'sd-loc-conn-list' }, form.connections.map((connection, index) => h('div', { key: index, className: 'sd-loc-conn-row' },
-                    h('select', { className: 'sd-input sd-loc-conn-select', value: connection.to, onChange: (e) => setConnection(index, 'to', e.target.value) },
-                      h('option', { value: '' }, '（选择地点）'),
-                      otherLocations.map((item) => h('option', { key: item.id, value: item.id }, item.name || item.id))),
-                    h('input', { className: 'sd-input', type: 'number', value: connection.distanceKm, placeholder: '距离 km', title: '距离 km', onChange: (e) => setConnection(index, 'distanceKm', e.target.value) }),
-                    h('input', { className: 'sd-input', type: 'number', value: connection.days, placeholder: '天数', title: '行程天数', onChange: (e) => setConnection(index, 'days', e.target.value) }),
-                    h('select', { className: 'sd-input sd-loc-conn-mode', value: connection.mode, onChange: (e) => setConnection(index, 'mode', e.target.value) },
-                      LOCATION_MODE_OPTIONS.map(([value, label]) => h('option', { key: value, value }, label))),
-                    h('input', { className: 'sd-input', value: connection.bearing, placeholder: '方位 east…', title: '方位（east / west / north / south…）', onChange: (e) => setConnection(index, 'bearing', e.target.value) }),
-                    h(IconBtn, { onClick: () => removeConnection(index), title: '删除这条连接' }, '✕')))),
-          ),
-          h('div', { className: 'sd-modal-foot' },
-            h(Btn, { onClick: onClose }, '取消'),
-            h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存地点'))),
-      )
-    }
-
-    function WorldTab({ bundle, projectId, onChanged, onAddCart, focusLocation }) {
-      const locations = [...(bundle.locations ?? [])].sort((a, b) => String(a.name ?? '').localeCompare(String(b.name ?? ''), 'zh-CN'))
-      const worldSignature = JSON.stringify(bundle.world ?? null)
-      const [worldForm, setWorldForm] = useState(() => normalizeWorldForm(bundle.world))
-      const [busy, setBusy] = useState(false)
-      const [viewOpen, setViewOpen] = useState(false)
-      const [locEditing, setLocEditing] = useState(null)
-      const [focusId, setFocusId] = useState(null)
-      const [focusTip, setFocusTip] = useState('')
-      const [hoverId, setHoverId] = useState(null)
-      const [drag, setDrag] = useState(null)
-      const svgRef = useRef(null)
-      const mapRef = useRef(null)
-      const suppressClickRef = useRef(false)
-      useEffect(() => setWorldForm(normalizeWorldForm(bundle.world)), [worldSignature])
-      useEffect(() => {
-        if (!focusLocation) return
-        const name = typeof focusLocation === 'string' ? focusLocation : focusLocation.name
-        const target = findLocationByName(locations, name)
-        if (target) {
-          setFocusId(String(target.id))
-          setFocusTip('')
-          try {
-            mapRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-          } catch {
-            /* 区块不可滚动时忽略 */
-          }
-        } else {
-          setFocusTip(`世界地图里还没有「${String(name ?? '')}」：可以先添加地点或让 AI 反推地点。`)
-        }
-      }, [focusLocation, bundle.locations])
-      const size = worldMapSize(worldForm)
-      const edges = buildWorldEdges(locations)
-      const activeId = hoverId !== null ? String(hoverId) : focusId !== null ? String(focusId) : null
-      const neighborIds = new Set()
-      if (activeId !== null) {
-        for (const edge of edges) {
-          if (String(edge.from.id) === activeId) neighborIds.add(String(edge.to.id))
-          if (String(edge.to.id) === activeId) neighborIds.add(String(edge.from.id))
-        }
-      }
-      const coordsOf = (location) => {
-        if (drag && String(drag.id) === String(location.id)) return { x: drag.x, y: drag.y }
-        return locationCoords(location, worldForm)
-      }
-      const hasWorld = !!bundle.world && (String(bundle.world.name ?? '').trim() !== '' || locations.length > 0)
-      const focusLocationRow = focusId === null ? null : locations.find((location) => String(location.id) === String(focusId)) ?? null
-      const saveWorld = async () => {
-        setBusy(true)
-        try {
-          await api('world.save', { projectId, world: { ...worldForm, id: worldForm.id || 'world' } })
-          onChanged()
-        } catch (error) {
-          window.alert(`保存世界失败：${error.message}`)
-        } finally {
-          setBusy(false)
-        }
-      }
-      const setWorldField = (key, value) => setWorldForm((prev) => ({ ...prev, [key]: value }))
-      const setTravelField = (key, value) => setWorldForm((prev) => ({ ...prev, travelModel: { ...prev.travelModel, [key]: Number(value) || 0 } }))
-      const mapPointOf = (event) => {
-        const svg = svgRef.current
-        if (!svg) return null
-        // 优先用 SVG 坐标变换，正确处理 viewBox 等比缩放产生的留白；失败再退回矩形比例。
-        if (typeof svg.createSVGPoint === 'function' && typeof svg.getScreenCTM === 'function') {
-          try {
-            const matrix = svg.getScreenCTM()
-            if (matrix) {
-              const point = svg.createSVGPoint()
-              point.x = Number(event.clientX) || 0
-              point.y = Number(event.clientY) || 0
-              const local = point.matrixTransform(matrix.inverse())
-              return { x: clampWorldCoord(local.x, size.w), y: clampWorldCoord(local.y, size.h) }
-            }
-          } catch {
-            /* 退回矩形比例 */
-          }
-        }
-        if (typeof svg.getBoundingClientRect !== 'function') return null
-        const rect = svg.getBoundingClientRect()
-        if (!rect.width || !rect.height) return null
-        return {
-          x: clampWorldCoord(((Number(event.clientX) || 0) - rect.left) / rect.width * size.w, size.w),
-          y: clampWorldCoord(((Number(event.clientY) || 0) - rect.top) / rect.height * size.h, size.h),
-        }
-      }
-      const startDrag = (event, location) => {
-        if (event?.button !== undefined && event.button !== 0) return
-        const coords = locationCoords(location, worldForm)
-        setDrag({ id: String(location.id), startClientX: Number(event?.clientX) || 0, startClientY: Number(event?.clientY) || 0, x: coords.x, y: coords.y, moved: false })
-        event?.preventDefault?.()
-        event?.stopPropagation?.()
-      }
-      const moveDrag = (event) => {
-        if (!drag) return
-        const point = mapPointOf(event)
-        if (!point) return
-        const moved = drag.moved || Math.abs((Number(event.clientX) || 0) - drag.startClientX) > 3 || Math.abs((Number(event.clientY) || 0) - drag.startClientY) > 3
-        setDrag({ ...drag, x: point.x, y: point.y, moved })
-      }
-      const endDrag = async () => {
-        if (!drag) return
-        const current = drag
-        setDrag(null)
-        if (!current.moved) return
-        suppressClickRef.current = true
-        const location = locations.find((item) => String(item.id) === current.id)
-        if (!location) return
-        try {
-          await api('entity.upsert', {
-            projectId,
-            kind: 'locations',
-            item: { ...location, coords: { x: clampWorldCoord(current.x, size.w), y: clampWorldCoord(current.y, size.h) } },
-          })
-          onChanged()
-        } catch (error) {
-          window.alert(`保存坐标失败：${error.message}`)
-        }
-      }
-      const locateLocation = (location) => {
-        setFocusId(String(location.id))
-        setFocusTip('')
-        try {
-          mapRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
-        } catch {
-          /* ignore */
-        }
-      }
-      const removeLocation = async (location) => {
-        if (!window.confirm(`删除地点「${location.name || location.id}」？`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'locations', entityId: location.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const typeLabel = (value) => LOCATION_TYPE_LABEL[value] ?? value ?? '其他'
-      return h('div', { className: 'sd-page sd-world-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null,
-            h('h2', { className: 'sd-h2' }, '🌍 世界'),
-            h('p', { className: 'sd-desc' }, '世界设定与坐标地图：地点按类型着色、连接线标距离 / 天数，拖拽节点松手即保存；AI 只通过清单入口生成或反推地点。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: () => setLocEditing({}) }, '＋ 地点'),
-            onAddCart ? h(Btn, { onClick: () => onAddCart(WORLD_CART.build) }, '＋ 加入清单：AI 生成世界') : null,
-            onAddCart ? h(Btn, { onClick: () => onAddCart(WORLD_CART.infer) }, '＋ 加入清单：AI 反推地点') : null,
-            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'))),
-        !hasWorld
-          ? h('div', { className: 'sd-world-guide' },
-              h('div', null,
-                h('strong', null, '还没有世界设定'),
-                h('p', { className: 'sd-hint' }, '先填写下面的名称 / 尺度 / 类型 / 时代，或加入清单让 AI 生成 8–20 个核心地点与连接；生成后可以在地图上拖拽校准。')),
-              onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart(WORLD_CART.build) }, '＋ 加入清单：AI 生成世界地图') : null)
-          : null,
-        h('section', { className: 'sd-section sd-world-settings' },
-          h('div', { className: 'sd-world-settings-head' },
-            h('h3', { className: 'sd-h3' }, '世界设定'),
-            h('span', { className: 'sd-hint' }, hasWorld ? '修改后点保存；坐标 0–1000 归一化。' : '还没有生成，可先让 AI 生成或手动填写。')),
-          h('div', { className: 'sd-world-settings-grid' },
-            h(Field, { label: '世界名称' }, h(TextInput, { value: worldForm.name, onChange: (value) => setWorldField('name', value), placeholder: '如：大唐天宝' })),
-            h(Field, { label: '尺度' }, h(Select, { value: worldForm.scale, onChange: (value) => setWorldField('scale', value), options: WORLD_SCALE_OPTIONS.map(([value, label]) => ({ value, label })) })),
-            h(Field, { label: '背景类型' }, h(Select, { value: worldForm.kind, onChange: (value) => setWorldField('kind', value), options: WORLD_KIND_OPTIONS.map(([value, label]) => ({ value, label })) })),
-            h(Field, { label: '时代' }, h(TextInput, { value: worldForm.era, onChange: (value) => setWorldField('era', value), placeholder: '如：唐·天宝年间' })),
-            h(Field, { label: '步行 km/日' }, h(TextInput, { value: worldForm.travelModel.walkKmPerDay, type: 'number', onChange: (value) => setTravelField('walkKmPerDay', value) })),
-            h(Field, { label: '骑马 km/日' }, h(TextInput, { value: worldForm.travelModel.horseKmPerDay, type: 'number', onChange: (value) => setTravelField('horseKmPerDay', value) })),
-            h(Field, { label: '行船 km/日' }, h(TextInput, { value: worldForm.travelModel.boatKmPerDay, type: 'number', onChange: (value) => setTravelField('boatKmPerDay', value) }))),
-          h('div', { className: 'sd-world-settings-actions' },
-            h(Btn, { kind: 'primary', onClick: saveWorld, disabled: busy }, busy ? '保存中…' : '保存世界'),
-            h('span', { className: 'sd-hint' }, '行程以 connections 的 distanceKm / days 为准；地图坐标只用于相对方位。'))),
-        h('section', { className: 'sd-world-map', ref: mapRef },
-          h('div', { className: 'sd-world-map-head' },
-            h('h3', { className: 'sd-h3' }, '🗺️ 世界地图'),
-            h('span', { className: 'sd-hint' }, `${locations.length} 个地点 · ${edges.length} 条连接 · 拖拽节点松手保存坐标`)),
-          focusTip ? h('div', { className: 'sd-world-focus-banner sd-world-focus-banner-warn' }, focusTip) : null,
-          focusLocationRow ? h('div', { className: 'sd-world-focus-banner' },
-            h('span', null, `正在查看：${focusLocationRow.name}`),
-            h(Btn, { small: true, onClick: () => { setFocusId(null); setFocusTip('') } }, '取消高亮')) : null,
-          h('div', { className: 'sd-world-map-scroll' }, locations.length === 0
-            ? h('div', { className: 'sd-world-map-empty' }, '还没有地点：点「＋ 地点」手动添加，或加入清单让 AI 生成世界地图。')
-            : h('svg', {
-                ref: svgRef,
-                className: 'sd-world-svg',
-                viewBox: `0 0 ${size.w} ${size.h}`,
-                role: 'img',
-                'aria-label': '世界坐标地图',
-                onMouseMove: moveDrag,
-                onMouseUp: endDrag,
-                onMouseLeave: endDrag,
-              },
-              h('rect', { className: 'sd-world-map-bg', x: 0, y: 0, width: size.w, height: size.h }),
-              edges.map((edge) => {
-                const from = coordsOf(edge.from)
-                const to = coordsOf(edge.to)
-                const hot = activeId !== null && (String(edge.from.id) === activeId || String(edge.to.id) === activeId)
-                const distance = Number(edge.connection.distanceKm) || 0
-                const days = Number(edge.connection.days) || 0
-                const label = [distance ? `${distance} km` : '', days ? `${days} 天` : ''].filter(Boolean).join(' / ')
-                return h('g', {
-                  key: edge.id,
-                  className: `sd-world-edge${hot ? ' sd-world-edge-hot' : ''}${activeId !== null && !hot ? ' sd-world-edge-dim' : ''}`,
-                },
-                  h('line', { className: 'sd-world-edge-line', x1: from.x, y1: from.y, x2: to.x, y2: to.y }),
-                  label ? h('text', { className: 'sd-world-edge-label', x: (from.x + to.x) / 2, y: (from.y + to.y) / 2 - 5, textAnchor: 'middle' }, label) : null,
-                  h('title', null, `${edge.from.name} ↔ ${edge.to.name}${label ? '：' + label : ''}`))
-              }),
-              locations.map((location) => {
-                const coords = coordsOf(location)
-                const id = String(location.id)
-                const hot = activeId === id
-                const adjacent = neighborIds.has(id)
-                const className = [
-                  'sd-world-node',
-                  LOCATION_TYPE_CLASS[location.type] ?? 'sd-loc-type-other',
-                  hot ? 'sd-world-node-hot' : '',
-                  adjacent ? 'sd-world-node-adj' : '',
-                  String(focusId) === id ? 'sd-world-node-focus' : '',
-                  drag && String(drag.id) === id ? 'sd-world-node-drag' : '',
-                ].filter(Boolean).join(' ')
-                return h('g', {
-                  key: id,
-                  className,
-                  onMouseDown: (event) => startDrag(event, location),
-                  onMouseEnter: () => setHoverId(id),
-                  onMouseLeave: () => setHoverId(null),
-                  onClick: () => {
-                    if (suppressClickRef.current) {
-                      suppressClickRef.current = false
-                      return
-                    }
-                    setLocEditing(location)
-                  },
-                },
-                  h('circle', { className: 'sd-world-node-circle', cx: coords.x, cy: coords.y, r: 11 }),
-                  h('text', { className: 'sd-world-node-label', x: coords.x, y: coords.y + 25, textAnchor: 'middle' }, location.name || '未命名'),
-                  h('title', null, `${location.name || '未命名'}（${typeLabel(location.type)}）${location.region ? ' · ' + location.region : ''} · 连接 ${(location.connections ?? []).length} 条${location.firstChapter ? ' · 首现第 ' + location.firstChapter + ' 章' : ''}`))
-              }))),
-          h('div', { className: 'sd-world-legend' }, LOCATION_TYPES.map(([value, label]) => h('span', { key: value, className: 'sd-world-legend-item' },
-            h('span', { className: `sd-world-legend-swatch ${LOCATION_TYPE_CLASS[value]}` }), label)))),
-        h('section', { className: 'sd-section sd-world-locations' },
-          h('div', { className: 'sd-world-locations-head' },
-            h('h3', { className: 'sd-h3' }, `地点（${locations.length}）`),
-            h('span', { className: 'sd-hint' }, '点名称在地图上定位；编辑里可改坐标与连接道路。')),
-          locations.length === 0
-            ? h(Empty, null, '还没有地点。点右上角「＋ 地点」开始。')
-            : h('div', { className: 'sd-loc-table' },
-                h('div', { className: 'sd-loc-row sd-loc-row-head' },
-                  h('div', null, '名称'),
-                  h('div', null, '类型'),
-                  h('div', null, '坐标'),
-                  h('div', null, '连接'),
-                  h('div', null, '首现章'),
-                  h('div', { className: 'sd-loc-actions' }, '操作')),
-                locations.map((location) => h('div', {
-                  key: location.id,
-                  className: `sd-loc-row${String(focusId) === String(location.id) ? ' sd-loc-row-focus' : ''}`,
-                },
-                  h('button', { type: 'button', className: 'sd-loc-name', onClick: () => locateLocation(location) }, location.name || '未命名'),
-                  h('span', { className: 'sd-loc-type' }, h('span', { className: `sd-loc-dot ${LOCATION_TYPE_CLASS[location.type] ?? 'sd-loc-type-other'}` }), typeLabel(location.type)),
-                  h('span', { className: 'sd-loc-coords' }, `${locationCoords(location, worldForm).x}, ${locationCoords(location, worldForm).y}`),
-                  h('span', { className: 'sd-loc-connections' }, String((location.connections ?? []).length)),
-                  h('span', { className: 'sd-loc-first' }, location.firstChapter ? `第 ${location.firstChapter} 章` : '—'),
-                  h('div', { className: 'sd-loc-actions' },
-                    h(Btn, { small: true, onClick: () => setLocEditing(location) }, '编辑'),
-                    h(Btn, { small: true, kind: 'danger', onClick: () => removeLocation(location) }, '删除')))))),
-        locEditing !== null
-          ? h(LocationEditor, { location: locEditing?.id ? locEditing : {}, locations: bundle.locations ?? [], world: worldForm, projectId, onClose: () => setLocEditing(null), onSaved: onChanged })
-          : null,
-        viewOpen ? h(HtmlViewDialog, { title: '🌍 世界 · 只读视图', path: novelDeskViewPath('world', projectId), onClose: () => setViewOpen(false) }) : null,
-      )
-    }
-
-    // ── 整本书流水线：数据归一化 + 向导 + 页面 + 总览卡 ─────────
-    function normalizePipeline(input) {
-      const raw = input && typeof input === 'object' ? input : {}
-      const base = raw.base && typeof raw.base === 'object' ? raw.base : {}
-      const budget = raw.budget && typeof raw.budget === 'object' ? raw.budget : {}
-      const prepared = raw.prepared && typeof raw.prepared === 'object' ? raw.prepared : {}
-      const status = PIPELINE_STATUS_META[raw.status] ? raw.status : 'idle'
-      const stages = (Array.isArray(raw.stages) ? raw.stages : []).map((stage, index) => ({
-        id: String(stage?.id ?? `stage-${index + 1}`),
-        kind: String(stage?.kind ?? ''),
-        name: String(stage?.name ?? PIPELINE_STAGE_NAME[stage?.id] ?? PIPELINE_STAGE_NAME[stage?.kind] ?? stage?.id ?? `阶段 ${index + 1}`),
-        status: PIPELINE_STAGE_STATUS_META[stage?.status] ? stage.status : 'pending',
-        chapterFrom: Number(stage?.chapterFrom) || 0,
-        chapterTo: Number(stage?.chapterTo) || 0,
-      }))
-      return {
-        status,
-        mode: raw.mode === 'chapters' ? 'chapters' : 'book',
-        count: Number(raw.count) || 0,
-        runId: String(raw.runId ?? ''),
-        sessionId: String(raw.sessionId ?? ''),
-        targetChapter: Number(raw.targetChapter) || 0,
-        base: {
-          premise: String(base.premise ?? ''),
-          genre: String(base.genre ?? ''),
-          style: String(base.style ?? ''),
-          era: String(base.era ?? ''),
-          locations: String(base.locations ?? ''),
-          characters: String(base.characters ?? ''),
-          volumes: Number(base.volumes) || 3,
-          chaptersPerVolume: Number(base.chaptersPerVolume) || 10,
-          wordsPerChapter: Number(base.wordsPerChapter) || 3000,
-        },
-        budget: {
-          maxTokens: Number(budget.maxTokens) || 0,
-          maxCostCNY: Number(budget.maxCostCNY) || 0,
-          usedTokens: Number(budget.usedTokens) || 0,
-          usedCostCNY: Number(budget.usedCostCNY) || 0,
-        },
-        stages,
-        currentStage: String(raw.currentStage ?? ''),
-        prepared: { blueprint: prepared.blueprint === true, outline: prepared.outline === true },
-        cleanup: normalizePipelineCleanup(raw.cleanup),
-        notes: (Array.isArray(raw.notes) ? raw.notes : []).map((note, index) => ({
-          key: index,
-          at: String(note?.at ?? ''),
-          text: String(note?.text ?? ''),
-        })),
-        updatedAt: String(raw.updatedAt ?? ''),
-      }
-    }
-
-    function pipelineStageInfo(pipeline) {
-      const stages = pipeline.stages ?? []
-      const done = stages.filter((stage) => stage.status === 'done').length
-      const total = stages.length
-      const current = stages.find((stage) => stage.id === pipeline.currentStage) || stages.find((stage) => stage.status === 'running') || null
-      return { done, total, current, percent: total > 0 ? Math.round((done / total) * 100) : pipeline.status === 'done' ? 100 : 0 }
-    }
-
-    function pipelineBudgetInfo(pipeline) {
-      const budget = pipeline.budget ?? {}
-      const tokenPercent = budget.maxTokens > 0 ? (budget.usedTokens / budget.maxTokens) * 100 : null
-      const costPercent = budget.maxCostCNY > 0 ? (budget.usedCostCNY / budget.maxCostCNY) * 100 : null
-      const percents = [tokenPercent, costPercent].filter((value) => value !== null)
-      return { tokenPercent, costPercent, percent: percents.length > 0 ? Math.max(...percents) : null }
-    }
-
-    function pipelinePrepared(pipeline) {
-      return pipeline.prepared?.blueprint === true && pipeline.prepared?.outline === true
-    }
-
-    function pipelineStatusMeta(pipeline) {
-      return PIPELINE_STATUS_META[pipeline.status] ?? PIPELINE_STATUS_META.idle
-    }
-
-    /** 收尾报告（pipeline.cleanup）：不存在时返回 null（老 run 未收尾）。 */
-    function normalizePipelineCleanup(input) {
-      if (!input || typeof input !== 'object' || Array.isArray(input)) return null
-      return {
-        scope: String(input.scope ?? 'all'),
-        acceptedProposals: Number(input.acceptedProposals) || 0,
-        rejectedChapter: Number(input.rejectedChapter) || 0,
-        closedReviews: Number(input.closedReviews) || 0,
-        failed: Array.isArray(input.failed) ? input.failed : [],
-        at: String(input.at ?? ''),
-      }
-    }
-
-    /** 总览/整本书页共用：待采纳提案、未处理审阅、收尾报告。 */
-    function pipelineCleanupStats(bundle) {
-      const proposals = Array.isArray(bundle?.proposals) ? bundle.proposals : null
-      const reviews = Array.isArray(bundle?.reviews) ? bundle.reviews : null
-      const pendingProposals = proposals
-        ? proposals.filter((proposal) => proposal?.status === 'pending').length
-        : Number(bundle?.stats?.pendingProposals) || 0
-      const openReviews = reviews
-        ? reviews.filter((review) => review?.status !== 'fixed' && review?.status !== 'wontfix').length
-        : Number(bundle?.stats?.openReviews) || 0
-      return {
-        pendingProposals,
-        openReviews,
-        cleanup: normalizePipelineCleanup(bundle?.pipeline?.cleanup),
-      }
-    }
-
-    function pipelineInFinalCleanup(pipeline, stageInfo) {
-      if (pipeline.currentStage === 'final-cleanup') return true
-      const current = stageInfo?.current ?? null
-      return Boolean(current && (current.id === 'final-cleanup' || current.kind === 'cleanup'))
-    }
-
-    function formatPipelineTokens(value) {
-      const n = Number(value) || 0
-      if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M'
-      if (n >= 10000) return (n / 10000).toFixed(1) + ' 万'
-      return String(n)
-    }
-
-    function formatPipelineMoney(value) {
-      return '¥' + (Number(value) || 0).toFixed(2)
-    }
-
-    function pipelineWizardEstimate(form) {
-      const chapters = Math.max(0, (Number(form.volumes) || 0) * (Number(form.chaptersPerVolume) || 0))
-      const wordsPerChapter = Math.max(0, Number(form.wordsPerChapter) || 0)
-      return { chapters, words: chapters * wordsPerChapter, tokens: Math.round(chapters * wordsPerChapter * 3.6) }
-    }
-
-    function PipelineWizard({ bundle, projectId, prefill, onClose, onFinished }) {
-      const pipeline = normalizePipeline(bundle.pipeline)
-      const project = bundle.project ?? {}
-      const hasChapters = (bundle.chapters ?? []).length > 0
-      const prepared = pipelinePrepared(pipeline)
-      const currentMaxChapter = Math.max(0, ...(bundle.chapters ?? []).map((chapter) => Number(chapter.id) || 0))
-      const outlineMaxChapter = Math.max(0, ...(bundle.outlines ?? []).map((outline) => Number(outline.chapter) || 0))
-      const suggestedTarget = pipeline.targetChapter || Number(project.targetChapters) || outlineMaxChapter || (currentMaxChapter + 30)
-      const [form, setForm] = useState(() => ({
-        mode: pipeline.mode === 'chapters' ? 'chapters' : 'book',
-        count: pipeline.count || 10,
-        premise: prefill?.premise || prefill?.name || pipeline.base.premise || project.logline || project.name || '',
-        genre: prefill?.genre || pipeline.base.genre || project.genre || '',
-        style: pipeline.base.style,
-        era: pipeline.base.era,
-        locations: pipeline.base.locations,
-        characters: pipeline.base.characters,
-        volumes: pipeline.base.volumes || 3,
-        chaptersPerVolume: pipeline.base.chaptersPerVolume || 10,
-        wordsPerChapter: pipeline.base.wordsPerChapter || 3000,
-        maxTokens: pipeline.budget.maxTokens || 0,
-        maxCostCNY: pipeline.budget.maxCostCNY || 0,
-        targetChapter: suggestedTarget,
-      }))
-      const [busy, setBusy] = useState('')
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const estimate = pipelineWizardEstimate(form)
-      const canStart = prepared || hasChapters
-      const basePayload = () => ({
-        premise: String(form.premise ?? '').trim(),
-        genre: String(form.genre ?? '').trim(),
-        style: String(form.style ?? '').trim(),
-        era: String(form.era ?? '').trim(),
-        locations: String(form.locations ?? '').trim(),
-        characters: String(form.characters ?? '').trim(),
-        volumes: Math.max(1, Number(form.volumes) || 3),
-        chaptersPerVolume: Math.max(1, Number(form.chaptersPerVolume) || 10),
-        wordsPerChapter: Math.max(100, Number(form.wordsPerChapter) || 3000),
-      })
-      const run = async (label, action) => {
-        if (busy) return
-        if (label === 'prepare' && !String(form.premise ?? '').trim()) {
-          window.alert('请先填写一句话设定')
-          return
-        }
-        setBusy(label)
-        try {
-          const value = await action()
-          onFinished?.(value)
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy('')
-        }
-      }
-      const prepare = () => run('prepare', () => api('pipeline.prepare', {
-        projectId,
-        base: basePayload(),
-        budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
-      }))
-      const start = () => run('start', () => api('pipeline.startRun', {
-        projectId,
-        mode: form.mode,
-        count: form.mode === 'chapters' ? Math.max(1, Number(form.count) || 10) : 0,
-        targetChapter: form.mode === 'book' ? Math.max(0, Number(form.targetChapter) || 0) : 0,
-        base: basePayload(),
-        budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
-      }))
-      const statusMeta = pipelineStatusMeta(pipeline)
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide sd-pipe-wizard' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, '📚 生成整本书'),
-            h(Tag, { tone: statusMeta.tone }, statusMeta.label),
-            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body sd-pipe-wizard-body' },
-            h('section', { className: 'sd-pipe-wizard-section' },
-              h('h3', { className: 'sd-h3' }, '生成模式'),
-              h(ViewToggle, {
-                value: form.mode,
-                onChange: (value) => set('mode', value),
-                options: [{ value: 'book', label: '生成全文' }, { value: 'chapters', label: '按 N 章生成' }],
-              }),
-              form.mode === 'chapters'
-                ? h(Field, { label: '生成章数 N', hint: '本次只生成接下来 N 章，写完审一次、修一次后停。' },
-                    h(TextInput, { value: form.count, type: 'number', min: 1, onChange: (value) => set('count', value) }))
-                : h(Field, { label: '目标章数（写到第几章完结）', hint: `当前已写到第 ${currentMaxChapter} 章；留空或小于当前进度会启动失败。` },
-                    h(TextInput, { value: form.targetChapter, type: 'number', min: currentMaxChapter + 1, onChange: (value) => set('targetChapter', value) }))),
-            h('section', { className: 'sd-pipe-wizard-section' },
-              h('h3', { className: 'sd-h3' }, '基础设定'),
-              h('div', { className: 'sd-pipe-wizard-grid' },
-                h(Field, { label: '一句话设定 *' }, h(TextArea, { value: form.premise, rows: 2, placeholder: '如：唐末长安，一名失忆的仵作追查连环命案，牵出二十年前的宫变。', onChange: (value) => set('premise', value) })),
-                h(Field, { label: '类型' }, h(TextInput, { value: form.genre, placeholder: '武侠 / 科幻 / 悬疑 / 言情…', onChange: (value) => set('genre', value) })),
-                h(Field, { label: '风格' }, h(TextInput, { value: form.style, placeholder: '冷峻 / 幽默 / 典雅…', onChange: (value) => set('style', value) })),
-                h(Field, { label: '时代' }, h(TextInput, { value: form.era, placeholder: '如：唐·天宝年间 / 架空蒸汽时代', onChange: (value) => set('era', value) })),
-                h(Field, { label: '地点' }, h(TextInput, { value: form.locations, placeholder: '如：长安、潼关、洛阳', onChange: (value) => set('locations', value) })),
-                h(Field, { label: '关键人物' }, h(TextInput, { value: form.characters, placeholder: '如：沈砚、柳七、裴无咎', onChange: (value) => set('characters', value) }))),
-              hasChapters ? h('p', { className: 'sd-hint' }, '已有正文：可以跳过准备直接生成；现有蓝图 / 大纲将作为依据。') : null),
-            h('section', { className: 'sd-pipe-wizard-section' },
-              h('h3', { className: 'sd-h3' }, '规模'),
-              h('div', { className: 'sd-pipe-wizard-grid' },
-                h(Field, { label: '卷数' }, h(TextInput, { value: form.volumes, type: 'number', min: 1, onChange: (value) => set('volumes', value) })),
-                h(Field, { label: '每卷章数' }, h(TextInput, { value: form.chaptersPerVolume, type: 'number', min: 1, onChange: (value) => set('chaptersPerVolume', value) })),
-                h(Field, { label: '每章字数' }, h(TextInput, { value: form.wordsPerChapter, type: 'number', min: 100, onChange: (value) => set('wordsPerChapter', value) }))),
-              h('div', { className: 'sd-pipe-wizard-total' },
-                h('span', null, `共 ${estimate.chapters} 章`),
-                h('span', null, `预计 ${formatPipelineTokens(estimate.words)} 字`),
-                estimate.tokens > 0 ? h('span', { className: 'sd-hint' }, `粗估 ${formatPipelineTokens(estimate.tokens)} token`) : null)),
-            h('section', { className: 'sd-pipe-wizard-section' },
-              h('h3', { className: 'sd-h3' }, '预算（0 = 不限）'),
-              h('div', { className: 'sd-pipe-wizard-grid' },
-                h(Field, { label: 'token 上限' }, h(TextInput, { value: form.maxTokens, type: 'number', min: 0, onChange: (value) => set('maxTokens', value) })),
-                h(Field, { label: '费用上限（¥）' }, h(TextInput, { value: form.maxCostCNY, type: 'number', min: 0, onChange: (value) => set('maxCostCNY', value) }))),
-              h('p', { className: 'sd-pipe-wizard-warn' }, '⚠ 估算不准，仅作参考：实际用量会受上下文、审阅与修订影响，明显更高。')),
-            h('div', { className: 'sd-pipe-wizard-state' },
-              h('span', { className: 'sd-hint' }, `蓝图：${pipeline.prepared.blueprint ? '已验收' : '未验收'} · 大纲：${pipeline.prepared.outline ? '已验收' : '未验收'} · 当前状态：${statusMeta.label}`),
-              pipeline.status === 'preparing' ? h('span', { className: 'sd-hint' }, '准备阶段进行中：完成后在工作台验收，再回来点②。') : null)),
-          h('div', { className: 'sd-modal-foot sd-pipe-wizard-actions' },
-            h(Btn, { onClick: onClose }, '取消'),
-            h(Btn, {
-              onClick: prepare,
-              disabled: !!busy || pipeline.status === 'running',
-            }, busy === 'prepare' ? '准备中…' : '① 准备蓝图与大纲'),
-            h(Btn, {
-              kind: 'primary',
-              onClick: start,
-              disabled: !!busy || !canStart || pipeline.status === 'preparing' || pipeline.status === 'running',
-              title: canStart ? '' : '需要先完成准备并验收蓝图与大纲（或已有正文）',
-            }, busy === 'start' ? '启动中…' : form.mode === 'chapters' ? `② 生成接下来 ${Math.max(1, Number(form.count) || 10)} 章` : '② 生成全文')),
-        ),
-      )
-    }
-
-    function PipelineRunPanel({ bundle, projectId, onChanged, onGoTab, onOpenWizard }) {
-      const [live, setLive] = useState(null)
-      const [busy, setBusy] = useState('')
-      const pipeline = normalizePipeline(live?.pipeline ?? bundle.pipeline)
-      const stageInfo = pipelineStageInfo(pipeline)
-      const budgetInfo = pipelineBudgetInfo(pipeline)
-      const statusMeta = pipelineStatusMeta(pipeline)
-      const prepared = pipelinePrepared(pipeline)
-      const hasChapters = (bundle.chapters ?? []).length > 0
-      const active = pipeline.status === 'preparing' || pipeline.status === 'running'
-      const load = useCallback(async () => {
-        try {
-          const value = await api('pipeline.get', { projectId })
-          setLive({ pipeline: value?.pipeline ?? value ?? null, usage: value?.usage ?? null })
-        } catch {
-          /* 后端可能尚未实现 pipeline.get：静默降级为 bundle.pipeline */
-        }
-      }, [projectId])
-      useEffect(() => { load() }, [load])
-      useEffect(() => {
-        if (!active) return undefined
-        const timer = setInterval(() => { load() }, PIPELINE_POLL_MS)
-        return () => clearInterval(timer)
-      }, [active, load])
-      const run = async (label, action) => {
-        if (busy) return
-        setBusy(label)
-        try {
-          await action()
-          await load()
-          onChanged?.()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy('')
-        }
-      }
-      const markPrepared = () => run('prepared', () => api('pipeline.markPrepared', { projectId }))
-      const startRun = (mode) => run('start', () => api('pipeline.startRun', { projectId, mode, count: mode === 'chapters' ? pipeline.count || 10 : 0 }))
-      const pause = () => run('pause', () => api('pipeline.pause', { projectId }))
-      const resume = () => run('resume', () => api('pipeline.resume', { projectId }))
-      const stop = () => {
-        if (!window.confirm('停止本次流程？会清除运行状态与阶段进度，正文与账本保留。')) return
-        run('stop', () => api('pipeline.reset', { projectId }))
-      }
-      const restart = () => {
-        if (!window.confirm('重新开始会新建一次 runId 并回到未开始状态；正文、账本与提案都保留。继续？')) return
-        run('restart', () => api('pipeline.reset', { projectId }))
-      }
-      const stuckResume = () => {
-        if (!window.confirm('流程卡住时手动恢复：由后端重新推动会话，继续本次生成。继续？')) return
-        resume()
-      }
-      const openSession = () => {
-        if (!pipeline.sessionId) {
-          window.alert('还没有生成会话：先完成准备并启动一次生成。')
-          return
-        }
-        try {
-          const workspace = clientCtx?.get?.('uiWorkspace')
-          const opened = workspace?.openSession?.(pipeline.sessionId)
-          if (!opened) throw new Error('无法打开会话')
-        } catch {
-          window.alert(`请到工作区会话列表打开该会话（ID：${pipeline.sessionId}）。`)
-        }
-      }
-      const cleanupStats = pipelineCleanupStats(bundle)
-      const cleanup = cleanupStats.cleanup
-      const hasResidual = cleanupStats.pendingProposals > 0 || cleanupStats.openReviews > 0
-      const inFinalCleanup = pipelineInFinalCleanup(pipeline, stageInfo)
-      const finalizeCleanup = () => {
-        if (busy) return
-        if (!window.confirm('收尾清理会采纳非章节类待处理提案、驳回过期章节提案、归档未处理审阅；不可撤销，但正文与历史都会保留。继续？')) return
-        run('cleanup', () => api('pipeline.finalize', { projectId, scope: 'all' }))
-      }
-      const cleanupButton = (kind) => h(Btn, { key: 'cleanup', kind, disabled: !!busy, onClick: finalizeCleanup }, busy === 'cleanup' ? '收尾中…' : '收尾清理')
-      const backfillCleanup = () => {
-        if (busy) return
-        if (!window.confirm('补跑收尾会让 AI 通读全书、补齐人物/事实/事件/高光/伏笔/冲突/地点/大纲/注意力账本（只提案、不改正文），完成后自动清理残留与归档审阅。可能花费较多 token，继续？')) return
-        run('backfill', () => api('pipeline.backfill', { projectId }))
-      }
-      const backfillButton = (kind) => h(Btn, { key: 'backfill', kind, disabled: !!busy, onClick: backfillCleanup }, busy === 'backfill' ? '启动中…' : '补跑收尾（补齐账本）')
-      const cleanupStat = (label, value) => h('div', { key: label, className: 'sd-pipe-cleanup-stat' },
-        h('div', { className: 'sd-pipe-cleanup-value' }, String(value)),
-        h('div', { className: 'sd-pipe-cleanup-label' }, label))
-      const cleanupCard = cleanup
-        ? h('section', { className: 'sd-pipe-cleanup' },
-            h('div', { className: 'sd-pipe-section-head' },
-              h('h3', { className: 'sd-h3' }, '✅ 收尾完成'),
-              h('span', { className: 'sd-hint' }, cleanup.at ? formatDateTime(cleanup.at) : '')),
-            h('div', { className: 'sd-pipe-cleanup-grid' },
-              cleanupStat('采纳提案', cleanup.acceptedProposals),
-              cleanupStat('驳回过期章节提案', cleanup.rejectedChapter),
-              cleanupStat('归档审阅', cleanup.closedReviews),
-              cleanupStat('失败', cleanup.failed.length)),
-            cleanup.failed.length > 0
-              ? h('details', { className: 'sd-pipe-cleanup-failed' },
-                  h('summary', null, `失败 ${cleanup.failed.length} 条（可手动处理）`),
-                  h('div', { className: 'sd-pipe-cleanup-failed-list' }, cleanup.failed.map((item, index) => h('div', { key: index, className: 'sd-pipe-cleanup-failed-item' }, typeof item === 'string' ? item : JSON.stringify(item)))))
-              : null,
-            h('p', { className: 'sd-pipe-cleanup-hint' }, '工作区已清理，可以开始读稿或发起第二次审阅。'),
-            hasResidual ? h('div', { className: 'sd-pipe-cleanup-actions' }, cleanupButton(undefined)) : null)
-        : null
-      const actions = []
-      if (pipeline.status === 'preparing') {
-        actions.push(h(Btn, { key: 'prepared', kind: 'primary', disabled: !!busy, onClick: markPrepared }, busy === 'prepared' ? '标记中…' : '我验收完了：蓝图与大纲'))
-        actions.push(h(Btn, { key: 'pause', onClick: pause, disabled: !!busy }, '暂停'))
-      } else if (pipeline.status === 'running') {
-        actions.push(h(Btn, { key: 'pause', onClick: pause, disabled: !!busy }, busy === 'pause' ? '暂停中…' : '暂停'))
-        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
-      } else if (pipeline.status === 'paused') {
-        actions.push(h(Btn, { key: 'resume', kind: 'primary', onClick: resume, disabled: !!busy }, busy === 'resume' ? '恢复中…' : '恢复'))
-        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
-      } else if (pipeline.status === 'stuck') {
-        actions.push(h(Btn, { key: 'resume', kind: 'primary', onClick: stuckResume, disabled: !!busy }, '手动继续'))
-        actions.push(h(Btn, { key: 'stop', kind: 'danger', onClick: stop, disabled: !!busy }, '停止'))
-      } else if (pipeline.status === 'done') {
-        actions.push(h(Btn, { key: 'agents', kind: 'primary', onClick: () => onGoTab?.('agents') }, '交给独立审稿人'))
-        actions.push(h(Btn, { key: 'attention', onClick: () => onGoTab?.('attention') }, '打开注意力页冷读'))
-        actions.push(backfillButton())
-        if (hasResidual) actions.push(cleanupButton())
-        actions.push(h(Btn, { key: 'restart', onClick: restart, disabled: !!busy }, '重新开始'))
-      } else {
-        actions.push(h(Btn, { key: 'wizard', kind: pipeline.status === 'idle' ? 'primary' : undefined, onClick: onOpenWizard }, '准备蓝图与大纲'))
-        if (prepared || hasChapters) {
-          actions.push(h(Btn, { key: 'book', kind: 'primary', onClick: () => startRun('book'), disabled: !!busy }, busy === 'start' ? '启动中…' : '生成全文'))
-          actions.push(h(Btn, { key: 'chapters', onClick: () => startRun('chapters'), disabled: !!busy }, `生成接下来 ${pipeline.count || 10} 章`))
-        }
-        if (pipeline.status === 'aborted') actions.push(h(Btn, { key: 'restart', onClick: restart, disabled: !!busy }, '重新开始'))
-      }
-      if (pipeline.sessionId) actions.push(h(Btn, { key: 'session', onClick: openSession }, '去对话查看'))
-      if (onOpenWizard) actions.push(h(Btn, { key: 'settings', small: true, onClick: onOpenWizard }, '生成设置'))
-      const refreshUsage = live?.usage ?? null
-      const budgetPercent = budgetInfo.percent
-      const budgetClass = budgetPercent === null ? '' : budgetPercent > 100 ? ' sd-pipe-budget-danger' : budgetPercent > 80 ? ' sd-pipe-budget-warn' : ''
-      return h(React.Fragment, null,
-        h('div', { className: 'sd-pagehead' },
-          h('div', null,
-            h('h2', { className: 'sd-h2' }, '📚 整本书'),
-            h('p', { className: 'sd-desc' }, '全自动长流程：准备 → 作者验收蓝图与大纲 → 生成（按卷写作 / 审阅 / 修订）→ 总审 → 交给独立审稿人。流程由后端新会话的 goal + subagent 自动推进，工作台不发「继续」消息。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: onOpenWizard }, '生成设置'),
-            h(Btn, { onClick: () => { load(); onChanged?.() } }, '刷新'))),
-        h('section', { className: 'sd-pipe-status-card' },
-          h('div', { className: 'sd-pipe-status-head' },
-            h('span', { className: `sd-pipe-status-chip sd-pipe-status-${pipeline.status}` }, statusMeta.label),
-            h('span', { className: 'sd-pipe-status-mode' }, pipeline.mode === 'chapters' ? `按 ${pipeline.count || 10} 章生成` : '生成全文'),
-            h('span', { className: 'sd-pipe-status-target' }, pipeline.targetChapter > 0 ? `目标第 ${pipeline.targetChapter} 章` : '目标章数未定'),
-            h('span', { className: 'sd-pipe-status-session' }, `会话：${pipeline.sessionId ? pipeline.sessionId.slice(0, 12) + '…' : '—'}`)),
-          h('div', { className: 'sd-pipe-status-meta' },
-            h('span', null, stageInfo.current ? `当前阶段：${stageInfo.current.name}（${Math.min(stageInfo.done + 1, stageInfo.total)}/${stageInfo.total}）` : '当前阶段：未开始'),
-            h('span', null, pipeline.runId ? `runId：${pipeline.runId}` : 'runId：—')),
-          h('div', { className: 'sd-pipe-actions' }, actions),
-          h('div', { className: 'sd-pipe-progress' },
-            h('div', { className: 'sd-pipe-progress-head' },
-              h('span', null, `阶段进度 ${stageInfo.done}/${stageInfo.total}`),
-              h('span', null, `${stageInfo.percent}%`)),
-            h('div', { className: 'sd-pipe-progress-bar' }, h('div', { className: 'sd-pipe-progress-fill', style: { width: `${stageInfo.percent}%` } })))),
-        pipeline.status === 'done'
-          ? h(React.Fragment, null,
-              h('div', { className: 'sd-pipe-banner sd-pipe-banner-done' }, '🎉 全书完成：随时把整本书交给独立审稿人冷读，检查每章注意力分与最低章。'),
-              cleanupCard,
-              !cleanup && hasResidual
-                ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-warn sd-pipe-cleanup-banner' },
-                    h('span', null, `生成完成但未收尾：还有 ${cleanupStats.pendingProposals} 条待采纳提案 / ${cleanupStats.openReviews} 条未处理审阅`),
-                    backfillButton('primary'),
-                    cleanupButton())
-                : null)
-          : null,
-        (pipeline.status === 'running' || pipeline.status === 'structuring') && inFinalCleanup
-          ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-info' }, '🧹 收尾中：补齐账本 + 清理残留（人物 / 事实 / 高光 / 伏笔 / 审阅）')
-          : null,
-        pipeline.status === 'stuck' ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-warn' }, '⚠ 流程卡住：会话可能已停止推进。可先「去对话查看」，必要时点「手动继续」让后端恢复（默认不会自动发送）。') : null,
-        budgetPercent !== null && budgetPercent > 100 ? h('div', { className: 'sd-pipe-banner sd-pipe-banner-danger' }, '⚠ 预算已超过上限：建议暂停并在生成设置里调高预算，或停止本次流程。') : null,
-        h('section', { className: 'sd-pipe-budget' },
-          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, '预算'), h('span', { className: 'sd-hint' }, '⚠ 估算不准，仅作参考；0 = 不限')),
-          h('div', { className: 'sd-pipe-budget-row' },
-            h('span', { className: 'sd-pipe-budget-label' }, 'token'),
-            h('span', { className: 'sd-pipe-budget-value' }, `${formatPipelineTokens(pipeline.budget.usedTokens)} / ${pipeline.budget.maxTokens > 0 ? formatPipelineTokens(pipeline.budget.maxTokens) : '不限'}`),
-            h('div', { className: 'sd-pipe-budget-bar' }, h('div', {
-              className: `sd-pipe-budget-fill${budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 100 ? ' sd-pipe-budget-danger' : budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 80 ? ' sd-pipe-budget-warn' : ''}`,
-              style: { width: `${Math.min(100, budgetInfo.tokenPercent ?? 0)}%` },
-            }))),
-          h('div', { className: 'sd-pipe-budget-row' },
-            h('span', { className: 'sd-pipe-budget-label' }, '费用'),
-            h('span', { className: 'sd-pipe-budget-value' }, `${formatPipelineMoney(pipeline.budget.usedCostCNY)} / ${pipeline.budget.maxCostCNY > 0 ? formatPipelineMoney(pipeline.budget.maxCostCNY) : '不限'}`),
-            h('div', { className: 'sd-pipe-budget-bar' }, h('div', {
-              className: `sd-pipe-budget-fill${budgetInfo.costPercent !== null && budgetInfo.costPercent > 100 ? ' sd-pipe-budget-danger' : budgetInfo.costPercent !== null && budgetInfo.costPercent > 80 ? ' sd-pipe-budget-warn' : ''}`,
-              style: { width: `${Math.min(100, budgetInfo.costPercent ?? 0)}%` },
-            }))),
-          refreshUsage ? h('p', { className: 'sd-hint' }, `本次会话用量参考：${formatPipelineTokens(refreshUsage.tokens)} token · ${formatPipelineMoney(refreshUsage.costCNY)}（${budgetPercent === null ? '未设总预算' : `总预算已用 ${Math.round(budgetPercent)}%`}）`) : null,
-          h('div', { className: `sd-pipe-budget-summary${budgetClass}` }, budgetPercent === null ? '总预算：未设上限（可在生成设置里填写 token / 费用上限）' : `总预算使用 ${Math.round(budgetPercent)}%`)),
-        h('section', { className: 'sd-pipe-stages' },
-          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, `阶段（${stageInfo.done}/${stageInfo.total}）`), h('span', { className: 'sd-hint' }, '阶段由 AI 通过工作台工具上报')),
-          pipeline.stages.length === 0
-            ? h('p', { className: 'sd-pipe-empty' }, '阶段还没生成：准备完成后由后端写入准备 / 各卷 / 总审阶段。')
-            : h('div', { className: 'sd-pipe-stage-list' }, pipeline.stages.map((stage, index) => {
-                const stageMeta = PIPELINE_STAGE_STATUS_META[stage.status] ?? PIPELINE_STAGE_STATUS_META.pending
-                const current = String(pipeline.currentStage) === String(stage.id)
-                return h('div', { key: stage.id, className: `sd-pipe-stage${current ? ' sd-pipe-stage-current' : ''} sd-pipe-stage-${stage.status}` },
-                  h('span', { className: 'sd-pipe-stage-icon' }, stageMeta.icon),
-                  h('span', { className: 'sd-pipe-stage-name' }, `${index + 1}. ${stage.name}`),
-                  h('span', { className: 'sd-pipe-stage-range' }, stage.chapterFrom && stage.chapterTo ? `第 ${stage.chapterFrom}–${stage.chapterTo} 章` : stage.chapterFrom ? `第 ${stage.chapterFrom} 章起` : ''),
-                  h(Tag, { tone: stageMeta.tone }, stageMeta.label))
-              }))),
-        h('section', { className: 'sd-pipe-notes' },
-          h('div', { className: 'sd-pipe-section-head' }, h('h3', { className: 'sd-h3' }, `进度提示（${pipeline.notes.length}）`)),
-          pipeline.notes.length === 0
-            ? h('p', { className: 'sd-pipe-empty' }, '还没有进度提示。运行中 AI 会通过工作台工具写回。')
-            : h('div', { className: 'sd-pipe-note-list' }, pipeline.notes.slice(-20).reverse().map((note) => h('div', { key: note.key, className: 'sd-pipe-note' },
-                h('span', { className: 'sd-pipe-note-time' }, note.at ? formatDateTime(note.at) : '—'),
-                h('span', { className: 'sd-pipe-note-text' }, note.text))))),
-        prepared ? h('p', { className: 'sd-pipe-prepared-hint' }, '✓ 蓝图与大纲已验收，可以生成。') : h('p', { className: 'sd-pipe-prepared-hint' }, '准备完成后请先在工作台验收蓝图与大纲（提案页），再回来点「我验收完了」。'),
-      )
-    }
-
-    // ── 扩写：数据归一化 + 方案辅助 ───────────────────────────
-    function normalizeExpansion(input) {
-      const raw = input && typeof input === 'object' ? input : {}
-      const scope = raw.scope && typeof raw.scope === 'object' ? raw.scope : {}
-      const plan = raw.plan && typeof raw.plan === 'object' ? raw.plan : {}
-      const budget = raw.budget && typeof raw.budget === 'object' ? raw.budget : {}
-      const status = EXPANSION_STATUS_META[raw.status] ? raw.status : 'idle'
-      const toArray = (value) => (Array.isArray(value) ? value : [])
-      return {
-        status,
-        mode: raw.mode === 'chapter' ? 'chapter' : 'book',
-        scope: {
-          type: scope.type === 'chapter' ? 'chapter' : 'book',
-          chapters: toArray(scope.chapters).map((value) => Number(value)).filter((value) => value > 0),
-        },
-        targetWords: Number(raw.targetWords) || 0,
-        chapterTargets: toArray(raw.chapterTargets).map((item) => ({
-          chapter: Number(item?.chapter) || 0,
-          targetWords: Number(item?.targetWords) || 0,
-          type: String(item?.type ?? ''),
-          additions: toArray(item?.additions).map(String),
-          outlineChangeIds: toArray(item?.outlineChangeIds).map(String),
-        })).filter((item) => item.chapter > 0),
-        plan: {
-          diagnosis: toArray(plan.diagnosis),
-          capacity: toArray(plan.capacity),
-          outlineChanges: toArray(plan.outlineChanges),
-          confirmations: toArray(plan.confirmations),
-          notes: toArray(plan.notes),
-        },
-        outlineChanges: toArray(raw.outlineChanges),
-        approvedOutlineChanges: toArray(raw.approvedOutlineChanges),
-        runId: String(raw.runId ?? ''),
-        sessionId: String(raw.sessionId ?? ''),
-        budget: {
-          maxTokens: Number(budget.maxTokens) || 0,
-          maxCostCNY: Number(budget.maxCostCNY) || 0,
-          usedTokens: Number(budget.usedTokens) || 0,
-          usedCostCNY: Number(budget.usedCostCNY) || 0,
-        },
-        notes: toArray(raw.notes).map((note, index) => ({ key: index, at: String(note?.at ?? ''), text: String(note?.text ?? '') })),
-        report: raw.report ?? raw.result ?? null,
-        planConfirmed: raw.planConfirmed === true || raw.confirmed === true,
-        updatedAt: String(raw.updatedAt ?? ''),
-      }
-    }
-
-    function expansionBudgetInfo(expansion) {
-      const budget = expansion.budget ?? {}
-      const tokenPercent = budget.maxTokens > 0 ? (budget.usedTokens / budget.maxTokens) * 100 : null
-      const costPercent = budget.maxCostCNY > 0 ? (budget.usedCostCNY / budget.maxCostCNY) * 100 : null
-      const percents = [tokenPercent, costPercent].filter((value) => value !== null)
-      return { tokenPercent, costPercent, percent: percents.length > 0 ? Math.max(...percents) : null }
-    }
-
-    function expansionEntryText(entry) {
-      if (entry === null || entry === undefined) return ''
-      if (typeof entry === 'string' || typeof entry === 'number') return String(entry)
-      if (typeof entry === 'object') {
-        const chapter = Number(entry.chapter) > 0 ? `第 ${entry.chapter} 章：` : ''
-        const candidate = entry.text ?? entry.message ?? entry.note ?? entry.title ?? entry.name ?? entry.diagnosis
-        if (candidate !== undefined && candidate !== null) return chapter + String(candidate)
-        try { return JSON.stringify(entry) } catch { return String(entry) }
-      }
-      return String(entry)
-    }
-
-    function expansionCapacityRows(expansion, bundle) {
-      const chapters = bundle?.chapters ?? []
-      const chapterWords = new Map(chapters.map((chapter) => [Number(chapter.id), Number(chapter.words) || String(chapter.content ?? '').length]))
-      const outlines = bundle?.outlines ?? []
-      const beatCounts = new Map(outlines.map((outline) => [Number(outline.chapter), Array.isArray(outline.beats) ? outline.beats.length : 0]))
-      const targetByChapter = new Map(expansion.chapterTargets.map((item) => [Number(item.chapter), item.targetWords]))
-      const rawRows = expansion.plan.capacity.length > 0 ? expansion.plan.capacity : expansion.chapterTargets
-      return rawRows.map((entry, index) => {
-        if (!entry || typeof entry !== 'object') return null
-        const chapter = Number(entry.chapter ?? entry.id ?? expansion.chapterTargets[index]?.chapter) || 0
-        if (!chapter) return null
-        return {
-          chapter,
-          currentWords: Number(entry.currentWords ?? entry.current ?? entry.words ?? chapterWords.get(chapter)) || 0,
-          beats: Number(entry.beats ?? entry.beatCount ?? beatCounts.get(chapter)) || 0,
-          maxWords: entry.maxWords ?? entry.max ?? entry.capacity ?? null,
-          targetWords: Number(entry.targetWords ?? entry.target ?? targetByChapter.get(chapter)) || 0,
-          level: String(entry.level ?? entry.status ?? ''),
-        }
-      }).filter(Boolean)
-    }
-
-    function expansionReportData(expansion, bundle) {
-      const chapters = bundle?.chapters ?? []
-      const chapterWords = new Map(chapters.map((chapter) => [Number(chapter.id), Number(chapter.words) || String(chapter.content ?? '').length]))
-      const report = expansion.report && typeof expansion.report === 'object' ? expansion.report : {}
-      const achievements = expansion.chapterTargets.map((item) => {
-        const currentWords = Number(chapterWords.get(Number(item.chapter))) || 0
-        return { ...item, currentWords, achieved: item.targetWords > 0 && currentWords >= item.targetWords }
-      })
-      const totalWords = Number(report.totalWords) || chapters.reduce((sum, chapter) => sum + (Number(chapter.words) || 0), 0)
-      const targetTotal = expansion.chapterTargets.reduce((sum, item) => sum + item.targetWords, 0) || expansion.targetWords * (expansion.mode === 'chapter' ? 1 : Math.max(1, chapters.length))
-      const attention = report.attention ?? report.coldRead ?? null
-      return {
-        totalWords,
-        targetTotal,
-        achievements,
-        achievedCount: achievements.filter((item) => item.achieved).length,
-        additions: Array.isArray(report.additions) ? report.additions : [],
-        attention,
-        outlineChanges: expansion.approvedOutlineChanges.length > 0 ? expansion.approvedOutlineChanges : expansion.outlineChanges,
-        notes: expansion.notes,
-      }
-    }
-
-    function expansionOutlineKey(change, index) {
-      return String(change?.id ?? change?.title ?? `outline-change-${index}`)
-    }
-
-    function expansionApprovedChangeKeys(expansion) {
-      const keys = new Set()
-      for (const change of expansion.approvedOutlineChanges ?? []) {
-        for (const candidate of [change?.id, change?.title, change?.proposalId]) {
-          if (candidate !== undefined && candidate !== null && String(candidate)) keys.add(String(candidate))
-        }
-      }
-      return keys
-    }
-
-    function expansionOutlineIsApproved(expansion, change, index) {
-      const keys = expansionApprovedChangeKeys(expansion)
-      return [change?.id, change?.title, change?.proposalId, expansionOutlineKey(change, index)]
-        .filter((value) => value !== undefined && value !== null && String(value))
-        .some((value) => keys.has(String(value)))
-    }
-
-    function expansionConfirmationNotes(expansion) {
-      const keywords = ['待作者批准', '需确认', '请确认', '待确认', '请拍板']
-      return (expansion.plan.notes ?? []).filter((note) => {
-        const text = typeof note === 'string' ? note : expansionEntryText(note)
-        return keywords.some((keyword) => text.includes(keyword))
-      })
-    }
-
-    function openChatSessionById(sessionId) {
-      if (!sessionId) {
-        window.alert('还没有生成会话：先开始一次生成或扩写。')
-        return
-      }
+    // ── 小工具 ────────────────────────────────────────────────
+    function lsGet(key, fallback = '') {
       try {
-        const workspace = clientCtx?.get?.('uiWorkspace')
-        const opened = workspace?.openSession?.(sessionId)
-        if (!opened) throw new Error('无法打开会话')
+        const value = window.localStorage.getItem(key)
+        return value == null ? fallback : value
       } catch {
-        window.alert(`请到工作区会话列表打开该会话（ID：${sessionId}）。`)
+        return fallback
       }
     }
-
-    // ── 扩写子模块：配置 / 方案 / 大纲闸门 / 执行 / 报告 ─────────
-    function ExpansionPanel({ bundle, projectId, intent, onChanged, onStatusChange }) {
-      const chapters = bundle.chapters ?? []
-      const maxChapter = chapters.reduce((max, chapter) => Math.max(max, Number(chapter.id) || 0), 0) || Number(bundle.project?.targetChapters) || 1
-      const [live, setLive] = useState(null)
-      const [busy, setBusy] = useState('')
-      const [planConfirmed, setPlanConfirmed] = useState(false)
-      const [targets, setTargets] = useState(null)
-      const [outlineApproved, setOutlineApproved] = useState([])
-      const intentTokenRef = useRef(null)
-      const expansion = normalizeExpansion(live?.expansion ?? bundle.expansion)
-      const statusMeta = EXPANSION_STATUS_META[expansion.status] ?? EXPANSION_STATUS_META.idle
-      const budgetInfo = expansionBudgetInfo(expansion)
-      const active = expansion.status === 'planning' || expansion.status === 'structuring' || expansion.status === 'running'
-      const hasChapters = chapters.length > 0
-      const outlineChangeList = expansion.plan.outlineChanges.length > 0 ? expansion.plan.outlineChanges : expansion.outlineChanges
-      const outlineChangeSignature = JSON.stringify(outlineChangeList.map((change, index) => expansionOutlineKey(change, index)))
-      const approvedOutlineSignature = JSON.stringify((expansion.approvedOutlineChanges ?? []).map((change) => [change?.id ?? '', change?.title ?? '', change?.proposalId ?? '']))
-      const confirmations = expansion.plan.confirmations
-      const fallbackNotes = expansionConfirmationNotes(expansion)
-      const confirmationCount = confirmations.length > 0 ? confirmations.length : fallbackNotes.length
-      const outlineApprovedCount = outlineChangeList.filter((change, index) => outlineApproved.includes(expansionOutlineKey(change, index))).length
-      const allOutlineApproved = outlineChangeList.length > 0 && outlineApprovedCount >= outlineChangeList.length
-      const [form, setForm] = useState(() => ({
-        mode: intent?.mode === 'chapter' ? 'chapter' : 'book',
-        chapter: Number(intent?.chapter) || maxChapter,
-        targetWords: '',
-        allowOutlineChanges: false,
-        additions: { subplot: false, person: false, place: false, foreshadow: false, conflict: false },
-        additionLimit: 0,
-        sampleChapters: 0,
-        maxTokens: 0,
-        maxCostCNY: 0,
-      }))
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const setAddition = (key, value) => setForm((prev) => ({ ...prev, additions: { ...prev.additions, [key]: value } }))
-      const load = useCallback(async () => {
-        try {
-          const value = await api('expansion.get', { projectId })
-          setLive({ expansion: value?.expansion ?? value ?? null, usage: value?.usage ?? null })
-        } catch {
-          /* 后端可能尚未实现 expansion.get：静默降级为 bundle.expansion */
-        }
-      }, [projectId])
-      useEffect(() => { load() }, [load])
-      useEffect(() => {
-        if (!active) return undefined
-        const timer = setInterval(() => { load() }, EXPANSION_POLL_MS)
-        return () => clearInterval(timer)
-      }, [active, load])
-      useEffect(() => {
-        if (!intent) return
-        const token = String(intent.token ?? '')
-        if (intentTokenRef.current === token) return
-        intentTokenRef.current = token
-        setForm((prev) => ({
-          ...prev,
-          mode: intent.mode === 'chapter' ? 'chapter' : 'book',
-          chapter: Number(intent.chapter) || prev.chapter,
-          targetWords: '',
-        }))
-      }, [intent])
-      const targetsSignature = JSON.stringify(expansion.chapterTargets)
-      useEffect(() => {
-        if (expansion.status !== 'plan-ready') return
-        const fallback = expansion.mode === 'chapter'
-          ? [{ chapter: Number(form.chapter) || maxChapter, targetWords: Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }]
-          : chapters.map((chapter) => ({ chapter: Number(chapter.id), targetWords: Number(expansion.targetWords) || Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }))
-        setTargets(expansion.chapterTargets.length > 0 ? expansion.chapterTargets.map((item) => ({ ...item })) : fallback)
-        setPlanConfirmed(expansion.planConfirmed === true)
-      }, [expansion.status, targetsSignature])
-      useEffect(() => {
-        onStatusChange?.(expansion.status)
-      }, [expansion.status, onStatusChange])
-      useEffect(() => {
-        if (expansion.status !== 'plan-ready' && expansion.status !== 'waiting-outline') return
-        const approvedKeys = expansionApprovedChangeKeys(expansion)
-        const defaults = []
-        outlineChangeList.forEach((change, index) => {
-          const aliases = [change?.id, change?.title, change?.proposalId, expansionOutlineKey(change, index)]
-            .filter((value) => value !== undefined && value !== null && String(value))
-            .map(String)
-          if (aliases.some((alias) => approvedKeys.has(alias))) defaults.push(expansionOutlineKey(change, index))
+    function lsSet(key, value) {
+      try {
+        window.localStorage.setItem(key, String(value))
+      } catch {
+        // 隐私模式 / 配额满：不影响阅读
+      }
+    }
+    function apiBase() {
+      const boot = window.__ND_BOOT__
+      return (boot && boot.apiUrl) || '/novel-desk/api'
+    }
+    async function api(op, payload = {}) {
+      let res
+      try {
+        res = await fetch(apiBase(), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ op, payload, ...payload }),
         })
-        setOutlineApproved(defaults)
-      }, [expansion.status, outlineChangeSignature, approvedOutlineSignature])
-      const toggleOutlineChange = (key) => setOutlineApproved((prev) => (prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]))
-      const approveAllOutline = () => setOutlineApproved(outlineChangeList.map((change, index) => expansionOutlineKey(change, index)))
-      const clearAllOutline = () => setOutlineApproved([])
-      const run = async (label, action) => {
-        if (busy) return
-        setBusy(label)
-        try {
-          await action()
-          await load()
-          onChanged?.()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy('')
-        }
+      } catch {
+        const err = new Error('无法连接小说工作台接口，请确认插件已启用')
+        err.code = 'network'
+        throw err
       }
-      const plan = () => {
-        if (!(Number(form.targetWords) > 0)) {
-          window.alert('请先填写目标字数（必填，无默认值）')
-          return
-        }
-        run('plan', () => api('expansion.plan', {
-          projectId,
-          mode: form.mode,
-          targetWords: Number(form.targetWords),
-          scope: form.mode === 'chapter' ? { type: 'chapter', chapters: [Number(form.chapter) || maxChapter] } : { type: 'book', chapters: [] },
-          allowOutlineChanges: form.allowOutlineChanges === true,
-          additions: form.additions,
-          additionLimit: Math.max(0, Number(form.additionLimit) || 0),
-          sampleChapters: Math.max(0, Number(form.sampleChapters) || 0),
-          budget: { maxTokens: Math.max(0, Number(form.maxTokens) || 0), maxCostCNY: Math.max(0, Number(form.maxCostCNY) || 0) },
-        }))
+      const data = await res.json().catch(() => null)
+      if (!data || data.ok !== true) {
+        const err = new Error((data && data.error && data.error.message) || `请求失败（${res.status}）`)
+        err.code = (data && data.error && data.error.code) || ''
+        err.status = res.status
+        throw err
       }
-      const confirmPlan = async () => {
-        if (busy) return
-        const list = (targets ?? expansion.chapterTargets).filter((item) => Number(item.chapter) > 0)
-        if (list.length === 0) {
-          window.alert('方案里没有可确认的逐章目标')
-          return
-        }
-        setBusy('confirm')
-        try {
-          await api('expansion.confirmPlan', {
-            projectId,
-            approvedOutlineIds: outlineApproved.slice(),
-            chapterTargets: list.map((item) => ({
-              chapter: Number(item.chapter),
-              targetWords: Number(item.targetWords) || 0,
-              type: item.type || 'enrich',
-              additions: Array.isArray(item.additions) ? item.additions : [],
-            })),
-          })
-          setPlanConfirmed(true)
-          await load()
-          onChanged?.()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy('')
-        }
-      }
-      const start = () => run('start', () => api('expansion.start', { projectId }))
-      const approveOutline = () => {
-        const ids = outlineApproved.slice()
-        if (ids.length === 0) {
-          window.alert('请先勾选要批准的大纲变更（可点「全部同意」）')
-          return
-        }
-        if (!window.confirm(`确认选中的 ${ids.length} 条大纲变更并继续扩写？未勾选的条目不会被批准，AI 不会使用；批准后按新结构执行，主线节拍保留。`)) return
-        run('approve', () => api('expansion.approveOutline', { projectId, approvedOutlineIds: ids }).catch((error) => {
-          throw new Error(`${error.message}｜如果你刚勾选了大纲变更仍报这个错，说明 DSH 还在跑旧版宿主：请完全退出 DeepSeek Harness（Cmd+Q）再打开，只刷新页面不够。`)
-        }))
-      }
-      const pause = () => run('pause', () => api('expansion.pause', { projectId }))
-      const resume = () => run('resume', () => api('expansion.resume', { projectId }))
-      const stop = () => {
-        if (!window.confirm('停止本次扩写？会清除本次运行状态，已扩写的正文与备份保留。')) return
-        run('stop', () => api('expansion.reset', { projectId }))
-      }
-      const stuckResume = () => {
-        if (!window.confirm('扩写流程卡住时手动恢复：由后端重新推动会话继续本次扩写。继续？')) return
-        resume()
-      }
-      const again = () => {
-        if (!window.confirm('再次扩写会新建一次 runId 并回到未开始配置；已扩写的正文与历史备份保留。继续？')) return
-        run('again', () => api('expansion.reset', { projectId }))
-      }
-      const openSession = () => openChatSessionById(expansion.sessionId)
-      const section = (title, content, extra) => h('section', { className: 'sd-exp-section' },
-        h('div', { className: 'sd-exp-section-head' }, h('h3', { className: 'sd-h3' }, title), extra ?? null),
-        content)
-      const list = (entries, emptyText) => {
-        const items = (entries ?? []).map(expansionEntryText).filter(Boolean)
-        return items.length > 0
-          ? h('div', { className: 'sd-exp-list' }, items.map((text, index) => h('div', { key: index, className: 'sd-exp-li' }, text)))
-          : h('p', { className: 'sd-exp-empty' }, emptyText)
-      }
-      const budgetBlock = () => h('section', { className: 'sd-exp-budget' },
-        h('div', { className: 'sd-exp-section-head' }, h('h3', { className: 'sd-h3' }, '预算'), h('span', { className: 'sd-hint' }, '⚠ 估算不准，仅作参考；0 = 不限')),
-        h('div', { className: 'sd-exp-budget-row' },
-          h('span', { className: 'sd-exp-budget-label' }, 'token'),
-          h('span', { className: 'sd-exp-budget-value' }, `${formatPipelineTokens(expansion.budget.usedTokens)} / ${expansion.budget.maxTokens > 0 ? formatPipelineTokens(expansion.budget.maxTokens) : '不限'}`),
-          h('div', { className: 'sd-exp-budget-bar' }, h('div', {
-            className: `sd-exp-budget-fill${budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 100 ? ' sd-exp-budget-danger' : budgetInfo.tokenPercent !== null && budgetInfo.tokenPercent > 80 ? ' sd-exp-budget-warn' : ''}`,
-            style: { width: `${Math.min(100, budgetInfo.tokenPercent ?? 0)}%` },
-          }))),
-        h('div', { className: 'sd-exp-budget-row' },
-          h('span', { className: 'sd-exp-budget-label' }, '费用'),
-          h('span', { className: 'sd-exp-budget-value' }, `${formatPipelineMoney(expansion.budget.usedCostCNY)} / ${expansion.budget.maxCostCNY > 0 ? formatPipelineMoney(expansion.budget.maxCostCNY) : '不限'}`),
-          h('div', { className: 'sd-exp-budget-bar' }, h('div', {
-            className: `sd-exp-budget-fill${budgetInfo.costPercent !== null && budgetInfo.costPercent > 100 ? ' sd-exp-budget-danger' : budgetInfo.costPercent !== null && budgetInfo.costPercent > 80 ? ' sd-exp-budget-warn' : ''}`,
-            style: { width: `${Math.min(100, budgetInfo.costPercent ?? 0)}%` },
-          }))),
-        budgetInfo.percent === null
-          ? h('p', { className: 'sd-exp-budget-hint' }, '未设置预算上限（可在配置里填写 token / 费用上限）')
-          : h('p', { className: `sd-exp-budget-hint${budgetInfo.percent > 100 ? ' sd-exp-budget-danger' : budgetInfo.percent > 80 ? ' sd-exp-budget-warn' : ''}` }, `总预算使用 ${Math.round(budgetInfo.percent)}%`))
-      const notesBlock = (title) => {
-        const usage = live?.usage ?? null
-        return section(title ?? `进度提示（${expansion.notes.length}）`,
-          expansion.notes.length === 0
-            ? h('p', { className: 'sd-exp-empty' }, '还没有进度提示。')
-            : h('div', { className: 'sd-exp-note-list' }, expansion.notes.slice(-20).reverse().map((note) => h('div', { key: note.key, className: 'sd-exp-note' },
-                h('span', { className: 'sd-exp-note-time' }, note.at ? formatDateTime(note.at) : '—'),
-                h('span', { className: 'sd-exp-note-text' }, note.text)))),
-          usage ? h('span', { className: 'sd-hint' }, `${formatPipelineTokens(usage.tokens)} token · ${formatPipelineMoney(usage.costCNY)}`) : null)
-      }
-      const renderConfirmationItem = (item, index) => {
-        if (item === null || item === undefined) return null
-        if (typeof item === 'string' || typeof item === 'number') {
-          return h('div', { key: `confirmation-${index}`, className: 'sd-exp-confirm-item' },
-            h('div', { className: 'sd-exp-confirm-question' }, String(item)))
-        }
-        const question = item.question ?? item.title ?? item.text ?? `待确认事项 ${index + 1}`
-        const impact = item.impact ?? item.reason ?? item.note ?? ''
-        const options = Array.isArray(item.options) ? item.options : []
-        return h('div', { key: item.id ?? `confirmation-${index}`, className: 'sd-exp-confirm-item' },
-          h('div', { className: 'sd-exp-confirm-question' }, String(question)),
-          impact ? h('div', { className: 'sd-exp-confirm-impact' }, `影响：${String(impact)}`) : null,
-          options.length > 0
-            ? h('div', { className: 'sd-exp-confirm-options' }, options.map((option, position) => {
-                const label = typeof option === 'string' ? option : option?.label ?? option?.text ?? option?.title ?? JSON.stringify(option)
-                return h(Tag, { key: position, tone: 'muted' }, String(label))
-              }))
-            : null)
-      }
-      const confirmationsBlock = h('section', { className: 'sd-exp-confirm' },
-        h('div', { className: 'sd-exp-confirm-head' },
-          h('h3', { className: 'sd-h3' }, `⚠ 需要你确认（${confirmationCount}）`),
-          h('span', { className: 'sd-hint' }, confirmations.length > 0 ? 'AI 把需要你拍板的事项列在这里' : fallbackNotes.length > 0 ? '来自方案备注' : '')),
-        confirmations.length > 0
-          ? h('div', { className: 'sd-exp-confirm-list' }, confirmations.map(renderConfirmationItem))
-          : fallbackNotes.length > 0
-            ? h('div', { className: 'sd-exp-confirm-list' }, fallbackNotes.map((note, index) => h('div', { key: index, className: 'sd-exp-confirm-item sd-exp-confirm-fallback' },
-                h('div', { className: 'sd-exp-confirm-question' }, expansionEntryText(note)),
-                h('div', { className: 'sd-exp-confirm-impact' }, '方案备注里提到需要你确认（AI 没有单列 confirmations）'))))
-            : h('p', { className: 'sd-exp-confirm-empty' }, '无待确认事项'))
-      const outlineChangeTitle = (change, index) => {
-        if (typeof change === 'string') return change
-        return String(change?.title ?? change?.note ?? change?.change ?? `大纲变更 ${index + 1}`)
-      }
-      const outlineChangeMeta = (change) => {
-        if (!change || typeof change !== 'object') return []
-        const meta = []
-        if (change.priority) meta.push(`优先级：${change.priority}`)
-        if (change.kind) meta.push(`类型：${change.kind}`)
-        const chaptersValue = Array.isArray(change.chapters) && change.chapters.length > 0 ? change.chapters.join('、') : change.chapter
-        if (chaptersValue) meta.push(`章：${chaptersValue}`)
-        if (change.change) meta.push(String(change.change))
-        if (change.note && change.note !== change.change) meta.push(String(change.note))
-        if (change.reason) meta.push(`原因：${change.reason}`)
-        if (change.affects) meta.push(`影响：${Array.isArray(change.affects) ? change.affects.join('、') : String(change.affects)}`)
-        if (Array.isArray(change.newElements) && change.newElements.length > 0) meta.push(`新增元素：${change.newElements.map((item) => (typeof item === 'string' ? item : item?.title ?? item?.name ?? JSON.stringify(item))).join('、')}`)
-        return meta
-      }
-      const outlineConfirmBlock = outlineChangeList.length === 0
-        ? null
-        : h('section', { className: 'sd-exp-outline-confirm' },
-            h('div', { className: 'sd-exp-outline-confirm-head' },
-              h('h3', { className: 'sd-h3' }, `大纲变更清单（${outlineApprovedCount}/${outlineChangeList.length} 已勾选）`),
-              h('div', { className: 'sd-exp-outline-bulk' },
-                h(Btn, { small: true, onClick: approveAllOutline, disabled: !!busy }, '全部同意'),
-                h(Btn, { small: true, onClick: clearAllOutline, disabled: !!busy }, '全部取消'))),
-            h('div', { className: 'sd-exp-outline-list' }, outlineChangeList.map((change, index) => {
-              const key = expansionOutlineKey(change, index)
-              const checked = outlineApproved.includes(key)
-              const already = expansionOutlineIsApproved(expansion, change, index)
-              const meta = outlineChangeMeta(change)
-              return h('label', { key, className: `sd-exp-outline-row${already ? ' sd-exp-outline-row-approved' : ''}` },
-                h('input', { type: 'checkbox', checked, onChange: () => toggleOutlineChange(key) }),
-                h('div', { className: 'sd-exp-outline-main' },
-                  h('div', { className: 'sd-exp-outline-title' }, outlineChangeTitle(change, index), already ? h(Tag, { tone: 'success' }, '已批准') : null),
-                  meta.length > 0 ? h('div', { className: 'sd-exp-outline-meta' }, meta.join(' ｜ ')) : null))
-            })),
-            h('p', { className: 'sd-exp-confirm-footer' },
-              `已批准 ${outlineApprovedCount} / 共 ${outlineChangeList.length} 条大纲变更`,
-              !allOutlineApproved ? '；仍有未批准的条目，执行时会被闸门拦住，AI 不会使用' : ''))
-      const waitingOutlineList = (changes) => h('div', { className: 'sd-exp-outline-list' }, changes.map((change, index) => {
-        const already = expansionOutlineIsApproved(expansion, change, index)
-        const meta = outlineChangeMeta(change)
-        return h('div', { key: `${expansionOutlineKey(change, index)}-${index}`, className: `sd-exp-outline-row sd-exp-outline-row-readonly${already ? ' sd-exp-outline-row-approved' : ''}` },
-          h('span', { className: 'sd-exp-outline-checkmark' }, already ? '✓' : '○'),
-          h('div', { className: 'sd-exp-outline-main' },
-            h('div', { className: 'sd-exp-outline-title' }, outlineChangeTitle(change, index)),
-            meta.length > 0 ? h('div', { className: 'sd-exp-outline-meta' }, meta.join(' ｜ ')) : null),
-          h(Tag, { tone: already ? 'success' : 'warn' }, already ? '已确认' : '待确认'))
-      }))
-      const statusHint = h('div', { className: 'sd-exp-head' },
-        h('div', null,
-          h('h3', { className: 'sd-h3' }, '✍️ 扩写'),
-          h('p', { className: 'sd-desc' }, '把已有正文按你设定的目标字数写厚：目标字数必填、无默认值；大纲是硬边界，动大纲必须先确认。执行全自动，扩写结果自动采纳并保留原稿备份。')),
-        h('span', { className: `sd-exp-status sd-exp-status-${expansion.status}` }, statusMeta.label))
-      const sessionButton = expansion.sessionId ? h(Btn, { small: true, onClick: openSession }, '去对话查看') : null
-      const budgetBars = budgetBlock()
-      const stats = expansionReportData(expansion, bundle)
-
-      if (expansion.status === 'idle') {
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          !hasChapters ? h('p', { className: 'sd-exp-banner sd-exp-banner-warn' }, '还没有正文可扩写：请先在章节页写第 1 章。') : null,
-          h('section', { className: 'sd-exp-config' },
-            section('模式', h('div', { className: 'sd-exp-mode' },
-              h(ViewToggle, { value: form.mode, onChange: (value) => set('mode', value), options: EXPANSION_MODE_OPTIONS.map(([value, label]) => ({ value, label })) }),
-              form.mode === 'chapter'
-                ? h('label', { className: 'sd-exp-chapter-pick' },
-                    h('span', { className: 'sd-hint' }, '选择章节'),
-                    h('select', { className: 'sd-input sd-select-inline', value: String(form.chapter), onChange: (e) => set('chapter', Number(e.target.value) || maxChapter) },
-                      chapters.length === 0
-                        ? h('option', { value: '' }, '还没有章节')
-                        : chapters.map((chapter) => h('option', { key: chapter.id, value: String(chapter.id) }, `第 ${Number(chapter.id)} 章 · ${chapter.title || '未命名'}`))))
-                : null)),
-            section('目标字数（必填，无默认值）', h('div', { className: 'sd-exp-target-row' },
-              h(TextInput, { value: form.targetWords, type: 'number', min: 1, placeholder: '请输入目标字数，例如 2000', onChange: (value) => set('targetWords', value) }),
-              h('span', { className: 'sd-hint' }, form.mode === 'chapter' ? '本章目标字数' : '每章目标字数（方案出来后逐章可改）')),
-              !(Number(form.targetWords) > 0) ? h('p', { className: 'sd-exp-required' }, '⚠ 目标字数必填：填写后才能生成扩写方案。') : null),
-            section('允许新增（默认关）', h('div', { className: 'sd-exp-additions' },
-              EXPANSION_ADDITION_OPTIONS.map(([key, label]) => h('label', { key, className: 'sd-cb' },
-                h('input', { type: 'checkbox', checked: form.additions[key] === true, onChange: (e) => setAddition(key, e.target.checked) }), label)),
-              h('label', { className: 'sd-exp-additions-limit' },
-                h('span', { className: 'sd-hint' }, '上限'),
-                h(TextInput, { value: form.additionLimit, type: 'number', min: 0, onChange: (value) => set('additionLimit', value) }))),
-              h('label', { className: 'sd-cb sd-exp-outline-toggle' },
-                h('input', { type: 'checkbox', checked: form.allowOutlineChanges === true, onChange: (e) => set('allowOutlineChanges', e.target.checked) }),
-                '允许修改大纲（执行时仍需逐项确认）')),
-            section('样张与预算', h('div', { className: 'sd-exp-config-grid' },
-              h(Field, { label: '样张章数', hint: '先扩 1–3 章确认风格；0 = 不抽样' }, h(TextInput, { value: form.sampleChapters, type: 'number', min: 0, onChange: (value) => set('sampleChapters', value) })),
-              h(Field, { label: 'token 上限', hint: '0 = 不限' }, h(TextInput, { value: form.maxTokens, type: 'number', min: 0, onChange: (value) => set('maxTokens', value) })),
-              h(Field, { label: '费用上限（¥）', hint: '0 = 不限' }, h(TextInput, { value: form.maxCostCNY, type: 'number', min: 0, onChange: (value) => set('maxCostCNY', value) }))),
-              h('p', { className: 'sd-exp-budget-hint' }, '⚠ 估算不准，仅作参考；实际用量会受上下文、审阅与修订影响。'))),
-          h('div', { className: 'sd-exp-actions' },
-            h(Btn, { kind: 'primary', onClick: plan, disabled: !!busy || !(Number(form.targetWords) > 0) || !hasChapters }, busy === 'plan' ? '正在生成方案…' : '生成扩写方案')),
-        )
-      }
-      if (expansion.status === 'planning') {
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          h('div', { className: 'sd-exp-banner sd-exp-banner-info' }, 'AI 正在分析大纲与字数，生成扩写方案…（每 10 秒自动刷新）'),
-          h('div', { className: 'sd-exp-actions' }, sessionButton),
-          budgetBars,
-          notesBlock())
-      }
-      if (expansion.status === 'plan-ready') {
-        const capacityRows = expansionCapacityRows(expansion, bundle)
-        const fallbackRows = expansion.mode === 'chapter'
-          ? [{ chapter: Number(form.chapter) || maxChapter, targetWords: Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }]
-          : chapters.map((chapter) => ({ chapter: Number(chapter.id), targetWords: Number(expansion.targetWords) || Number(form.targetWords) || 0, type: 'enrich', additions: [], outlineChangeIds: [] }))
-        const targetRows = targets ?? (expansion.chapterTargets.length > 0 ? expansion.chapterTargets : fallbackRows)
-        const metaRow = h('div', { className: 'sd-exp-meta-row' },
-          h(Tag, { tone: 'brand' }, expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
-          h('span', null, `目标字数：${expansion.targetWords}`),
-          h('span', null, `逐章目标：${expansion.chapterTargets.length} 章`),
-          expansion.scope.chapters.length ? h('span', null, `范围：第 ${expansion.scope.chapters.join('、')} 章`) : null)
-        const capacityTable = capacityRows.length === 0
-          ? h('p', { className: 'sd-exp-empty' }, '方案没有提供容量评估。')
-          : h('div', { className: 'sd-exp-table' },
-              h('div', { className: 'sd-exp-tr sd-exp-tr-head' },
-                h('span', null, '章'), h('span', null, '当前字数'), h('span', null, '大纲节拍'), h('span', null, '最多可到'), h('span', null, '目标')),
-              capacityRows.map((row) => h('div', { key: row.chapter, className: 'sd-exp-tr' },
-                h('span', null, `第 ${row.chapter} 章`),
-                h('span', null, String(row.currentWords)),
-                h('span', null, String(row.beats)),
-                h('span', null, row.maxWords === null ? '—' : String(row.maxWords)),
-                h('span', null, String(row.targetWords)))))
-        const targetTable = targetRows.length === 0
-          ? h('p', { className: 'sd-exp-empty' }, '方案没有提供逐章目标。')
-          : h('div', { className: 'sd-exp-table' },
-              h('div', { className: 'sd-exp-tr sd-exp-tr-head' },
-                h('span', null, '章'), h('span', null, '类型'), h('span', null, '新增'), h('span', null, '目标字数')),
-              targetRows.map((row, index) => h('div', { key: `${row.chapter}-${index}`, className: 'sd-exp-tr' },
-                h('span', null, `第 ${row.chapter} 章`),
-                h('span', null, row.type || '—'),
-                h('span', null, Array.isArray(row.additions) && row.additions.length ? row.additions.join('、') : '—'),
-                h('input', {
-                  className: 'sd-input sd-exp-target-input',
-                  type: 'number',
-                  min: 1,
-                  value: row.targetWords,
-                  onChange: (e) => setTargets(targetRows.map((item, position) => (position === index ? { ...item, targetWords: e.target.value } : item))),
-                }))))
-        const planActions = h('div', { className: 'sd-exp-actions' },
-          !planConfirmed
-            ? h(Btn, { kind: 'primary', onClick: confirmPlan, disabled: !!busy || targetRows.length === 0 }, busy === 'confirm' ? '确认中…' : '确认方案')
-            : h(React.Fragment, null,
-                h(Tag, { tone: 'success' }, outlineChangeList.length > 0 ? `方案已确认 · 已批准 ${outlineApprovedCount}/${outlineChangeList.length} 条` : '方案已确认'),
-                h(Btn, { kind: 'primary', onClick: start, disabled: !!busy }, busy === 'start' ? '启动中…' : expansion.mode === 'chapter' ? '扩写本章' : '全部扩写'),
-                sessionButton))
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          section('方案概览', metaRow),
-          confirmationsBlock,
-          outlineConfirmBlock,
-          section('诊断', list(expansion.plan.diagnosis, '方案没有提供诊断。')),
-          section('每章容量', capacityTable),
-          section('逐章目标（可修改）', targetTable),
-          section('方案备注', list(expansion.plan.notes, '无')),
-          planActions)
-      }
-      if (expansion.status === 'waiting-outline') {
-        const changes = expansion.outlineChanges.length > 0 ? expansion.outlineChanges : expansion.plan.outlineChanges
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 执行中发现需要动大纲，等你确认：确认后 AI 才会按新的结构继续扩写；不确认则只按大纲内可容纳的字数执行。'),
-          confirmationsBlock,
-          section('待确认的大纲变更（勾选你要批准的那几条）', changes.length > 0 ? outlineConfirmBlock : h('p', { className: 'sd-exp-empty' }, '没有大纲变更条目。')),
-          h('div', { className: 'sd-exp-actions' },
-            h(Btn, { kind: 'primary', onClick: approveOutline, disabled: !!busy || outlineApproved.length === 0 }, busy === 'approve' ? '确认中…' : `确认选中的 ${outlineApproved.length} 条并继续`),
-            sessionButton),
-          budgetBars,
-          notesBlock())
-      }
-      if (expansion.status === 'structuring' || expansion.status === 'running') {
-        const targetTotal = stats.achievements.length
-        const percent = targetTotal > 0 ? Math.round((stats.achievedCount / targetTotal) * 100) : 0
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          h('div', { className: 'sd-exp-progress' },
-            h('div', { className: 'sd-exp-progress-head' }, h('span', null, `逐章达成 ${stats.achievedCount}/${targetTotal}`), h('span', null, `${percent}%`)),
-            h('div', { className: 'sd-exp-progress-bar' }, h('div', { className: 'sd-exp-progress-fill', style: { width: `${percent}%` } }))),
-          budgetBars,
-          notesBlock(),
-          h('div', { className: 'sd-exp-actions' },
-            h(Btn, { onClick: pause, disabled: !!busy }, busy === 'pause' ? '暂停中…' : '暂停'),
-            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
-            sessionButton))
-      }
-      if (expansion.status === 'paused') {
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          h('div', { className: 'sd-exp-banner' }, '扩写已暂停：恢复后由后端继续推动本次 run。'),
-          budgetBars,
-          notesBlock(),
-          h('div', { className: 'sd-exp-actions' },
-            h(Btn, { kind: 'primary', onClick: resume, disabled: !!busy }, busy === 'resume' ? '恢复中…' : '恢复'),
-            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
-            sessionButton))
-      }
-      if (expansion.status === 'stuck') {
-        return h('div', { className: 'sd-exp-panel' },
-          statusHint,
-          h('div', { className: 'sd-exp-banner sd-exp-banner-warn' }, '⚠ 扩写流程卡住：会话可能已停止推进。可先「去对话查看」，必要时点「手动继续」让后端恢复。'),
-          notesBlock(),
-          h('div', { className: 'sd-exp-actions' },
-            h(Btn, { kind: 'primary', onClick: stuckResume, disabled: !!busy }, '手动继续'),
-            h(Btn, { kind: 'danger', onClick: stop, disabled: !!busy }, '停止'),
-            sessionButton))
-      }
-      // done
-      return h('div', { className: 'sd-exp-panel' },
-        statusHint,
-        h('div', { className: 'sd-exp-banner sd-exp-banner-done' }, '🎉 扩写完成：结果已自动采纳并保留原稿备份；建议把整本书交给独立审稿人复核冷读分。'),
-        section('扩写报告', h('div', { className: 'sd-exp-report' },
-          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '总字数'), h('span', { className: 'sd-exp-report-value' }, formatPipelineTokens(stats.totalWords))),
-          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '逐章达成'), h('span', { className: 'sd-exp-report-value' }, `${stats.achievedCount}/${stats.achievements.length}`)),
-          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '目标总字数'), h('span', { className: 'sd-exp-report-value' }, formatPipelineTokens(stats.targetTotal))),
-          h('div', { className: 'sd-exp-report-stat' }, h('span', { className: 'sd-exp-report-label' }, '冷读变化'), h('span', { className: 'sd-exp-report-value' }, stats.attention === null ? '—' : String(stats.attention))))),
-        stats.achievements.length > 0 ? section('逐章达成', h('div', { className: 'sd-exp-table' },
-          h('div', { className: 'sd-exp-tr sd-exp-tr-head' }, h('span', null, '章'), h('span', null, '当前字数'), h('span', null, '目标'), h('span', null, '达成')),
-          stats.achievements.map((item) => h('div', { key: item.chapter, className: 'sd-exp-tr' },
-            h('span', null, `第 ${item.chapter} 章`),
-            h('span', null, String(item.currentWords)),
-            h('span', null, String(item.targetWords)),
-            h('span', null, item.achieved ? '✓' : '—'))))) : null,
-        section('新增内容摘要', stats.additions.length > 0 ? list(stats.additions, '无') : h('p', { className: 'sd-exp-empty' }, expansion.notes.length > 0 ? expansionEntryText(expansion.notes[expansion.notes.length - 1]) : '无')),
-        section('大纲变更记录', list(stats.outlineChanges, '无')),
-        h('div', { className: 'sd-exp-actions' },
-          h(Btn, { onClick: again, disabled: !!busy }, '再次扩写'),
-          sessionButton),
-        budgetBars)
+      return data.value
     }
 
-    // ── 整本书页：子导航（生成整本书 / 扩写）──────────────────
-    function PipelineTab({ bundle, projectId, onChanged, onGoTab, onOpenWizard, expansionIntent, onExpansionConsumed }) {
-      const [section, setSection] = useState('pipeline')
-      const [pendingIntent, setPendingIntent] = useState(expansionIntent ?? null)
-      const [expansionStatus, setExpansionStatus] = useState(() => normalizeExpansion(bundle.expansion).status)
-      useEffect(() => {
-        setExpansionStatus(normalizeExpansion(bundle.expansion).status)
-      }, [bundle.expansion])
-      useEffect(() => {
-        if (!expansionIntent) return
-        setPendingIntent(expansionIntent)
-        setSection('expansion')
-        onExpansionConsumed?.()
-      }, [expansionIntent])
-      const needsExpansionConfirm = expansionStatus === 'plan-ready' || expansionStatus === 'waiting-outline'
-      return h('div', { className: 'sd-page sd-pipe-page' },
-        h('div', { className: 'sd-pipe-subnav' },
-          h('button', {
-            type: 'button',
-            className: `sd-pipe-subtab${section === 'pipeline' ? ' sd-pipe-subtab-active' : ''}`,
-            onClick: () => setSection('pipeline'),
-          }, '📚 生成整本书'),
-          h('button', {
-            type: 'button',
-            className: `sd-pipe-subtab${section === 'expansion' ? ' sd-pipe-subtab-active' : ''}`,
-            onClick: () => { setPendingIntent(null); setSection('expansion') },
-          }, '✍️ 扩写', needsExpansionConfirm ? h('span', { className: 'sd-exp-badge' }, '待确认') : null)),
-        section === 'expansion'
-          ? h(ExpansionPanel, { bundle, projectId, intent: pendingIntent, onChanged, onGoTab, onStatusChange: setExpansionStatus })
-          : h(PipelineRunPanel, { bundle, projectId, onChanged, onGoTab, onOpenWizard }))
-    }
-
-    function PipelineOverviewCard({ bundle, onGoTab }) {
-      const pipeline = normalizePipeline(bundle.pipeline)
-      if (pipeline.status === 'idle' && pipeline.stages.length === 0) return null
-      const stageInfo = pipelineStageInfo(pipeline)
-      const budgetInfo = pipelineBudgetInfo(pipeline)
-      const statusMeta = pipelineStatusMeta(pipeline)
-      const cleanupStats = pipelineCleanupStats(bundle)
-      const needsCleanup = pipeline.status === 'done' && (cleanupStats.pendingProposals > 0 || cleanupStats.openReviews > 0)
-      return h('section', { className: 'sd-section sd-pipe-overview' },
-        h('div', { className: 'sd-pipe-overview-head' },
-          h('h3', { className: 'sd-h3' }, '📚 整本书'),
-          h(Tag, { tone: statusMeta.tone }, statusMeta.label),
-          needsCleanup ? h(Tag, { tone: 'warn' }, '待收尾') : null,
-          onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('pipeline') }, needsCleanup ? '去收尾 ▸' : '查看整本书 ▸') : null),
-        h('div', { className: 'sd-pipe-overview-metrics' },
-          h('span', null, stageInfo.current ? `第 ${Math.min(stageInfo.done + 1, stageInfo.total)}/${stageInfo.total} 步 · ${stageInfo.current.name}` : '阶段未开始'),
-          h('span', null, `阶段 ${stageInfo.done}/${stageInfo.total}`),
-          h('span', null, budgetInfo.percent === null ? '预算未设上限' : `预算 ${Math.round(budgetInfo.percent)}%`)),
-        h('div', { className: 'sd-pipe-progress-bar' }, h('div', { className: `sd-pipe-progress-fill${budgetInfo.percent !== null && budgetInfo.percent > 100 ? ' sd-pipe-progress-danger' : ''}`, style: { width: `${stageInfo.percent}%` } })))
-    }
-
-    function TimelineTab({ bundle, projectId, onChanged, onGoTab }) {
-      const [editing, setEditing] = useState(null)
-      const [mode, setMode] = useState('list')
-      const [viewOpen, setViewOpen] = useState(false)
-      const events = [...(bundle.events ?? [])].sort((a, b) => (Number(a.chapter) || 0) - (Number(b.chapter) || 0))
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h(
-          'div',
-          { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '🕰️ 时间线'), h('p', { className: 'sd-desc' }, '按章排列的事件流。故事内时间用于排序与检查；泳道视图按卷或每 20 章分道并画伏笔弧线；全景视图按章聚合事件 / 伏笔埋收 / 冲突 / 高光 / 注意力。')),
-          h(
-            'div',
-            { className: 'sd-pagehead-actions' },
-            h(ViewToggle, { value: mode, onChange: setMode, options: [{ value: 'list', label: '列表' }, { value: 'lane', label: '泳道' }, { value: 'pano', label: '全景' }] }),
-            h(Btn, { onClick: () => setViewOpen(true) }, '只读视图'),
-            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增事件'),
-          ),
-        ),
-        mode === 'pano'
-          ? h(TimelinePanorama, { bundle, onGoTab })
-          : mode === 'lane'
-          ? h(TimelineLanes, { events, foreshadow: bundle.foreshadow ?? [], onEdit: (item) => setEditing(item) })
-          : events.length === 0
-          ? h(Empty, null, '还没有事件。把关键剧情点记进来，时间线会自动成列。')
-          : h(
-              'div',
-              { className: 'sd-timeline' },
-              events.map((event) =>
-                h(
-                  'div',
-                  { key: event.id, className: 'sd-tl-item' },
-                  h('div', { className: 'sd-tl-badge' }, event.chapter ? `第 ${event.chapter} 章` : '未标章'),
-                  h(
-                    'div',
-                    { className: 'sd-tl-card', onClick: () => setEditing(event) },
-                    h('div', { className: 'sd-tl-head' }, h('strong', null, event.title || event.id), h(Tag, { tone: 'muted' }, EVENT_IMPORTANCE[event.importance] || '一般'), event.storyTime ? h(Tag, { tone: 'brand' }, event.storyTime) : null),
-                    event.volume !== undefined && event.volume !== null && event.volume !== '' ? h(Tag, { tone: 'brand' }, String(event.volume).includes('卷') ? String(event.volume) : `第 ${event.volume} 卷`) : null,
-                    event.location ? h('div', { className: 'sd-tl-meta' }, '📍 ' + event.location) : null,
-                    event.summary ? h('div', { className: 'sd-tl-text' }, event.summary) : null,
-                    Array.isArray(event.participants) && event.participants.length > 0 ? h('div', { className: 'sd-tl-meta' }, '👥 ' + event.participants.join('、')) : null,
-                    event.consequences ? h('div', { className: 'sd-tl-meta' }, '➜ ' + event.consequences) : null,
-                  ),
-                ),
-              ),
-            ),
-        editing !== null ? h(EntityEditor, { kind: 'events', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-        viewOpen ? h(HtmlViewDialog, { title: '🕰️ 时间线 · 只读视图', path: novelDeskViewPath('timeline', projectId), onClose: () => setViewOpen(false) }) : null,
-      )
-    }
-
-    // ── 时间线全景：按章聚合所有素材 ──────────────────────────
-    const PANO_SECTIONS = [
-      ['events', '事件'],
-      ['plant', '伏笔埋设'],
-      ['payoff', '伏笔回收'],
-      ['conflicts', '冲突'],
-      ['highlights', '高光'],
-      ['attention', '注意力'],
+    // ── 导出正文（TXT / Markdown / EPUB / DOCX）───────────────
+    // 格式清单是服务端 lib/exporters.js EXPORT_META 的镜像：客户端不能 import Node 模块。
+    const EXPORT_CHOICES = [
+      { format: 'txt', label: 'TXT 纯文本', desc: '按章分节，场景分隔保留 ※，任何编辑器都能开' },
+      { format: 'md', label: 'Markdown', desc: '一级标题作品名、二级标题章名，场景分隔转为 ***' },
+      { format: 'epub', label: 'EPUB 电子书', desc: '带目录的 EPUB 3，手机 / 阅读器 / 微信读书可直接打开' },
+      { format: 'docx', label: 'DOCX 文档', desc: 'Word 打开，标题与提要按样式排版，方便交稿' },
     ]
 
-    function TimelinePanorama({ bundle, onGoTab }) {
-      const [filters, setFilters] = useState({ events: true, plant: true, payoff: true, conflicts: true, highlights: true, attention: true })
-      const [locationFilter, setLocationFilter] = useState('all')
-      const toggleFilter = (key) => setFilters((prev) => ({ ...prev, [key]: !prev[key] }))
-      const chapters = bundle.chapters ?? []
-      const titleOf = (chapter) => String(chapters.find((item) => Number(item.id) === Number(chapter))?.title ?? '').trim()
-      const chapterLocation = new Map(chapters.map((chapter) => [Number(chapter.id), String(chapter.location ?? '').trim()]))
-      const truncate = (text, size = 40) => {
-        const value = String(text ?? '').trim()
-        return value.length > size ? value.slice(0, size) + '…' : value
-      }
-      const byChapter = new Map()
-      const ensure = (chapter) => {
-        const number = Number(chapter)
-        if (!Number.isFinite(number) || number <= 0) return null
-        if (!byChapter.has(number)) byChapter.set(number, { chapter: number, location: '', events: [], plants: [], payoffs: [], conflicts: [], highlights: [] })
-        return byChapter.get(number)
-      }
-      for (const event of bundle.events ?? []) ensure(event.chapter)?.events.push(event)
-      for (const item of bundle.foreshadow ?? []) {
-        if (Number(item.setupChapter) > 0) ensure(item.setupChapter)?.plants.push(item)
-        if (Number(item.payoffChapter) > 0) ensure(item.payoffChapter)?.payoffs.push(item)
-      }
-      for (const conflict of bundle.conflicts ?? []) ensure(conflict.resolveChapter)?.conflicts.push(conflict)
-      for (const highlight of bundle.highlights ?? []) ensure(highlight.chapter)?.highlights.push(highlight)
-      const attentionByChapter = new Map(attentionRows(bundle).map((row) => [Number(row.chapter), row]))
-      for (const chapter of attentionByChapter.keys()) ensure(chapter)
-      const all = [...byChapter.values()].sort((a, b) => a.chapter - b.chapter)
-      // 本章地点：chapter.location 优先，缺则取本章第一个 events.location
-      for (const entry of all) {
-        entry.location = chapterLocation.get(entry.chapter) || String(entry.events.find((event) => String(event.location ?? '').trim() !== '')?.location ?? '').trim()
-      }
-      if (all.length === 0) return h(Empty, null, '还没有可展示的素材。先写事件 / 伏笔 / 冲突 / 高光，或给章节标注意力。')
-      const locationValues = [...new Set(all.map((entry) => entry.location).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN'))
-      const visibleAll = all.filter((entry) => (locationFilter === 'all' ? true : locationFilter === '__none__' ? !entry.location : entry.location === locationFilter))
-      const cards = []
-      for (const entry of visibleAll) {
-        const sections = []
-        if (filters.events && entry.events.length > 0) {
-          sections.push(['事件', entry.events.map((event) => ({
-            key: `event-${event.id}`,
-            main: event.title || event.id || '未命名事件',
-            meta: [event.storyTime, event.location ? '📍 ' + event.location : ''].filter(Boolean).join(' · '),
-          }))])
-        }
-        if (filters.plant && entry.plants.length > 0) {
-          sections.push(['伏笔·埋', entry.plants.map((item) => ({
-            key: `plant-${item.id}`,
-            main: item.title || '未命名伏笔',
-            meta: Number(item.payoffChapter) > 0 ? `→ 计划第 ${item.payoffChapter} 章回收` : '→ 未定回收',
-          }))])
-        }
-        if (filters.payoff && entry.payoffs.length > 0) {
-          sections.push(['伏笔·收', entry.payoffs.map((item) => ({
-            key: `payoff-${item.id}`,
-            main: item.title || '未命名伏笔',
-            meta: Number(item.setupChapter) > 0 ? `第 ${item.setupChapter} 章 →` : '未定埋设 →',
-          }))])
-        }
-        if (filters.conflicts && entry.conflicts.length > 0) {
-          sections.push(['冲突', entry.conflicts.map((conflict) => ({
-            key: `conflict-${conflict.id}`,
-            main: conflict.title || '未命名冲突',
-            meta: [CONFLICT_STATUS[conflict.status] ?? conflict.status ?? '', displayValue('type', conflict.type)].filter((value) => value && value !== '—').join(' / '),
-          }))])
-        }
-        if (filters.highlights && entry.highlights.length > 0) {
-          sections.push(['高光', entry.highlights.map((highlight) => ({
-            key: `highlight-${highlight.id}`,
-            main: truncate(highlight.title || highlight.quote || highlight.text || '未命名高光'),
-            meta: displayValue('type', highlight.type) === '—' ? '' : displayValue('type', highlight.type),
-          }))])
-        }
-        const attention = attentionByChapter.get(entry.chapter) ?? null
-        if (sections.length === 0 && !(filters.attention && attention)) continue
-        cards.push({ entry, sections, attention })
-      }
-      const attentionText = (attention) => {
-        if (!attention) return '未标注意力'
-        return ['⚡', attentionHasScore(attention) ? `${Number(attention.score)} 分` : '未测', ATTENTION_TYPE_LABEL[attention.type] ?? '', attention.verdict ?? '']
-          .filter(Boolean).join(' · ')
-      }
-      const renderRow = (row) => h('div', { key: row.key, className: 'sd-pano-row' },
-        h('span', { className: 'sd-pano-row-main' }, row.main),
-        row.meta ? h('span', { className: 'sd-pano-row-meta' }, row.meta) : null)
-      const renderSection = ([label, rows]) => h('div', { key: label, className: 'sd-pano-sec' },
-        h('div', { className: 'sd-pano-sec-label' }, label),
-        rows.map(renderRow))
-      const renderCard = ({ entry, sections, attention }) => h('section', { key: entry.chapter, className: 'sd-pano-card' },
-        h('div', { className: 'sd-pano-head' },
-          h('button', { type: 'button', className: 'sd-pano-title', title: onGoTab ? '去章节页' : '章节', onClick: () => onGoTab && onGoTab('chapters') },
-            `第 ${entry.chapter} 章${titleOf(entry.chapter) ? `《${titleOf(entry.chapter)}》` : ''}`),
-          filters.attention
-            ? h('span', { className: `sd-pano-att${attention ? '' : ' sd-pano-att-empty'}` }, attentionText(attention))
-            : null,
-          entry.location ? h('span', { className: 'sd-pano-loc', title: '本章地点' }, `📍 ${entry.location}`) : null),
-        sections.map(renderSection))
-      return h('div', { className: 'sd-pano-wrap' },
-        h('div', { className: 'sd-pano-toolbar' },
-          PANO_SECTIONS.map(([key, label]) => h('label', { key, className: 'sd-cb sd-pano-filter' },
-            h('input', { type: 'checkbox', checked: filters[key], onChange: () => toggleFilter(key) }), label)),
-          h('label', { className: 'sd-pano-location' },
-            h('span', { className: 'sd-hint' }, '地点'),
-            h('select', {
-              className: 'sd-input sd-select-inline sd-pano-location-select',
-              value: locationFilter,
-              onChange: (e) => setLocationFilter(e.target.value),
-            },
-              h('option', { value: 'all' }, '全部地点'),
-              locationValues.map((location) => h('option', { key: location, value: location }, location)),
-              h('option', { value: '__none__' }, '未标地点'))),
-          h('span', { className: 'sd-hint sd-pano-count' }, `${cards.length} 章有素材`)),
-        cards.length === 0
-          ? h(Empty, null, '当前过滤条件下没有可展示的素材，请至少打开一个开关。')
-          : h('div', { className: 'sd-pano-cards' }, cards.map(renderCard)),
-      )
-    }
-
-    // ── 总览页 ────────────────────────────────────────────────
-    function WriterStats({ data }) {
-      if (!data) return h('div', { className: 'sd-hint' }, '正在统计写作数据…')
-      const m = data.metrics ?? {}
-      const wb = data.workbench ?? {}
-      const chat = data.chat ?? {}
-      const fmt = (n) => {
-        const value = Number(n) || 0
-        if (value >= 1000000) return (value / 1000000).toFixed(2) + 'M'
-        if (value >= 10000) return (value / 10000).toFixed(1) + ' 万'
-        return String(value)
-      }
-      const cards = [
-        ['总字数', fmt(m.words), '✍️'],
-        ['修改次数', String(m.edits ?? 0), '🩹'],
-        ['审稿', `${m.reviews ?? 0}`, `待处理 ${m.openReviews ?? 0}`],
-        ['提案采纳', String(m.acceptedProposals ?? 0), `待处理 ${m.pendingProposals ?? 0}`],
-        ['工作台 AI', fmt(wb.total?.totalTokens), `${m.aiCalls ?? 0} 次`],
-        ['对话 token', fmt(chat.totalTokens), `${m.sessionCount ?? chat.sessions?.length ?? 0} 会话 + ${m.subagentCount ?? 0} 子 Agent`],
-        ['AI 协作', `${m.chatHours ?? 0}h`, `生成 ${m.aiMinutes ?? 0} 分钟`],
-        ['预估费用', `¥${Number(m.totalCostCNY ?? 0).toFixed(2)}`, `$${Number(m.totalCostUSD ?? 0).toFixed(2)}`],
-        ['活跃天数', String(m.activeDays ?? 0), '最近 14 天'],
-      ]
-      const activity = data.activity ?? []
-      const max = Math.max(1, ...activity.map((day) => (day.workbenchTokens ?? 0) + (day.chatTokens ?? 0)))
-      return h('div', { className: 'sd-writer-dash' },
-        h('div', { className: 'sd-cards sd-writer-cards' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' },
-          h('div', { className: 'sd-card-icon' }, icon),
-          h('div', { className: 'sd-card-value' }, String(value)),
-          h('div', { className: 'sd-card-label' }, label)))),
-        activity.length > 0 ? h('div', { className: 'sd-activity' },
-          h('div', { className: 'sd-hint' }, '最近 14 天 AI 协作量'),
-          h('div', { className: 'sd-activity-bars' }, activity.map((day) => {
-            const total = (day.workbenchTokens ?? 0) + (day.chatTokens ?? 0)
-            return h('div', { key: day.date, className: 'sd-activity-col', title: `${day.date}：工作台 ${day.workbenchTokens ?? 0} / 对话 ${day.chatTokens ?? 0} token` },
-              h('div', { className: 'sd-activity-bar', style: { height: `${Math.max(4, Math.round((total / max) * 100))}%` } }),
-              h('span', null, day.date.slice(5)))
-          }))) : null,
-      )
-    }
-
-    // ── 一号原则：总览页 hero（口号 + 注意力三指标 + 去注意力页）──
-    function PrincipleHero({ bundle, onGoTab }) {
-      const stats = attentionStats(bundle)
-      const hasScores = stats.scored.length > 0
-      const statCell = (label, value, unit, hint) => h('div', { key: label, className: 'sd-principle-hero-stat' },
-        h('div', { className: 'sd-principle-hero-label' }, label),
-        h('div', { className: `sd-principle-hero-value${value === '—' ? ' sd-principle-hero-value-empty' : ''}` },
-          value, unit ? h('span', { className: 'sd-principle-hero-unit' }, unit) : null),
-        hint ? h('div', { className: 'sd-principle-hero-stat-hint' }, hint) : null)
-      return h('section', { className: 'sd-principle-hero' },
-        h('div', { className: 'sd-principle-hero-main' },
-          h('h2', { className: 'sd-principle-hero-slogan' }, PRINCIPLE_SLOGAN),
-          h('p', { className: 'sd-principle-hero-sub' }, PRINCIPLE_SUB),
-          h('p', { className: 'sd-principle-hero-hint' }, hasScores
-            ? PRINCIPLE_HINT
-            : '还没有注意力记录：去分工页让独立审稿人冷读，或写下一章方案时让 AI 自动带设计。')),
-        h('div', { className: 'sd-principle-hero-stats' },
-          statCell('平均注意力', stats.average === null ? '—' : String(stats.average), stats.average === null ? '' : '/100', hasScores ? `${stats.scored.length} 章有实测分` : '暂无实测分'),
-          h('div', { className: 'sd-principle-hero-stat' },
-            h('div', { className: 'sd-principle-hero-label' }, '最低三章'),
-            stats.lowest.length === 0
-              ? h('div', { className: 'sd-principle-hero-value sd-principle-hero-value-empty' }, '—')
-              : h('div', { className: 'sd-principle-hero-list' }, stats.lowest.map((row) => h('span', { key: row.id ?? `hero-low-${row.chapter}`, className: 'sd-principle-hero-list-item' }, `第 ${Number(row.chapter)} 章 · ${Number(row.score)}`))),
-            stats.lowest.length === 0 ? h('div', { className: 'sd-principle-hero-stat-hint' }, '暂无实测分') : null),
-          statCell('未标注意力', String(stats.unmarked.length), '章', '有正文但无注意力记录')),
-        h('div', { className: 'sd-principle-hero-actions' },
-          onGoTab ? h(Btn, { kind: 'primary', onClick: () => onGoTab('attention') }, '打开注意力页') : null,
-          onGoTab ? h(Btn, { onClick: () => onGoTab('agents') }, '去分工页冷读') : null),
-      )
-    }
-
-    function OverviewTab({ bundle, projectId, onChanged, onAddCart, cartCount = 0, onOpenCart, onGoTab }) {
-      const [form, setForm] = useState(() => ({ ...bundle.project }))
-      const [busy, setBusy] = useState(false)
-      const [dash, setDash] = useState(null)
-      useEffect(() => setForm({ ...bundle.project }), [bundle.project.id])
-      useEffect(() => {
-        let alive = true
-        api('usage.summary', { projectId }).then((value) => { if (alive) setDash(value) }).catch(() => {})
-        return () => { alive = false }
-      }, [projectId])
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const save = async () => {
-        setBusy(true)
-        try {
-          await api('project.update', { projectId, patch: form })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-      const stats = bundle.stats
-      const cards = [
-        ['章节', stats.chapters, '📄'],
-        ['字数', stats.words, '✍️'],
-        ['大纲', stats.outlines ?? 0, '🗂️'],
-        ['人物', stats.characters, '👤'],
-        ['事实', stats.facts, '⚖️'],
-        ['未回收伏笔', stats.openForeshadow, '🧩'],
-        ['进行中冲突', stats.activeConflicts, '⚔️'],
-        ['高光', stats.highlights, '✨'],
-        ['预设', stats.presets, '🎛️'],
-      ]
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h(PrincipleHero, { bundle, onGoTab }),
-        h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '📖 ' + bundle.project.name), h('p', { className: 'sd-desc' }, bundle.project.logline || '还没有一句话简介。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { kind: 'primary', onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'))),
-        h('div', { className: 'sd-cart-banner' },
-          h('strong', null, `🧺 清单 ${cartCount} 项`),
-          onOpenCart ? h(Btn, { small: true, kind: 'primary', onClick: onOpenCart }, '打开清单') : null),
-        h('section', { className: 'sd-section sd-mt' }, h('h3', { className: 'sd-h3' }, '写作仪表盘'), h(WriterStats, { data: dash })),
-        h('div', { className: 'sd-cards sd-mt' }, cards.map(([label, value, icon]) => h('div', { key: label, className: 'sd-card' }, h('div', { className: 'sd-card-icon' }, icon), h('div', { className: 'sd-card-value' }, String(value)), h('div', { className: 'sd-card-label' }, label)))),
-        h(AttentionOverviewCard, { bundle, onGoTab, onAddCart }),
-        h(PipelineOverviewCard, { bundle, onGoTab }),
-        h(FreshReadCard, { bundle, projectId, compact: true }),
-        h('div', { className: 'sd-two-col' },
-          h('section', { className: 'sd-section' },
-            h('h3', { className: 'sd-h3' }, '作品设定'),
-            h('div', { className: 'sd-form sd-form-2' },
-              h(Field, { label: '书名' }, h(TextInput, { value: form.name, onChange: (v) => set('name', v) })),
-              h(Field, { label: '类型' }, h(TextInput, { value: form.genre, onChange: (v) => set('genre', v), placeholder: '武侠 / 科幻 / 悬疑…' })),
-              h(Field, { label: '视角' }, h(TextInput, { value: form.pov, onChange: (v) => set('pov', v) })),
-              h(Field, { label: '时态' }, h(TextInput, { value: form.tense, onChange: (v) => set('tense', v) })),
-              h(Field, { label: '目标章数' }, h(TextInput, { value: form.targetChapters, type: 'number', onChange: (v) => set('targetChapters', Number(v) || 0) })),
-              h(Field, { label: '目标字数' }, h(TextInput, { value: form.targetWords, type: 'number', onChange: (v) => set('targetWords', Number(v) || 0) })),
-              h(Field, { label: '来源目录（可选）', hint: '仅记录导入来源；每本书的聊天工作区自动建在 ~/StoryDesk/projects/<id>' }, h(TextInput, { value: form.rootPath ?? '', placeholder: '/Users/you/你的小说', onChange: (v) => set('rootPath', v) })),
-            ),
-            h(Field, { label: '一句话简介' }, h(TextArea, { value: form.logline, rows: 2, onChange: (v) => set('logline', v) })),
-            h(Field, { label: '故事梗概' }, h(TextArea, { value: form.description, rows: 5, onChange: (v) => set('description', v) })),
-            h('div', { className: 'sd-form-actions' }, h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '保存中…' : '保存设定')),
-          ),
-          h('section', { className: 'sd-section' },
-            h('h3', { className: 'sd-h3' }, `一致性检查（${bundle.checks.length}）`),
-            bundle.checks.length === 0
-              ? h(Empty, null, '没有发现问题。')
-              : h('div', { className: 'sd-checks' }, bundle.checks.map((check) => h('div', { key: check.id, className: `sd-check sd-check-${check.level}` },
-                  h('div', { className: 'sd-check-main' }, h('div', { className: 'sd-check-title' }, check.title), h('div', { className: 'sd-check-detail' }, check.detail)),
-                  onAddCart ? h(Btn, { small: true, onClick: () => onAddCart({ kind: 'check', id: check.id, chapter: check.chapter, title: check.title, detail: check.detail }) }, '加入清单') : null))),
-            h('h3', { className: 'sd-h3 sd-mt' }, '最近章节'),
-            bundle.chapters.length === 0
-              ? h(Empty, null, '还没有章节。')
-              : h('div', { className: 'sd-mini-list' }, bundle.chapters.slice(-5).reverse().map((c) => h('div', { key: c.id, className: 'sd-mini-row' }, h(Tag, { tone: 'muted' }, c.id), h('span', { className: 'sd-mini-title' }, c.title), h('span', { className: 'sd-mini-meta' }, `${c.words} 字`)))),
-          ),
-        ),
-      )
-    }
-
-    // ── 设置页 ────────────────────────────────────────────────
-    function SettingsTab({ bundle, projectId, onChanged, onProjectDeleted }) {
-      const [busy, setBusy] = useState(false)
-      const exportAs = async (format) => {
-        setBusy(true)
-        try {
-          await downloadExport(projectId, format)
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-      const removeProject = async () => {
-        if (!window.confirm(`删除作品《${bundle.project.name}》及其全部章节、设定？此操作不可撤销。`)) return
-        setBusy(true)
-        try {
-          await api('project.delete', { projectId })
-          onProjectDeleted()
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy(false)
-        }
-      }
-      return h(
-        'div',
-        { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '⚙️ 设置'), h('p', { className: 'sd-desc' }, '工作台数据全部是普通文件，可直接备份、进 Git、用别的编辑器打开。'))),
-        h('section', { className: 'sd-section' },
-          h('h3', { className: 'sd-h3' }, '数据位置'),
-          h('div', { className: 'sd-code' }, bundle.root || '~/StoryDesk'),
-          h('p', { className: 'sd-hint' }, `作品工作区：${bundle.project.workspacePath || '（刷新后自动创建）'}`),
-          h('p', { className: 'sd-hint' }, '每个作品一个目录：project.json、chapters/*.md、facts.json、events.json、foreshadow.json、conflicts.json、characters.json、highlights.json、presets.json。'),
-          h('h3', { className: 'sd-h3 sd-mt' }, '导出与维护'),
-          h('div', { className: 'sd-form-actions' },
-            h(Btn, { onClick: () => exportAs('md'), disabled: busy }, '导出 Markdown 合集'),
-            h(Btn, { onClick: () => exportAs('epub'), disabled: busy }, '导出 EPUB'),
-            h(Btn, { onClick: () => exportAs('docx'), disabled: busy }, '导出 DOCX'),
-          ),
-          h('h3', { className: 'sd-h3 sd-mt' }, '危险操作'),
-          h('div', { className: 'sd-form-actions' }, h(Btn, { kind: 'danger', onClick: removeProject, disabled: busy }, '删除本作品')),
-        ),
-      )
-    }
-
-    // ── 新建作品 ──────────────────────────────────────────────
-    function CreateProjectDialog({ onClose, onCreated }) {
-      const [form, setForm] = useState({
-        name: '',
-        genre: '',
-        logline: '',
-        targetChapters: 0,
-        targetWords: 0,
-        worldKind: 'mixed',
-        worldScale: 'region',
-        worldEra: '',
-        generateWorld: true,
-        openPipeline: false,
-      })
-      const [busy, setBusy] = useState(false)
-      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
-      const save = async () => {
-        if (!String(form.name).trim()) {
-          window.alert('请填写作品名')
-          return
-        }
-        setBusy(true)
-        let project = null
-        try {
-          // 世界设定不进 project 字段：仅作为 world-build 任务 instruction（契约见 docs/WORLD-MODEL.md）。
-          project = await api('project.create', {
-            input: {
-              name: form.name,
-              genre: form.genre,
-              logline: form.logline,
-              targetChapters: form.targetChapters,
-              targetWords: form.targetWords,
-            },
-          })
-          onCreated(
-            project.id,
-            form.openPipeline === true
-              ? { openPipeline: true, prefill: { name: form.name, premise: form.logline || '', genre: form.genre || '' } }
-              : null,
-          )
-          onClose()
-        } catch (error) {
-          window.alert(error.message)
-          setBusy(false)
-          return
-        }
-        setBusy(false)
-        // 唯一允许直接发对话的入口：创建后立刻让 AI 生成世界（与导入后立即审阅同模式）。
-        // 勾选「创建后进入整本书」时不再额外发 world-build：准备阶段会一起出蓝图/大纲，避免两个会话打架。
-        if (form.generateWorld !== false && form.openPipeline !== true && project?.id) {
-          try {
-            await sendToChat({
-              projectId: project.id,
-              task: 'world-build',
-              newSession: true,
-              instruction: worldBuildInstruction(form.worldKind, form.worldScale, form.worldEra),
-            })
-          } catch (error) {
-            window.alert(`作品已创建，但发送世界生成任务失败：${error.message}`)
-          }
-        }
-      }
-      return h(
-        'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' }, h('strong', null, '新建作品'), h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body' }, h('div', { className: 'sd-form' },
-            h(Field, { label: '作品名 *' }, h(TextInput, { value: form.name, onChange: (v) => set('name', v), placeholder: '如：长夜将明' })),
-            h(Field, { label: '类型' }, h(TextInput, { value: form.genre, onChange: (v) => set('genre', v), placeholder: '武侠 / 科幻 / 悬疑 / 言情…' })),
-            h(Field, { label: '一句话简介' }, h(TextArea, { value: form.logline, rows: 2, onChange: (v) => set('logline', v) })),
-            h(Field, { label: '目标章数' }, h(TextInput, { value: form.targetChapters, type: 'number', onChange: (v) => set('targetChapters', Number(v) || 0) })),
-            h(Field, { label: '目标字数' }, h(TextInput, { value: form.targetWords, type: 'number', onChange: (v) => set('targetWords', Number(v) || 0) })),
-            h('div', { className: 'sd-create-world' },
-              h('h3', { className: 'sd-h3' }, '🌍 世界设定（可选）'),
-              h('div', { className: 'sd-create-world-grid' },
-                h(Field, { label: '背景类型' }, h(Select, {
-                  value: form.worldKind,
-                  onChange: (v) => set('worldKind', v),
-                  options: CREATE_WORLD_KINDS.map(([value, label]) => ({ value, label })),
-                })),
-                h(Field, { label: '尺度' }, h(Select, {
-                  value: form.worldScale,
-                  onChange: (v) => set('worldScale', v),
-                  options: CREATE_WORLD_SCALES.map(([value, label]) => ({ value, label })),
-                })),
-                h(Field, { label: '时代' }, h(TextInput, { value: form.worldEra, onChange: (v) => set('worldEra', v), placeholder: '如：唐·天宝年间 / 架空蒸汽时代' }))),
-              h('label', { className: 'sd-cb sd-create-world-toggle' },
-                h('input', { type: 'checkbox', checked: form.generateWorld !== false, onChange: (e) => set('generateWorld', e.target.checked) }),
-                '创建后让 AI 生成世界地图（8–20 个地点 + 连接）'),
-              h('p', { className: 'sd-hint sd-create-world-hint' }, form.generateWorld !== false
-                ? '创建后会新建会话并发送 world-build 任务，产出世界设定与地点提案；作者可在「🌍 世界」页拖拽校准。'
-                : '只创建作品；之后可在「🌍 世界」页通过清单生成世界地图。'),
-              h('label', { className: 'sd-cb sd-create-world-toggle' },
-                h('input', { type: 'checkbox', checked: form.openPipeline === true, onChange: (e) => set('openPipeline', e.target.checked) }),
-                '创建后进入「整本书」：先生成蓝图与大纲'),
-              h('p', { className: 'sd-hint sd-create-world-hint' }, form.openPipeline === true
-                ? '创建成功后会切到「📚 整本书」页并打开生成向导（可先准备蓝图与大纲，验收后再生成）。'
-                : '不勾选则创建后停在总览页。')))),
-          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: onClose }, '取消'), h(Btn, { kind: 'primary', onClick: save, disabled: busy }, busy ? '创建中…' : '创建')),
-        ),
-      )
-    }
-
-    // ── 提案页（AI 结果对比 + 采纳）────────────────────────────
-    const PROPOSAL_KIND = { plan: '章节方案', chapter: '章节正文', events: '时间线', facts: '事实', characters: '人物', foreshadow: '伏笔', highlights: '高光', decision: '冲突决策', outlines: '章节大纲', custom: '自由' }
-
-    /** 去掉章节文件 frontmatter，只留正文：历史版本存的是完整文件，和编辑器里的正文对比时要先剥掉。 */
-    function stripChapterFrontmatter(text) {
-      const raw = String(text ?? '')
-      const match = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(raw)
-      return match ? raw.slice(match[0].length) : raw
-    }
-
-    function diffLines(aText, bText) {
-      const A = String(aText ?? '').split('\n')
-      const B = String(bText ?? '').split('\n')
-      const n = A.length
-      const m = B.length
-      if (n > 400 || m > 400) {
-        return [...A.map((text) => ({ type: 'del', text })), ...B.map((text) => ({ type: 'add', text }))]
-      }
-      const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1))
-      for (let i = n - 1; i >= 0; i -= 1) {
-        for (let j = m - 1; j >= 0; j -= 1) {
-          dp[i][j] = A[i] === B[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1])
-        }
-      }
-      const out = []
-      let i = 0
-      let j = 0
-      while (i < n && j < m) {
-        if (A[i] === B[j]) { out.push({ type: 'same', text: A[i] }); i += 1; j += 1 }
-        else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: 'del', text: A[i] }); i += 1 }
-        else { out.push({ type: 'add', text: B[j] }); j += 1 }
-      }
-      while (i < n) { out.push({ type: 'del', text: A[i] }); i += 1 }
-      while (j < m) { out.push({ type: 'add', text: B[j] }); j += 1 }
-      return out
-    }
-
-    function ProposalTab({ bundle, projectId, onChanged, onAskAi, onAddCart, onGoTab }) {
-      const [busy, setBusy] = useState('')
-      const [notice, setNotice] = useState('')
-      const [feedbackFor, setFeedbackFor] = useState('')
-      const [feedbackText, setFeedbackText] = useState('')
-      const [showDone, setShowDone] = useState(false)
-      const [reopenSelected, setReopenSelected] = useState([])
-      const [selected, setSelected] = useState([])
-      const [kindFilter, setKindFilter] = useState('all')
-      const [bulkBusy, setBulkBusy] = useState(false)
-      const [choices, setChoices] = useState({})
-      const [authorOpinions, setAuthorOpinions] = useState({})
-      const [decisionModes, setDecisionModes] = useState({})
-      const priorityRank = (p) => Number(p.priority) || 3
-      const pendingAll = (bundle.proposals ?? []).filter((p) => p.status === 'pending').sort((a, b) => priorityRank(a) - priorityRank(b))
-      const pendingKinds = [...new Set(pendingAll.map((p) => p.kind))]
-      const pending = pendingAll.filter((p) => kindFilter === 'all' || p.kind === kindFilter)
-      const selectedPending = pendingAll.filter((p) => selected.includes(p.id))
-      const done = (bundle.proposals ?? []).filter((p) => p.status !== 'pending')
-      const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-      const allSelected = pending.length > 0 && pending.every((p) => selected.includes(p.id))
-      const toggleAll = () => {
-        if (allSelected) setSelected((prev) => prev.filter((id) => !pending.some((p) => p.id === id)))
-        else setSelected((prev) => [...new Set([...prev, ...pending.map((p) => p.id)])])
-      }
-      const bulkAct = async (action) => {
-        const ids = selectedPending.map((p) => p.id)
-        if (ids.length === 0) {
-          window.alert('请先勾选要处理的提案')
-          return
-        }
-        if (!window.confirm(`批量${action === 'accept' ? '采纳' : '驳回'} ${ids.length} 条提案？`)) return
-        setBulkBusy(true)
-        setNotice(`正在${action === 'accept' ? '采纳' : '驳回'} ${ids.length} 条提案…`)
-        try {
-          const value = await api(action === 'accept' ? 'proposal.batchAccept' : 'proposal.batchReject', { projectId, ids })
-          const failed = value?.failed ?? []
-          const okCount = action === 'accept' ? (value?.accepted?.length ?? 0) : (value?.rejected?.length ?? 0)
-          const kinds = [...new Set(selectedPending.map((p) => p.kind))]
-          const kindSummary = kinds.map((kind) => `${PROPOSAL_KIND[kind] ?? kind} ${selectedPending.filter((p) => p.kind === kind).length}`).join(' · ')
-          setNotice(`${action === 'accept' ? '已采纳' : '已驳回'} ${okCount} 条${kindSummary ? `（${kindSummary}）` : ''}${failed.length > 0 ? `，失败 ${failed.length} 条` : ''}`)
-          if (failed.length > 0) {
-            window.alert(`成功 ${okCount} 条，失败 ${failed.length} 条：\n${failed.map((f) => `${f.id}：${f.error ?? '未知错误'}`).join('\n')}`)
-          }
-          setSelected([])
-          await onChanged()
-          if (action === 'accept' && (kinds.includes('world') || kinds.includes('locations'))) {
-            if (window.confirm('世界与地点已更新。现在去 🌍 世界页看看地图？')) onGoTab?.('world')
-          }
-        } catch (error) {
-          setNotice('')
-          window.alert(`批量${action === 'accept' ? '采纳' : '驳回'}失败：${error.message}`)
-        } finally {
-          setBulkBusy(false)
-        }
-      }
-      const act = async (p, action, optionId) => {
-        if (!window.confirm(`${action === 'accept' ? '采纳' : '驳回'}提案「${p.title}」？`)) return
-        setBusy(p.id)
-        setNotice(`正在${action === 'accept' ? '采纳' : '驳回'}「${p.title}」…`)
-        try {
-          await api(action === 'accept' ? 'proposal.accept' : 'proposal.reject', { projectId, proposalId: p.id, optionId })
-          setNotice(`${action === 'accept' ? '已采纳' : '已驳回'}「${p.title}」`)
-          await onChanged()
-          if (action === 'accept' && (p.kind === 'world' || p.kind === 'locations')) {
-            if (window.confirm('世界与地点已更新。现在去 🌍 世界页看看地图？')) onGoTab?.('world')
-          }
-        } catch (error) {
-          window.alert(error.message)
-        } finally {
-          setBusy('')
-        }
-      }
-      const toggleReopen = (id) => setReopenSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-      const batchReopen = async (ids) => {
-        if (ids.length === 0) { window.alert('请先勾选要重新打开的提案'); return }
-        setBusy('batch-reopen')
-        try {
-          const value = await api('proposal.batchReopen', { projectId, ids })
-          window.alert(`已重新打开 ${value?.reopened ?? 0} 条${value?.missing?.length ? `，${value.missing.length} 条未找到` : ''}`)
-          setReopenSelected([])
-          onChanged()
-        } catch (error) {
-          window.alert(`批量重新打开失败：${error.message}`)
-        } finally {
-          setBusy('')
-        }
-      }
-      const reopen = async (p) => {
-        setBusy(p.id)
-        try {
-          await api('proposal.reopen', { projectId, proposalId: p.id })
-          onChanged()
-        } catch (error) {
-          window.alert(`重新打开失败：${error.message}`)
-        } finally {
-          setBusy('')
-        }
-      }
-      const submitFeedback = async (p) => {
-        const text = feedbackText.trim()
-        if (!text) { window.alert('请先写修改意见'); return }
-        setBusy(p.id)
-        try {
-          await api('proposal.feedback', { projectId, proposalId: p.id, text })
-          setFeedbackText('')
-          setFeedbackFor('')
-          onChanged()
-        } catch (error) { window.alert(error.message) } finally { setBusy('') }
-      }
-      const revise = async (p) => {
-        const feedback = (p.feedback ?? []).map((item) => item.text).join('\n')
-        if (!feedback.trim()) { window.alert('请先写修改意见'); return }
-        setBusy(p.id)
-        try {
-          await sendToChat({ projectId, task: 'revise-proposal', proposalId: p.id, chapter: p.chapter, feedback })
-        } catch (error) { window.alert(`发送到对话失败：${error.message}`) } finally { setBusy('') }
-      }
-      const renderBody = (p) => {
-        const data = p.data ?? {}
-        if (p.kind === 'decision') {
-          const aiSuggestion = data.aiSuggestion ?? data.suggestion ?? data.answer ?? ''
-          const valueOptions = (data.options ?? []).filter((option) => option.factId || option.value)
-          if (valueOptions.length > 0) {
-            const chosen = choices[p.id] ?? data.recommendedOptionId ?? valueOptions[0].id
-            return h('div', { className: 'sd-proposal-body' },
-              h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
-              valueOptions[0].value !== undefined ? h('div', { className: 'sd-hint' }, `「${data.subject ?? ''}」的「${data.attribute ?? ''}」有 ${valueOptions.length} 个取值，选一个作为正史：`) : null,
-              h('div', { className: 'sd-decision-options' },
-                valueOptions.map((option) => h('label', { key: option.id, className: 'sd-decision-option' },
-                  h('input', { type: 'radio', name: `decision-${p.id}`, checked: chosen === option.id, onChange: () => setChoices((prev) => ({ ...prev, [p.id]: option.id })) }),
-                  h('span', null, option.label),
-                  option.id === data.recommendedOptionId ? h(Tag, { tone: 'brand' }, 'AI 推荐') : null))),
-              h(Field, { label: '作者补充意见（可选）' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '例如：选第 1 回，但把第 5 回的表述改成回忆…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) })),
-              h('div', { className: 'sd-hint' }, '选好值后加入清单；发到对话会按你的选择和补充意见落成具体修改提案。'))
-          }
-          const mode = decisionModes[p.id] ?? 'ai'
-          return h('div', { className: 'sd-proposal-body' },
-            h('div', { className: 'sd-decision-issue' }, data.reviewIssue ?? data.summary ?? p.summary ?? ''),
-            h('div', { className: 'sd-decision-options' },
-              h('label', { className: 'sd-decision-option' },
-                h('input', { type: 'radio', name: `mode-${p.id}`, checked: mode === 'ai', onChange: () => setDecisionModes((prev) => ({ ...prev, [p.id]: 'ai' })) }),
-                h('span', null, aiSuggestion ? `同意 AI 建议：${aiSuggestion}` : '同意 AI 建议')),
-              h('label', { className: 'sd-decision-option' },
-                h('input', { type: 'radio', name: `mode-${p.id}`, checked: mode === 'author', onChange: () => setDecisionModes((prev) => ({ ...prev, [p.id]: 'author' })) }),
-                h('span', null, '按作者意见处理'))),
-            mode === 'author'
-              ? h(Field, { label: '作者意见 *' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '写清楚你希望怎么处理…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) }))
-              : null,
-            h('div', { className: 'sd-hint' }, '加入清单后，这条意见会随清单一起发给对话。'))
-        }
-        if (p.kind === 'chapter') {
-          const existing = (bundle.chapters ?? []).find((c) => String(Number(c.id)) === String(Number(p.chapter)))
-          const diff = diffLines(existing?.content ?? '', data.content ?? '')
-          const changed = diff.filter((d) => d.type !== 'same').length
-          return h('div', null,
-            h('div', { className: 'sd-hint' }, `与现有第 ${p.chapter ?? '?'} 章对比：${changed} 行有变化 ｜ 新稿 ${String(data.content ?? '').length} 字符`),
-            h('div', { className: 'sd-diff' }, diff.slice(0, 160).map((d, idx) => h('div', { key: idx, className: `sd-diff-${d.type}` }, `${d.type === 'add' ? '+' : d.type === 'del' ? '-' : ' '} ${d.text}`))),
-          )
-        }
-        if (p.kind === 'plan') {
-          return h('div', { className: 'sd-proposal-body' },
-            data.beats?.length ? h('div', null, h('strong', null, '节拍：'), h('ul', { className: 'sd-ul' }, data.beats.map((b, i) => h('li', { key: i }, b)))) : null,
-            data.events?.length ? h('div', null, h('strong', null, `事件（${data.events.length}）：`), h('ul', { className: 'sd-ul' }, data.events.map((e, i) => h('li', { key: i }, `第${e.chapter ?? p.chapter}章 · ${e.title ?? ''}：${e.summary ?? ''}`)))) : null,
-            data.facts?.length ? h('div', null, h('strong', null, `事实（${data.facts.length}）：`), h('ul', { className: 'sd-ul' }, data.facts.map((f, i) => h('li', { key: i }, `${f.subject} · ${f.attribute} = ${f.value}`)))) : null,
-            data.foreshadow?.length ? h('div', null, h('strong', null, `伏笔（${data.foreshadow.length}）：`), h('ul', { className: 'sd-ul' }, data.foreshadow.map((f, i) => h('li', { key: i }, `${f.title}（第${f.setupChapter}章埋 → 第${f.payoffChapter}章收）`)))) : null,
-          )
-        }
-        if (p.kind === 'custom') {
-          return h('div', { className: 'sd-proposal-text' }, data.answer ?? p.summary ?? JSON.stringify(data, null, 2))
-        }
-        const items = p.items ?? data.items ?? []
-        return h('div', { className: 'sd-proposal-body' }, items.slice(0, 20).map((item, i) => h('div', { key: i, className: 'sd-proposal-item' }, JSON.stringify(item))))
-      }
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '📥 提案'), h('p', { className: 'sd-desc' }, 'AI 或 Agent 生成的内容先停在这里。同意就加入本次清单，和清单一起交给对话处理；不同意就驳回。工作台不直接改正文。')),
-
-        ),
-        pendingAll.length > 0 ? h('div', { className: 'sd-bulkbar' },
-          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allSelected, onChange: toggleAll }), '全选'),
-          h('span', { className: 'sd-hint' }, `待采纳 ${pendingAll.length} 条，已选 ${selectedPending.length} 条`),
-          h('select', { className: 'sd-input sd-select-inline', value: kindFilter, onChange: (e) => setKindFilter(e.target.value) },
-            h('option', { value: 'all' }, '全部类型'),
-            pendingKinds.map((kind) => h('option', { key: kind, value: kind }, PROPOSAL_KIND[kind] ?? kind))),
-          h('div', { className: 'sd-bulkbar-actions' },
-            h(Btn, { small: true, kind: 'primary', disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('accept') }, bulkBusy ? '处理中…' : `批量采纳（${selectedPending.length}）`),
-            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => bulkAct('reject') }, '批量驳回'),
-          ),
-        ) : null,
-        notice ? h('div', { className: 'sd-notice' }, notice) : null,
-        pendingAll.length === 0 ? h(Empty, null, '没有待处理提案。可以加入清单「从头审阅」，或让对话里的 AI 生成后回到这里。') : pending.length === 0 ? h(Empty, null, '当前筛选下没有待采纳的提案。换个类型看看。') : pending.map((p) => h('div', { key: p.id, className: 'sd-proposal' },
-          h('div', { className: 'sd-proposal-head' },
-            h('label', { className: 'sd-cb sd-cb-only', title: '选择该提案' }, h('input', { type: 'checkbox', checked: selected.includes(p.id), onChange: () => toggle(p.id) })),
-            h(Tag, { tone: 'brand' }, PROPOSAL_KIND[p.kind] ?? p.kind),
-            p.priority && p.priority <= 2 ? h(Tag, { tone: 'muted' }, p.priority === 1 ? '阻断' : '严重') : null,
-            h(Tag, { tone: 'muted' }, p.chapter ? `第 ${p.chapter} 章` : '全书'),
-            h('strong', { className: 'sd-proposal-title' }, p.title),
-            h('span', { className: 'sd-hint' }, p.source === 'agent' ? 'Agent 提交' : 'AI 生成'),
-          ),
-          p.summary ? h('div', { className: 'sd-proposal-summary' }, p.summary) : null,
-          p.rationale ? h('div', { className: 'sd-hint' }, p.rationale) : null,
-          renderBody(p),
-          Array.isArray(p.feedback) && p.feedback.length > 0 ? h('div', { className: 'sd-feedback-list' },
-            h('div', { className: 'sd-hint' }, `修改意见（${p.feedback.length}）`),
-            p.feedback.map((f, i) => h('div', { key: f.id ?? i, className: 'sd-feedback-item' }, f.text)),
-          ) : null,
-          feedbackFor === p.id ? h('div', { className: 'sd-feedback-editor' },
-            h(TextArea, { value: feedbackText, rows: 3, placeholder: '写清楚要改什么：保留什么、删掉什么、朝哪个方向改…', onChange: setFeedbackText }),
-            h('div', { className: 'sd-form-actions' },
-              h(Btn, { kind: 'primary', onClick: () => submitFeedback(p), disabled: busy === p.id }, '保存意见'),
-              h(Btn, { onClick: () => { setFeedbackFor(''); setFeedbackText('') } }, '取消'),
-            ),
-          ) : null,
-          p.kind !== 'decision' ? h(Field, { label: '作者意见（可选）' }, h(TextArea, { value: authorOpinions[p.id] ?? '', rows: 2, placeholder: '对这份提案的补充要求，会随清单一起发给对话…', onChange: (value) => setAuthorOpinions((prev) => ({ ...prev, [p.id]: value })) })) : null,
-          p.kind === 'decision'
-            ? h('div', { className: 'sd-proposal-actions' },
-                onAddCart ? h(Btn, { kind: 'primary', onClick: () => {
-                  const valueOptions = (p.data?.options ?? []).filter((option) => option.factId || option.value)
-                  const aiSuggestion = p.data?.aiSuggestion ?? p.data?.suggestion ?? p.data?.answer ?? ''
-                  const authorOpinion = (authorOpinions[p.id] ?? '').trim()
-                  if (valueOptions.length > 0) {
-                    const chosenId = choices[p.id] ?? p.data?.recommendedOptionId ?? valueOptions[0]?.id
-                    const chosen = valueOptions.find((option) => option.id === chosenId)
-                    onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, proposalKind: 'decision', aiSuggestion, choice: chosen?.label ?? '', authorOpinion, detail: p.summary ?? '' })
-                    return
-                  }
-                  const mode = decisionModes[p.id] ?? 'ai'
-                  if (mode === 'author' && !authorOpinion) { window.alert('选了「按作者意见处理」，请先写作者意见'); return }
-                  onAddCart({ kind: 'proposal', id: p.id, chapter: p.chapter, title: p.title, proposalKind: 'decision', aiSuggestion, choice: mode === 'ai' ? '同意 AI 建议' : '按作者意见处理', authorOpinion, detail: p.summary ?? '' })
-                } }, '加入清单') : null,
-                h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
-              )
-            : h('div', { className: 'sd-proposal-actions' },
-                onAddCart ? h(Btn, { kind: 'primary', onClick: () => onAddCart({
-                  kind: 'proposal',
-                  id: p.id,
-                  chapter: p.chapter,
-                  title: p.title,
-                  proposalKind: p.kind,
-                  approved: true,
-                  authorOpinion: (authorOpinions[p.id] ?? '').trim(),
-                  detail: [p.summary, ...(p.feedback ?? []).map((item) => `作者意见：${item.text}`)].filter(Boolean).join('；'),
-                }) }, '同意并加入清单') : null,
-                h(Btn, { onClick: () => act(p, 'reject'), disabled: busy === p.id }, '驳回'),
-              ),
-        )),
-        done.length > 0 ? h('div', { className: 'sd-section' },
-          h('div', { className: 'sd-pagehead' },
-            h('div', null, h('h3', { className: 'sd-h3' }, `已处理 / 待确认（${done.length}）`), h('p', { className: 'sd-hint' }, '「已修订」表示生成了替代提案；替代提案采纳前不算处理完，可勾选后批量重新打开。')),
-            h('div', { className: 'sd-form-actions' },
-              h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开'),
-              h(Btn, { small: true, disabled: busy === 'batch-reopen' || !done.some((p) => reopenSelected.includes(p.id)), onClick: () => batchReopen(done.filter((p) => reopenSelected.includes(p.id)).map((p) => p.id)) }, `重新打开所选（${done.filter((p) => reopenSelected.includes(p.id)).length}）`))),
-          showDone ? h('div', { className: 'sd-mini-list' }, done.slice(-30).reverse().map((p) => h('div', { key: p.id, className: 'sd-mini-row' },
-            h('input', { type: 'checkbox', checked: reopenSelected.includes(p.id), onChange: () => toggleReopen(p.id) }),
-            h(Tag, { tone: 'muted' }, { accepted: '已采纳', rejected: '已驳回', revised: '已修订', superseded: '已替代' }[p.status] ?? p.status),
-            h('span', { className: 'sd-mini-title' }, p.title),
-            h(Btn, { small: true, onClick: () => reopen(p), disabled: busy === p.id }, busy === p.id ? '处理中…' : '重新打开')))) : null,
-        ) : null,
-      )
-    }
-
-    // ── 对齐页 ────────────────────────────────────────────────
-    function AlignmentTab({ bundle }) {
-      const a = bundle.alignment
-      if (!a) return h(Empty, null, '暂无对齐数据。')
-      const presets = bundle.presets ?? []
-      const activeId = bundle.project?.activePresetId
-      const activePreset = presets.find((p) => p.id === activeId)
-      const presetName = activePreset?.name || (activeId ? '未找到当前预设（可能已删除）' : a.presetName || presets[0]?.name || '未设置')
-      const presetHint = activeId ? '来自「预设」页的当前预设' : '未设置当前预设，默认使用第一套'
-      const bar = (pct) => h('div', { className: 'sd-progress' }, h('div', { className: 'sd-progress-fill', style: { width: `${pct ?? 0}%` } }))
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' }, h('div', null, h('h2', { className: 'sd-h2' }, '🎯 计划对齐'), h('p', { className: 'sd-desc' }, `当前预设：${presetName}。预设计划 vs 实际产出，目标来自「预设」页的写作方案。`))),
-        h('div', { className: 'sd-align-cards' },
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '当前预设'), h('div', { className: 'sd-align-value sd-align-value-sm', title: presetName }, presetName), h('div', { className: 'sd-hint' }, presetHint)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '章节进度'), h('div', { className: 'sd-align-value' }, `${a.actualChapters} / ${a.plannedChapters || '—'}`), bar(a.chapterProgress)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '字数进度'), h('div', { className: 'sd-align-value' }, `${a.actualWords} / ${a.totalWords || '—'}`), bar(a.wordProgress)),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '每章目标'), h('div', { className: 'sd-align-value' }, a.chapterWords ? `${a.chapterWords} 字` : '未设置'), h('div', { className: 'sd-hint' }, '在「预设」里设置')),
-          h('div', { className: 'sd-align-card' }, h('div', { className: 'sd-align-label' }, '待处理'), h('div', { className: 'sd-align-value' }, `${a.pendingProposals} 提案 / ${a.openReviews} 审稿`), h('div', { className: 'sd-hint' }, '提案和审稿都要人处理')),
-        ),
-        a.perChapter.length === 0 ? h(Empty, null, '还没有章节。') : h('div', { className: 'sd-table' },
-          h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: '56px 1fr 90px 110px 70px 70px 70px 70px' } },
-            h('div', null, '章'), h('div', null, '标题'), h('div', null, '字数'), h('div', null, '偏离目标'), h('div', null, '事件'), h('div', null, '事实'), h('div', null, '待审'), h('div', null, '提案')),
-          a.perChapter.map((row) => h('div', { key: row.id, className: 'sd-row', style: { gridTemplateColumns: '56px 1fr 90px 110px 70px 70px 70px 70px' } },
-            h('div', { className: 'sd-cell' }, row.id),
-            h('div', { className: 'sd-cell', title: row.title }, row.title),
-            h('div', { className: 'sd-cell' }, String(row.words)),
-            h('div', { className: 'sd-cell', style: { color: row.delta === null ? 'inherit' : row.delta < 0 ? 'var(--dsw-alias-state-warn-primary,#d68910)' : 'var(--dsw-alias-state-success-primary,#1e8449)' } }, row.delta === null ? '—' : `${row.delta >= 0 ? '+' : ''}${row.delta}`),
-            h('div', { className: 'sd-cell' }, String(row.events)),
-            h('div', { className: 'sd-cell' }, String(row.facts)),
-            h('div', { className: 'sd-cell' }, String(row.openReviews)),
-            h('div', { className: 'sd-cell' }, String(row.proposals)),
-          )),
-        ),
-      )
-    }
-
-    // ── AI 对话框 ─────────────────────────────────────────────
-    const AI_TASKS = [
-      ['next-chapter-plan', '生成下一章方案', '产出标题、摘要、节拍、事件、事实、伏笔 → 进入提案'],
-      ['continue-chapter', '续写下一章正文', '按写作预设写完整一章 → 进入提案，采纳前不动正文'],
-      ['review-chapter', 'AI 审稿', '按预设的审稿重点逐项检查 → 写入「审稿」'],
-      ['generate-timeline', '补全时间线', '为指定章节生成事件 → 进入提案'],
-      ['extract-facts', '抽取事实与人物', '从指定章节抽取账本条目 → 进入提案'],
-      ['custom', '自由指令', '描述你要 AI 做什么，结果进入提案'],
-    ]
-
-    function AiDialog({ bundle, projectId, initialTask, initialChapter, onClose, onChanged }) {
-      const nextChapter = bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1
-      const [task, setTask] = useState(initialTask || 'next-chapter-plan')
-      const [chapter, setChapter] = useState(initialChapter || nextChapter)
-      const [instruction, setInstruction] = useState('')
-      const [busy, setBusy] = useState(false)
-      const [result, setResult] = useState('')
-      const run = async () => {
-        setBusy(true)
-        setResult('')
-        try {
-          await sendToChat({ projectId, task, chapter: Number(chapter), instruction })
-        } catch (error) {
-          setResult(`❌ ${error.message}`)
-          setBusy(false)
-        }
-      }
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && !busy && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' }, h('strong', null, '🤖 发到对话执行'), h('span', { className: 'sd-hint' }, '工作台只负责验收；AI 动作全部在左侧对话里跑'), h(IconBtn, { onClick: () => !busy && onClose(), title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body' },
-            h('p', { className: 'sd-desc' }, '选好任务后会直接发送到左侧对话，由对话里的 Agent 调工具执行；结果以提案/审稿回到工作台。'),
-            h('div', { className: 'sd-form sd-form-2' },
-              h(Field, { label: '任务' }, h(Select, { value: task, options: AI_TASKS.map(([v, label]) => ({ value: v, label })), onChange: setTask })),
-              h(Field, { label: '章号' }, h(TextInput, { value: chapter, type: 'number', onChange: (v) => setChapter(Number(v) || 1) })),
-            ),
-            h('div', { className: 'sd-hint', style: { marginBottom: 8 } }, (AI_TASKS.find((t) => t[0] === task) ?? [])[2] ?? ''),
-            h(Field, { label: '补充指令（可选）' }, h(TextArea, { value: instruction, rows: 3, placeholder: '例如：这一章要让母亲露出破绽；或：重点检查时间线矛盾', onChange: setInstruction })),
-            result ? h('pre', { className: 'sd-ai-result' }, result) : null,
-            busy ? h('div', { className: 'sd-ai-busy' }, 'AI 正在生成，可能需要 30–120 秒…') : null,
-          ),
-          h('div', { className: 'sd-modal-foot' }, h(Btn, { onClick: () => !busy && onClose() }, '关闭'), h(Btn, { kind: 'primary', onClick: run, disabled: busy }, busy ? '发送中…' : '发送到对话')),
-        ),
-      )
-    }
-
-
-    // ── 预设页（作品预设 + 名家风格库）──────────────────────────
-    function PresetCard({ preset, mode, busy, current, onEdit, onApply, onDelete, onAdd }) {
-      const total = preset.plannedChapters && preset.chapterWords ? preset.plannedChapters * preset.chapterWords : preset.totalWords
-      const actions = mode === 'builtin'
-        ? [h(Btn, { key: 'add', kind: 'primary', small: true, disabled: busy, onClick: onAdd }, busy ? '添加中…' : '添加到作品')]
-        : [
-            h(Btn, { key: 'edit', small: true, onClick: onEdit }, '编辑'),
-            h(Btn, { key: 'apply', small: true, kind: current ? undefined : 'primary', onClick: onApply }, current ? '重新应用目标' : '设为当前'),
-            h(Btn, { key: 'del', small: true, kind: 'danger', onClick: onDelete }, '删除'),
-          ]
-      return h('div', { className: 'sd-preset-card' + (current ? ' sd-preset-current' : '') },
-        h('div', { className: 'sd-preset-head' },
-          h('strong', null, preset.name),
-          current ? h(Tag, { tone: 'brand' }, '✓ 当前预设') : null,
-          preset.authorStyle ? h(Tag, { tone: 'brand' }, preset.authorStyle) : null,
-          preset.source === 'builtin' ? h(Tag, { tone: 'muted' }, '内置') : null),
-        h('div', { className: 'sd-preset-meta' },
-          `${preset.genre || '—'} ｜ ${preset.pov || '—'} ｜ ${preset.tense || '—'} ｜ ${preset.plannedChapters || '—'} 章 × ${preset.chapterWords || '—'} 字${total ? ` = ${total} 字` : ''}`),
-        preset.tone ? h('div', { className: 'sd-hint' }, `基调：${preset.tone}`) : null,
-        preset.description ? h('div', { className: 'sd-preset-desc' }, preset.description) : null,
-        preset.styleRules?.length ? h('div', { className: 'sd-preset-block' }, h('div', { className: 'sd-hint' }, '风格规则'), h('ul', { className: 'sd-ul' }, preset.styleRules.map((r, i) => h('li', { key: i }, r)))) : null,
-        preset.taboo?.length ? h('div', { className: 'sd-preset-block' }, h('div', { className: 'sd-hint' }, '禁忌'), h('ul', { className: 'sd-ul' }, preset.taboo.map((r, i) => h('li', { key: i }, r)))) : null,
-        preset.reviewFocus?.length ? h('div', { className: 'sd-hint' }, `审稿重点：${preset.reviewFocus.join('、')}`) : null,
-        h('div', { className: 'sd-proposal-actions' }, actions),
-      )
-    }
-
-    function PresetsTab({ bundle, projectId, onChanged }) {
-      const [templates, setTemplates] = useState([])
-      const [busy, setBusy] = useState('')
-      const [editing, setEditing] = useState(null)
-      useEffect(() => {
-        let alive = true
-        api('preset.builtin').then((value) => { if (alive) setTemplates(value) }).catch(() => {})
-        return () => { alive = false }
-      }, [])
-      const addTemplate = async (template) => {
-        setBusy(template.id)
-        try {
-          await api('preset.add', { projectId, templateId: template.id })
-          onChanged()
-        } catch (error) { window.alert(error.message) } finally { setBusy('') }
-      }
-      const apply = async (preset) => {
-        if (!window.confirm(`把「${preset.name}」设为当前预设？会同时把章数/字数/类型/视角应用为作品目标。`)) return
-        setBusy(preset.id)
-        try {
-          await api('preset.apply', { projectId, presetId: preset.id })
-          onChanged()
-        } catch (error) { window.alert(error.message) } finally { setBusy('') }
-      }
-      const remove = async (preset) => {
-        if (!window.confirm(`删除预设「${preset.name}」？`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'presets', entityId: preset.id })
-          onChanged()
-        } catch (error) { window.alert(error.message) }
-      }
-      const has = (template) => (bundle.presets ?? []).some((p) => p.name === template.name)
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, '🎛️ 写作预设'), h('p', { className: 'sd-desc' }, '作品可以挂多套预设。预设里的计划章数/每章字数/总字数/结构/风格规则/禁忌/审稿重点，AI 写作与审稿都会读取。')),
-          h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 自定义预设')),
-        h('h3', { className: 'sd-h3' }, `当前作品预设（${(bundle.presets ?? []).length}）`),
-        (bundle.presets ?? []).length > 0 ? h('p', { className: 'sd-desc' }, `当前预设：${(bundle.presets ?? []).find((p) => p.id === bundle.project?.activePresetId)?.name || (bundle.project?.activePresetId ? '未找到（可能已删除）' : '未设置（对齐默认用第一套）')}。点「设为当前」会把该预设写为当前并应用章数/字数目标。`) : null,
-        (bundle.presets ?? []).length === 0
-          ? h(Empty, null, '还没有预设。从下面的名家风格库里添加一套，或自定义。')
-          : h('div', { className: 'sd-preset-grid' }, (bundle.presets ?? []).map((preset) => h(PresetCard, {
-              key: preset.id, preset, mode: 'current', busy: busy === preset.id, current: preset.id === bundle.project?.activePresetId,
-              onEdit: () => setEditing(preset), onApply: () => apply(preset), onDelete: () => remove(preset),
-            }))),
-        h('h3', { className: 'sd-h3 sd-mt' }, `名家风格库（${templates.length}）`),
-        h('p', { className: 'sd-desc' }, '内置风格模板：金庸、古龙、梁羽生、柯南·道尔、阿加莎·克里斯蒂、东野圭吾、刘慈欣、村上春树。添加后可再改。'),
-        h('div', { className: 'sd-preset-grid' }, templates.map((template) => h(PresetCard, {
-          key: template.id, preset: template, mode: 'builtin',
-          busy: busy === template.id || has(template),
-          onAdd: () => addTemplate(template),
-        }))),
-        editing !== null ? h(EntityEditor, { kind: 'presets', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ══ v0.4 新增：工具函数 ═══════════════════════════════════
-    function pad2(n) {
-      return String(n).padStart(2, '0')
-    }
-
-    function formatDateTime(value) {
-      if (!value) return ''
-      const date = new Date(value)
-      if (Number.isNaN(date.getTime())) return String(value)
-      return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
-    }
-
-    // 事实生效区间文案：第3章起 / 第3–10章 / 全程；无值时返回空串（列表里不显示）
-    function formatFactRange(from, to) {
-      const hasFrom = from !== undefined && from !== null && from !== '' && Number.isFinite(Number(from))
-      const hasTo = to !== undefined && to !== null && to !== '' && Number.isFinite(Number(to))
-      if (!hasFrom && !hasTo) return ''
-      if (!hasFrom) return `至第${Number(to)}章`
-      if (!hasTo) return Number(from) <= 1 ? '全程' : `第${Number(from)}章起`
-      if (Number(from) === Number(to)) return `第${Number(from)}章`
-      return `第${Number(from)}–${Number(to)}章`
-    }
-
-    // 事实的生效区间：清空时发 null（后端 merge 写入 null，checks 把 null 当缺省），避免旧值残留
-    function cleanEntityPayload(kind, form) {
-      const item = { ...form }
-      if (kind === 'facts') {
-        for (const key of ['validFrom', 'validTo']) {
-          if (item[key] === '' || item[key] === null || item[key] === undefined) item[key] = null
-          else if (Number.isFinite(Number(item[key]))) item[key] = Number(item[key])
-        }
-      }
-      if (kind === 'events' && (item.volume === '' || item.volume === undefined)) item.volume = null
-      return item
-    }
-
-    function relationshipList(value) {
-      if (Array.isArray(value)) return value.map((s) => String(s).trim()).filter(Boolean)
-      if (typeof value === 'string' && value.trim()) return value.split(/[、,，;；\n]/).map((s) => s.trim()).filter(Boolean)
-      return []
-    }
-
-    // 关系条目：名字(关系) / 名字（关系） / 名字:关系 / 名字：关系
-    function parseRelationship(text) {
-      const raw = String(text ?? '').trim()
-      if (!raw) return null
-      const paren = raw.match(/^(.+?)[（(]([^（）()]*)[)）]$/)
-      if (paren) return { name: paren[1].trim(), relation: paren[2].trim() }
-      const colon = raw.match(/^([^:：]+)[:：](.+)$/)
-      if (colon) return { name: colon[1].trim(), relation: colon[2].trim() }
-      return { name: raw, relation: '' }
-    }
-
-    // 确定性伪随机：让关系图每次布局一致
-    function mulberry32(seed) {
-      let a = seed >>> 0
-      return function nextRandom() {
-        a = (a + 0x6d2b79f5) >>> 0
-        let t = a
-        t = Math.imul(t ^ (t >>> 15), t | 1)
-        t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-      }
-    }
-
-    // 解析人物关系 -> 节点 + 边；目标不在人物库时生成虚线幽灵节点
-    function buildRelationshipGraph(characters) {
-      const nodes = []
-      const byName = new Map()
-      const ghosts = new Map()
-      const edges = []
-      const seen = new Set()
-      for (const character of characters ?? []) {
-        const name = String(character.name ?? '').trim()
-        if (!name) continue
-        const node = { id: 'c:' + String(character.id ?? name), name, role: character.role || 'minor', character, ghost: false }
-        nodes.push(node)
-        byName.set(name, node)
-      }
-      for (const character of characters ?? []) {
-        const source = byName.get(String(character.name ?? '').trim())
-        if (!source) continue
-        for (const raw of relationshipList(character.relationships)) {
-          const parsed = parseRelationship(raw)
-          if (!parsed || !parsed.name) continue
-          let target = byName.get(parsed.name) || byName.get(parsed.name.replace(/[（(].*$/, '').trim())
-          if (!target) {
-            const key = 'g:' + parsed.name
-            if (!ghosts.has(key)) {
-              const ghost = { id: key, name: parsed.name, role: 'ghost', character: null, ghost: true }
-              ghosts.set(key, ghost)
-              nodes.push(ghost)
-            }
-            target = ghosts.get(key)
-          }
-          if (!target || target.id === source.id) continue
-          const edgeKey = `${source.id}→${target.id}|${parsed.relation || ''}`
-          if (seen.has(edgeKey)) continue
-          seen.add(edgeKey)
-          edges.push({ id: edgeKey, source: source.id, target: target.id, relation: parsed.relation })
-        }
-      }
-      return { nodes, edges }
-    }
-
-    // 力导向布局：圆环确定性初值 + 约 80 次迭代
-    function layoutGraph(nodes, edges, width, height) {
-      const n = nodes.length
-      if (n === 0) return []
-      const index = new Map(nodes.map((node, i) => [node.id, i]))
-      const random = mulberry32(20261022)
-      const pos = nodes.map((node, i) => {
-        const angle = (i / n) * Math.PI * 2
-        const radius = Math.min(width, height) * 0.32
-        return {
-          id: node.id,
-          x: width / 2 + Math.cos(angle) * radius + (random() - 0.5) * 8,
-          y: height / 2 + Math.sin(angle) * radius + (random() - 0.5) * 8,
-        }
-      })
-      const k = Math.sqrt((width * height) / n) * 0.9
-      let temperature = Math.min(width, height) * 0.09
-      for (let iter = 0; iter < 80; iter += 1) {
-        const disp = pos.map(() => ({ x: 0, y: 0 }))
-        for (let i = 0; i < n; i += 1) {
-          for (let j = i + 1; j < n; j += 1) {
-            let dx = pos[i].x - pos[j].x
-            let dy = pos[i].y - pos[j].y
-            let d = Math.hypot(dx, dy)
-            if (d < 0.01) {
-              dx = (random() - 0.5) * 0.02
-              dy = (random() - 0.5) * 0.02
-              d = 0.01
-            }
-            const force = (k * k) / d
-            const ux = dx / d
-            const uy = dy / d
-            disp[i].x += ux * force
-            disp[i].y += uy * force
-            disp[j].x -= ux * force
-            disp[j].y -= uy * force
-          }
-        }
-        for (const edge of edges) {
-          const a = index.get(edge.source)
-          const b = index.get(edge.target)
-          if (a === undefined || b === undefined) continue
-          const dx = pos[a].x - pos[b].x
-          const dy = pos[a].y - pos[b].y
-          const d = Math.max(0.01, Math.hypot(dx, dy))
-          const force = (d * d) / k
-          const ux = dx / d
-          const uy = dy / d
-          disp[a].x -= ux * force
-          disp[a].y -= uy * force
-          disp[b].x += ux * force
-          disp[b].y += uy * force
-        }
-        for (let i = 0; i < n; i += 1) {
-          disp[i].x += (width / 2 - pos[i].x) * 0.06
-          disp[i].y += (height / 2 - pos[i].y) * 0.06
-          const d = Math.max(0.01, Math.hypot(disp[i].x, disp[i].y))
-          const stepLength = Math.min(d, temperature)
-          pos[i].x += (disp[i].x / d) * stepLength
-          pos[i].y += (disp[i].y / d) * stepLength
-          pos[i].x = Math.max(52, Math.min(width - 52, pos[i].x))
-          pos[i].y = Math.max(40, Math.min(height - 40, pos[i].y))
-        }
-        temperature *= 0.94
-      }
-      return pos
-    }
-
+    /** 把 export.book 的返回值变成浏览器下载（文本走 text，二进制走 base64）。 */
     function triggerDownload(value) {
       if (!value) throw new Error('导出返回为空')
       let blob
@@ -4918,7 +321,7 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
         for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
         blob = new Blob([bytes], { type: value.mime || 'application/octet-stream' })
       } else {
-        blob = new Blob([value.markdown ?? ''], { type: value.mime || 'text/markdown;charset=utf-8' })
+        blob = new Blob([value.text ?? ''], { type: value.mime || 'text/plain;charset=utf-8' })
       }
       const url = URL.createObjectURL(blob)
       const anchor = document.createElement('a')
@@ -4930,2319 +333,6029 @@ ${fact.subject ?? ''} · ${fact.attribute ?? ''} = ${fact.value ?? ''}`)) return
       setTimeout(() => URL.revokeObjectURL(url), 2000)
     }
 
-    async function downloadExport(projectId, format) {
-      const value = await api('export', { projectId, format })
+    /** 导出并触发浏览器下载；返回服务端的 { filename, chapters, words, ... }。 */
+    async function downloadExport(projectId, format, includeSummary) {
+      const value = await api('export.book', { projectId, format, includeSummary: includeSummary === true })
       triggerDownload(value)
       return value
     }
 
-    function ViewToggle({ value, onChange, options }) {
-      return h('div', { className: 'sd-toggle' }, options.map((option) =>
-        h('button', {
-          key: option.value,
-          type: 'button',
-          className: `sd-toggle-btn${value === option.value ? ' sd-toggle-active' : ''}`,
-          onClick: () => onChange(option.value),
-        }, option.label),
-      ))
-    }
-
-    // ══ v0.4 新增：人物关系图 ═════════════════════════════════
-    const GRAPH_W = 900
-    const GRAPH_H = 540
-    const GRAPH_ROLE = { protagonist: '主角', antagonist: '反派', supporting: '配角', minor: '龙套' }
-
-    function RelationshipGraph({ characters, onEdit, onCreate }) {
-      const graph = React.useMemo(() => buildRelationshipGraph(characters), [JSON.stringify(characters ?? [])])
-      const [pos, setPos] = useState(() => layoutGraph(graph.nodes, graph.edges, GRAPH_W, GRAPH_H))
-      const [hover, setHover] = useState('')
-      const [drag, setDrag] = useState(null)
-      const svgRef = useRef(null)
-      const movedRef = useRef(false)
-
-      useEffect(() => {
-        setPos(layoutGraph(graph.nodes, graph.edges, GRAPH_W, GRAPH_H))
-        setHover('')
-        setDrag(null)
-      }, [graph])
-
-      const toSvg = (event) => {
-        const rect = svgRef.current?.getBoundingClientRect()
-        if (!rect || !rect.width) return { x: 0, y: 0 }
-        return { x: ((event.clientX - rect.left) / rect.width) * GRAPH_W, y: ((event.clientY - rect.top) / rect.height) * GRAPH_H }
-      }
-
-      useEffect(() => {
-        if (!drag) return undefined
-        const onMove = (event) => {
-          if (Math.hypot(event.clientX - drag.cx, event.clientY - drag.cy) > 3) movedRef.current = true
-          const point = toSvg(event)
-          setPos((prev) => prev.map((item) => (item.id === drag.id
-            ? { id: item.id, x: Math.max(46, Math.min(GRAPH_W - 46, point.x + drag.dx)), y: Math.max(36, Math.min(GRAPH_H - 36, point.y + drag.dy)) }
-            : item)))
-        }
-        const onUp = () => setDrag(null)
-        window.addEventListener('mousemove', onMove)
-        window.addEventListener('mouseup', onUp)
-        return () => {
-          window.removeEventListener('mousemove', onMove)
-          window.removeEventListener('mouseup', onUp)
-        }
-      }, [drag])
-
-      if ((characters ?? []).length === 0) {
-        return h(Empty, null, '还没有人物卡。先在「列表」里新建人物，再回来看关系图。')
-      }
-
-      const posById = new Map(pos.map((item) => [item.id, item]))
-      const neighborIds = new Set()
-      if (hover) {
-        neighborIds.add(hover)
-        for (const edge of graph.edges) {
-          if (edge.source === hover) neighborIds.add(edge.target)
-          if (edge.target === hover) neighborIds.add(edge.source)
-        }
-      }
-
-      const edgeEls = graph.edges.map((edge) => {
-        const a = posById.get(edge.source)
-        const b = posById.get(edge.target)
-        if (!a || !b) return null
-        const active = Boolean(hover && (edge.source === hover || edge.target === hover))
-        const dim = Boolean(hover && !active)
-        return h(
-          'g',
-          { key: edge.id, style: { opacity: dim ? 0.18 : 1 } },
-          h('line', { className: 'sd-graph-edge' + (active ? ' sd-graph-edge-hot' : ''), x1: a.x, y1: a.y, x2: b.x, y2: b.y }),
-          edge.relation ? h('text', { className: 'sd-graph-edge-label', x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 4 }, edge.relation) : null,
-        )
-      })
-
-      const nodeEls = graph.nodes.map((node) => {
-        const point = posById.get(node.id)
-        if (!point) return null
-        const dim = Boolean(hover && !neighborIds.has(node.id))
-        const roleClass = node.ghost ? 'sd-graph-role-ghost' : 'sd-graph-role-' + (node.role || 'minor')
-        return h(
-          'g',
-          {
-            key: node.id,
-            className: `sd-graph-node ${roleClass}${node.ghost ? ' sd-graph-node-ghost' : ''}${hover === node.id ? ' sd-graph-node-hot' : ''}`,
-            style: { opacity: dim ? 0.28 : 1 },
-            transform: `translate(${point.x},${point.y})`,
-            onMouseEnter: () => setHover(node.id),
-            onMouseLeave: () => setHover(''),
-            onMouseDown: (event) => {
-              event.preventDefault()
-              movedRef.current = false
-              const point2 = toSvg(event)
-              setDrag({ id: node.id, dx: point.x - point2.x, dy: point.y - point2.y, cx: event.clientX, cy: event.clientY })
-            },
-            onClick: () => {
-              if (movedRef.current) {
-                movedRef.current = false
-                return
-              }
-              if (node.ghost) onCreate(node.name)
-              else onEdit(node.character)
-            },
-          },
-          h('circle', { r: node.ghost ? 15 : 17 }),
-          h('text', { y: 30 }, node.name),
-          node.ghost ? h('text', { className: 'sd-graph-ghost-tip', y: 44 }, '待建卡') : null,
-        )
-      })
-
-      return h(
-        'div',
-        { className: 'sd-graph' },
-        h(
-          'div',
-          { className: 'sd-graph-legend' },
-          h('span', { className: 'sd-graph-legend-title' }, `人物 ${graph.nodes.filter((node) => !node.ghost).length} · 关系 ${graph.edges.length}`),
-          ['protagonist', 'antagonist', 'supporting', 'minor'].map((role) => h('span', { key: role }, h('i', { className: 'sd-dot sd-dot-' + role }), GRAPH_ROLE[role])),
-          h('span', null, h('i', { className: 'sd-dot sd-dot-ghost' }), '幽灵节点（人物库未建卡）'),
-          graph.edges.length === 0 ? h('span', { className: 'sd-hint' }, '在人物卡的「关系」里填「华羽生(师徒)」这样的条目即可连线') : null,
-        ),
-        h(
-          'div',
-          { className: 'sd-graph-wrap' },
-          h('svg', { ref: svgRef, viewBox: `0 0 ${GRAPH_W} ${GRAPH_H}`, className: 'sd-graph-svg' },
-            h('g', null, edgeEls),
-            h('g', null, nodeEls),
-          ),
-        ),
-        h('div', { className: 'sd-hint' }, '拖拽节点可调整位置；悬停高亮相邻节点；点击节点打开人物编辑卡，点击虚线幽灵节点可直接新建人物卡。'),
-      )
-    }
-
-    // ══ v0.4 新增：时间线泳道图 ═══════════════════════════════
-    const LANE_IMPORTANCE = { normal: '一般', major: '关键', climax: '高潮' }
-
-    function TimelineLanes({ events, foreshadow, onEdit }) {
-      const [zoom, setZoom] = useState(1)
-      const list = [...(events ?? [])].sort((a, b) => (Number(a.chapter) || 0) - (Number(b.chapter) || 0))
-      const arcs = (foreshadow ?? []).filter((item) => Number(item.setupChapter) > 0 && Number(item.payoffChapter) > 0)
-      const chapterOf = (item) => {
-        const n = Number(item.chapter)
-        return Number.isFinite(n) && n > 0 ? n : 0
-      }
-      const volumeOf = (item) => {
-        const value = item.volume
-        if (value === undefined || value === null || String(value).trim() === '') return ''
-        const text = String(value).trim()
-        if (/^\d+$/.test(text)) return `第 ${text} 卷`
-        return text
-      }
-      const hasVolume = list.some((item) => volumeOf(item))
-      const maxChapter = Math.max(
-        1,
-        ...list.map(chapterOf),
-        ...arcs.map((item) => Number(item.setupChapter) || 0),
-        ...arcs.map((item) => Number(item.payoffChapter) || 0),
-      )
-      const lanes = []
-      const laneIndexByKey = new Map()
-      const ensureLane = (key, label) => {
-        if (!laneIndexByKey.has(key)) {
-          laneIndexByKey.set(key, lanes.length)
-          lanes.push({ key, label })
-        }
-        return laneIndexByKey.get(key)
-      }
-      if (hasVolume) {
-        const volumes = [...new Set(list.map(volumeOf))].filter(Boolean)
-        volumes.sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true })).forEach((volume) => ensureLane('v:' + volume, volume))
-        if (list.some((item) => !volumeOf(item))) ensureLane('v:', '未标卷')
-      } else {
-        const addChapterLane = (chapter) => {
-          if (!Number.isFinite(chapter) || chapter <= 0) return
-          const index = Math.floor((chapter - 1) / 20)
-          ensureLane('c:' + index, `第 ${index * 20 + 1}–${index * 20 + 20} 章`)
-        }
-        list.forEach((item) => addChapterLane(chapterOf(item)))
-        if (list.some((item) => !chapterOf(item))) ensureLane('c:', '未标章')
-        // 伏笔埋收章所在泳道也要有，跨泳道弧线才画得准
-        arcs.forEach((item) => {
-          addChapterLane(Number(item.setupChapter))
-          addChapterLane(Number(item.payoffChapter))
-        })
-      }
-      if (lanes.length === 0 && arcs.length > 0) {
-        const maxArcChapter = Math.max(1, ...arcs.map((item) => Number(item.payoffChapter) || 1))
-        for (let index = 0; index <= Math.floor((maxArcChapter - 1) / 20); index += 1) {
-          ensureLane('c:' + index, `第 ${index * 20 + 1}–${index * 20 + 20} 章`)
-        }
-      }
-      if (lanes.length === 0) return h(Empty, null, '还没有事件，也没有可画的伏笔。先添加事件或伏笔，再回来看泳道。')
-
-      const laneForChapter = (chapter) => {
-        const n = Number(chapter)
-        if (!Number.isFinite(n) || n <= 0) return hasVolume ? (laneIndexByKey.get('v:') ?? 0) : (laneIndexByKey.get('c:') ?? 0)
-        if (hasVolume) {
-          const owner = list.find((item) => chapterOf(item) === n && volumeOf(item))
-          if (owner) return laneIndexByKey.get('v:' + volumeOf(owner)) ?? 0
-          return 0
-        }
-        return laneIndexByKey.get('c:' + Math.floor((n - 1) / 20)) ?? 0
-      }
-
-      const cardW = Math.max(56, Math.round(120 * zoom))
-      // 步长至少要比卡片宽，否则章节少时事件卡片会叠在一起
-      const step = Math.max(16, Math.round(36 * zoom), cardW + 12)
-      const cardH = Math.max(20, Math.round(34 * zoom))
-      const laneH = Math.max(46, Math.round(72 * zoom))
-      const padLeft = 104
-      // 顶部留出伏笔弧线的空间，否则跨章弧线会被裁掉
-      const padTop = 88
-      const width = padLeft + step * maxChapter + 60
-      const height = padTop + lanes.length * laneH + 16
-      const xOf = (chapter) => padLeft + (Math.max(1, Math.min(maxChapter, Number(chapter) || 1)) - 1) * step + step / 2
-      const laneTop = (index) => padTop + index * laneH
-
-      const groups = new Map()
-      for (const event of list) {
-        const laneKey = hasVolume
-          ? (volumeOf(event) ? 'v:' + volumeOf(event) : 'v:')
-          : (chapterOf(event) ? 'c:' + Math.floor((chapterOf(event) - 1) / 20) : 'c:')
-        const lane = laneIndexByKey.get(laneKey)
-        if (lane === undefined) continue
-        const key = `${lane}|${chapterOf(event)}`
-        if (!groups.has(key)) groups.set(key, [])
-        groups.get(key).push(event)
-      }
-      const placed = new Map()
-      for (const [key, group] of groups) {
-        const [lane, chapter] = key.split('|').map(Number)
-        const count = group.length
-        const spread = count > 1 ? (laneH - cardH - 10) / (count - 1) : 0
-        group.forEach((event, index) => {
-          const offset = count > 1 ? (index - (count - 1) / 2) * Math.min(spread, cardH + 6) : 0
-          placed.set(event.id, { lane, chapter, offset })
-        })
-      }
-
-      const laneEls = lanes.map((lane, index) => h(
-        'g',
-        { key: lane.key },
-        h('rect', { className: 'sd-lane-band' + (index % 2 ? ' sd-lane-band-alt' : ''), x: 0, y: laneTop(index), width, height: laneH }),
-        h('text', { className: 'sd-lane-label', x: 10, y: laneTop(index) + laneH / 2 + 4 }, lane.label),
-      ))
-
-      const tickStep = step >= 56 ? 5 : 10
-      const tickEls = []
-      for (let chapter = 1; chapter <= maxChapter; chapter += tickStep) {
-        const x = xOf(chapter)
-        tickEls.push(h('line', { key: 'tick-' + chapter, className: 'sd-lane-tick', x1: x, y1: padTop, x2: x, y2: height - 8 }))
-        tickEls.push(h('text', { key: 'tick-label-' + chapter, className: 'sd-lane-tick-label', x, y: 14, textAnchor: 'middle' }, `第${chapter}章`))
-      }
-
-      const arcEls = arcs.map((item, index) => {
-        const laneA = laneForChapter(item.setupChapter)
-        const laneB = laneForChapter(item.payoffChapter)
-        const x1 = xOf(item.setupChapter)
-        const x2 = xOf(item.payoffChapter)
-        const y1 = laneTop(laneA) + laneH / 2
-        const y2 = laneTop(laneB) + laneH / 2
-        const paid = item.status === 'paid'
-        const lift = Math.max(26, Math.min(70, Math.abs(x2 - x1) * 0.12))
-        const path = `M ${x1} ${y1} C ${x1} ${Math.min(y1, y2) - lift}, ${x2} ${Math.min(y1, y2) - lift}, ${x2} ${y2}`
-        return h(
-          'g',
-          { key: 'arc-' + (item.id ?? index) },
-          h('path', { className: 'sd-lane-arc' + (paid ? ' sd-lane-arc-paid' : ''), d: path }),
-          h('title', null, `${item.title || '伏笔'}：第 ${item.setupChapter} 章埋 → 第 ${item.payoffChapter} 章${paid ? '收（已回收）' : '计划回收'}`),
-        )
-      })
-
-      const eventEls = list.map((event) => {
-        const spot = placed.get(event.id)
-        if (!spot) return null
-        const centerX = xOf(spot.chapter)
-        const laneCenter = laneTop(spot.lane) + laneH / 2
-        const x = centerX - cardW / 2
-        const y = laneCenter - cardH / 2 + spot.offset
-        const importance = LANE_IMPORTANCE[event.importance] ? event.importance : 'normal'
-        const label = String(event.title || '未命名事件')
-        const maxChars = Math.max(2, Math.floor((cardW - 12) / 12))
-        return h(
-          'g',
-          { key: event.id, onClick: () => onEdit(event) },
-          h('rect', { className: `sd-lane-ev sd-lane-ev-${importance}`, x, y, width: cardW, height: cardH, rx: 6 }),
-          cardW >= 66 ? h('text', { className: 'sd-lane-ev-text', x: centerX, y: y + cardH / 2 + 4, textAnchor: 'middle' }, label.length > maxChars ? label.slice(0, maxChars) + '…' : label) : null,
-          h('title', null, `${label}${spot.chapter ? `（第 ${spot.chapter} 章）` : '（未标章）'}${event.storyTime ? ' · ' + event.storyTime : ''}`),
-        )
-      })
-
-      return h(
-        'div',
-        { className: 'sd-lane' },
-        h(
-          'div',
-          { className: 'sd-lane-tools' },
-          h('span', { className: 'sd-hint' }, '缩放'),
-          h('input', { type: 'range', min: 0.5, max: 3, step: 0.1, value: zoom, className: 'sd-zoom', onChange: (e) => setZoom(Number(e.target.value)) }),
-          h('span', { className: 'sd-hint sd-zoom-value' }, `${zoom.toFixed(1)}x`),
-          h('span', { className: 'sd-hint' }, '事件：'),
-          Object.keys(LANE_IMPORTANCE).map((key) => h('span', { key, className: 'sd-lane-legend' }, h('i', { className: 'sd-lane-swatch sd-lane-ev-' + key }), LANE_IMPORTANCE[key])),
-          h('span', { className: 'sd-hint' }, '弧线：实线 = 未回收，灰色虚线 = 已回收'),
-        ),
-        h(
-          'div',
-          { className: 'sd-lane-scroll' },
-          h('svg', { className: 'sd-lane-svg', width, height, viewBox: `0 0 ${width} ${height}` },
-            h('g', null, laneEls),
-            h('g', null, tickEls),
-            h('g', null, arcEls),
-            h('g', null, eventEls),
-          ),
-        ),
-      )
-    }
-
-    // ══ v0.4 新增：批量审稿 ═══════════════════════════════════
-    function ReviewsTab({ bundle, projectId, onChanged, onAddCart }) {
-      const meta = KIND_META.reviews
-      const [editing, setEditing] = useState(null)
-      const [selected, setSelected] = useState([])
-      const [severityFilter, setSeverityFilter] = useState('all')
-      const [bulkBusy, setBulkBusy] = useState(false)
-      const [showDone, setShowDone] = useState(false)
-      const all = bundle.reviews ?? []
-      const isDone = (review) => review.status === 'fixed' || review.status === 'wontfix'
-      const severityRank = { blocker: 0, major: 1, minor: 2, suggestion: 3 }
-      const bySeverity = (a, b) => (severityRank[a.severity] ?? 9) - (severityRank[b.severity] ?? 9) || (Number(a.chapter) || 0) - (Number(b.chapter) || 0)
-      const pendingAll = all.filter((review) => !isDone(review))
-      const pending = pendingAll.filter((review) => severityFilter === 'all' || review.severity === severityFilter).sort(bySeverity)
-      const done = all.filter(isDone).sort((a, b) => (Number(b.chapter) || 0) - (Number(a.chapter) || 0))
-      const selectedRows = all.filter((review) => selected.includes(review.id))
-      const selectedPending = selectedRows.filter((review) => !isDone(review))
-      const selectedDone = selectedRows.filter((review) => isDone(review))
-      // 提案已采纳但审阅没归档的历史数据：进页面自动回填一次（幂等）
-      const acceptedReviewIds = new Set()
-      for (const proposal of bundle.proposals ?? []) {
-        if (proposal.status !== 'accepted') continue
-        const ids = [
-          ...(Array.isArray(proposal.data?.reviewIds) ? proposal.data.reviewIds : []),
-          ...(Array.isArray(proposal.reviewIds) ? proposal.reviewIds : []),
-        ]
-        for (const id of ids) acceptedReviewIds.add(String(id))
-      }
-      const linkedReviewCount = pendingAll.filter((review) => acceptedReviewIds.has(String(review.id))).length
-      const reconcileAttempted = useRef(false)
-      useEffect(() => {
-        if (linkedReviewCount === 0 || reconcileAttempted.current) return
-        reconcileAttempted.current = true
-        ;(async () => {
-          try {
-            const value = await api('review.reconcile', { projectId })
-            if (Number(value?.updated) > 0) onChanged?.()
-          } catch {
-            /* ignore：回填失败不阻断审阅页 */
-          }
-        })()
-      }, [linkedReviewCount, projectId])
-      const grid = '30px ' + meta.columns.map((c) => c.w || '1fr').join(' ') + ' 148px'
-      const toggle = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
-      const allPendingSelected = pending.length > 0 && pending.every((review) => selected.includes(review.id))
-      const toggleAllPending = () => {
-        if (allPendingSelected) setSelected((prev) => prev.filter((id) => !pending.some((review) => review.id === id)))
-        else setSelected((prev) => [...new Set([...prev, ...pending.map((review) => review.id)])])
-      }
-      const remove = async (review) => {
-        if (!window.confirm(`删除这条审稿意见？\n${review.issue || review.id}`)) return
-        try {
-          await api('entity.delete', { projectId, kind: 'reviews', entityId: review.id })
-          onChanged()
-        } catch (error) {
-          window.alert(error.message)
-        }
-      }
-      const batchStatus = async (status, rows) => {
-        const list = (rows ?? []).filter((review) => review && review.id)
-        if (list.length === 0) {
-          window.alert('请先勾选审稿意见')
-          return
-        }
-        const label = { fixed: '已修', wontfix: '忽略', open: '待处理' }[status] ?? status
-        if (!window.confirm(`把 ${list.length} 条审稿标记为「${label}」？`)) return
-        setBulkBusy(true)
-        try {
-          const value = await api('review.batchUpdate', { projectId, ids: list.map((review) => review.id), status })
-          const missing = value?.missing ?? []
-          if (missing.length > 0) window.alert(`已更新 ${value?.updated ?? 0} 条，${missing.length} 条未找到：${missing.join('、')}`)
-          setSelected([])
-          onChanged()
-        } catch (error) {
-          window.alert(`批量更新失败：${error.message}`)
-        } finally {
-          setBulkBusy(false)
-        }
-      }
-      // 审稿不直接发对话：先加入清单（清单是唯一 AI 入口），在清单里批量生成修订提案
-      const addToCart = (rows) => {
-        const list = (rows ?? []).filter((review) => review && review.id)
-        if (list.length === 0) {
-          window.alert('请先勾选审稿意见')
-          return
-        }
-        if (!onAddCart) return
-        onAddCart(list.map((review) => ({
-          kind: 'review',
-          id: review.id,
-          chapter: review.chapter,
-          title: (review.issue ?? '').slice(0, 50),
-          detail: [review.issue, review.suggestion ? `建议：${review.suggestion}` : ''].filter(Boolean).join('；'),
-        })))
-        setSelected([])
-      }
-      const renderRows = (rows) => h('div', { className: 'sd-table' },
-        h('div', { className: 'sd-row sd-row-head', style: { gridTemplateColumns: grid } },
-          h('div', null),
-          meta.columns.map((c) => h('div', { key: c.k }, c.t)),
-          h('div', { className: 'sd-actions-col' }, '操作')),
-        rows.map((review) => h('div', { key: review.id, className: 'sd-row' + (isDone(review) ? ' sd-row-done' : ''), style: { gridTemplateColumns: grid } },
-          h('div', { className: 'sd-row-cb' }, h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) })),
-          meta.columns.map((c) => {
-            const text = c.format ? String(c.format(review[c.k], review)) : displayValue(c.k, review[c.k])
-            return h('div', { key: c.k, className: 'sd-cell', title: text }, text)
-          }),
-          h('div', { className: 'sd-row-actions' },
-            !isDone(review) && onAddCart ? h(Btn, { small: true, kind: 'primary', onClick: () => addToCart([review]) }, '加入清单') : null,
-            isDone(review) ? h(Btn, { small: true, disabled: bulkBusy, onClick: () => batchStatus('open', [review]) }, '重新打开') : null,
-            h(Btn, { small: true, onClick: () => setEditing(review) }, '编辑'),
-            h(Btn, { small: true, kind: 'danger', onClick: () => remove(review) }, '删除'),
-          ))))
-      if (all.length === 0) {
-        return h('div', { className: 'sd-page' },
-          h('div', { className: 'sd-pagehead' },
-            h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc)),
-            h('div', { className: 'sd-pagehead-actions' },
-              h(Btn, { onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'),
-              h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-          h(Empty, null, '还没有审稿意见。AI 审稿或手动新增都会出现在这里。'),
-          editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-        )
-      }
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null, h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title), h('p', { className: 'sd-desc' }, meta.desc + ' 待处理勾选后加入清单（清单里批量生成修订提案）；已处理默认折叠归档，可重新打开。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            h(Btn, { onClick: () => onAddCart({ kind: 'task', id: 'full-review', title: '从头审阅整个项目', task: 'full-review' }) }, '＋ 加入清单：从头审阅'),
-            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        h('div', { className: 'sd-bulkbar' },
-          h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allPendingSelected, onChange: toggleAllPending }), '全选待处理'),
-          h('span', { className: 'sd-hint' }, `待处理 ${pendingAll.length} 条，当前显示 ${pending.length} 条，已选 ${selectedPending.length} 条`),
-          linkedReviewCount > 0 ? h('span', { className: 'sd-hint' }, `${linkedReviewCount} 条审阅对应的提案已采纳，正在自动归档…`) : null,
-          h('select', { className: 'sd-input sd-select-inline', value: severityFilter, onChange: (e) => setSeverityFilter(e.target.value) },
-            h('option', { value: 'all' }, '全部严重度'),
-            [['blocker', '阻断'], ['major', '严重'], ['minor', '一般'], ['suggestion', '建议']].map(([value, label]) => h('option', { key: value, value }, label))),
-          h('div', { className: 'sd-bulkbar-actions' },
-            h(Btn, { small: true, kind: 'primary', disabled: selectedPending.length === 0 || !onAddCart, onClick: () => addToCart(selectedPending) }, `加入清单（${selectedPending.length}）`),
-            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('fixed', selectedPending) }, `标记已修（${selectedPending.length}）`),
-            h(Btn, { small: true, disabled: bulkBusy || selectedPending.length === 0, onClick: () => batchStatus('wontfix', selectedPending) }, '忽略'))),
-        pending.length > 0
-          ? renderRows(pending)
-          : h('div', { className: 'sd-empty' }, pendingAll.length === 0 ? '待处理审稿已清空 🎉' : '当前严重度筛选下没有待处理审稿。'),
-        done.length > 0 ? h('div', { className: 'sd-section sd-mt' },
-          h('div', { className: 'sd-bulkbar' },
-            h('span', { className: 'sd-hint' }, `已处理（${done.length}）：已修 + 忽略，默认归档收起`),
-            h('div', { className: 'sd-bulkbar-actions' },
-              h(Btn, { small: true, disabled: bulkBusy || selectedDone.length === 0, onClick: () => batchStatus('open', selectedDone) }, `重新打开所选（${selectedDone.length}）`),
-              h(Btn, { small: true, onClick: () => setShowDone(!showDone) }, showDone ? '收起' : '展开'))),
-          showDone ? h('div', { className: 'sd-mini-list' }, done.map((review) => h('div', { key: review.id, className: 'sd-mini-row' },
-            h('input', { type: 'checkbox', checked: selected.includes(review.id), onChange: () => toggle(review.id) }),
-            h(Tag, { tone: 'muted' }, review.status === 'fixed' ? '已修' : '忽略'),
-            h('span', { className: 'sd-mini-title' }, `第${review.chapter}章 · ${review.dimension ?? ''} · ${(review.issue ?? '').slice(0, 70)}`),
-            h(Btn, { small: true, disabled: bulkBusy, onClick: () => batchStatus('open', [review]) }, '重新打开')))) : null,
-        ) : null,
-        editing !== null ? h(EntityEditor, { kind: 'reviews', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    // ══ v0.6 新增：⚡ 注意力页 ══════════════════════════════════
-    // X 轴按章号等距；宽度随章数增长（133 章 ≈ 2050px，容器横向滚动），高度固定 236px。
-    const ATT_CHART = { minWidth: 640, height: 236, top: 16, bottom: 30, left: 36, right: 16, step: 15 }
-
-    function attentionFocusCard(chapter) {
+    // 发工作单到 DSH 对话：支持指定目标会话；成功后自动跳回那个对话
+    async function sendToChat(projectId, payload, target) {
+      const extra = typeof targetPayload === 'function' ? targetPayload(target) : {}
+      let value
       try {
-        const target = document.getElementById(`sd-att-card-${Number(chapter)}`)
-        if (target && typeof target.scrollIntoView === 'function') target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        value = await api('chat.send', { projectId, ...payload, ...extra })
+      } catch (error) {
+        const text = String(error?.message || '')
+        if (!extra.newSession && /子代理|普通会话|可投递/.test(text)) {
+          value = await api('chat.send', { projectId, ...payload, newSession: true })
+        } else {
+          throw error
+        }
+      }
+      if (value?.sessionId && openDshSession(value.sessionId)) {
+        closeDesk()
+        return { ...value, jumped: true }
+      }
+      return value
+    }
+
+    // 是不是真·浏览器标签（DSH 桌面端基于 Electron → false）。决定「开网页」还是「开浮层」。
+    const IS_BROWSER_TAB = (() => {
+      try {
+        const ua = String((window.navigator && window.navigator.userAgent) || '')
+        if (!ua) return false
+        return !/Electron/i.test(ua)
       } catch {
-        /* 滚动失败不影响阅读 */
+        return false
       }
-    }
+    })()
 
-    function AttentionChart({ rows }) {
-      const axisRows = rows.filter((row) => attentionHasScore(row) || attentionHasDesign(row))
-      if (axisRows.length === 0) {
-        return h(Empty, null, '还没有可画的分数：先在分工页冷读回填 score，或在「＋ 新增」里填目标分 designScore。')
+    // 只有显式工作台链接（app.open 加了 #novel-desk=1）才自动铺开。
+    // 标记在 hash 里，因为宿主认证的 303 跳转会把 query 丢掉；hash 会随跳转保留。
+    // 兼容旧链接/脚本里的 ?novel-desk=1。DSH Remote（dsh-pocket）的页面不带标记，
+    // 仍显示 DSH；手机点和桌面点显式链接都直接进工作台，手机靠右下角 ✕ 关闭。
+    const IS_STANDALONE_TAB = (() => {
+      try {
+        const hasMarker = (raw) => /(?:^|[?&#])novel-desk=1(?:&|$)/.test(String(raw || ''))
+        const locate = window.location || {}
+        return hasMarker(locate.hash) || hasMarker(locate.search)
+      } catch {
+        return false
       }
-      const count = axisRows.length
-      const width = Math.max(ATT_CHART.minWidth, count * ATT_CHART.step + ATT_CHART.left + ATT_CHART.right)
-      const plotWidth = width - ATT_CHART.left - ATT_CHART.right
-      const plotHeight = ATT_CHART.height - ATT_CHART.top - ATT_CHART.bottom
-      const xAt = (index) => ATT_CHART.left + (count === 1 ? plotWidth / 2 : (plotWidth * index) / (count - 1))
-      const yAt = (score) => ATT_CHART.top + plotHeight * (1 - Math.max(0, Math.min(100, Number(score))) / 100)
-      const buildPath = (pick) => {
-        const parts = []
-        let prevIndex = null
-        axisRows.forEach((row, index) => {
-          const value = pick(row)
-          if (value === null) return
-          // 缺数据的章断开折线，不假装插值
-          const command = prevIndex === null || index !== prevIndex + 1 ? 'M' : 'L'
-          parts.push(`${command}${xAt(index).toFixed(1)},${yAt(value).toFixed(1)}`)
-          prevIndex = index
-        })
-        return parts.join(' ')
-      }
-      const scorePath = buildPath((row) => (attentionHasScore(row) ? Number(row.score) : null))
-      const designPath = buildPath((row) => (attentionHasDesign(row) ? Number(row.designScore) : null))
-      const labelStep = Math.max(1, Math.ceil(count / 14))
-      return h('div', { className: 'sd-att-chart' },
-        h('div', { className: 'sd-att-legend' },
-          ATTENTION_TYPES.map(([value, label]) => h('span', { key: value, className: 'sd-att-legend-item' },
-            h('span', { className: `sd-att-swatch ${ATTENTION_TYPE_CLASS[value]}` }), label)),
-          h('span', { className: 'sd-att-legend-item' }, h('span', { className: 'sd-att-legend-dash' }), '虚线 = 目标分'),
-          h('span', { className: 'sd-att-legend-item' }, h('span', { className: 'sd-att-legend-risk' }), '红圈 = 弃读点')),
-        h('div', { className: 'sd-att-chart-scroll' },
-          h('svg', {
-            className: 'sd-att-chart-svg',
-            width,
-            height: ATT_CHART.height,
-            viewBox: `0 0 ${width} ${ATT_CHART.height}`,
-            role: 'img',
-            'aria-label': '注意力分数曲线（X 轴章号，Y 轴 0–100）',
-          },
-          [0, 20, 40, 60, 80, 100].map((tick) => h(React.Fragment, { key: `tick-${tick}` },
-            h('line', { className: 'sd-att-grid', x1: ATT_CHART.left, x2: width - ATT_CHART.right, y1: yAt(tick), y2: yAt(tick) }),
-            h('text', { className: 'sd-att-axis-label', x: ATT_CHART.left - 8, y: yAt(tick) + 3, textAnchor: 'end' }, String(tick)))),
-          axisRows.map((row, index) => (index % labelStep === 0 || index === count - 1)
-            ? h('text', { key: `x-${index}`, className: 'sd-att-axis-label', x: xAt(index), y: ATT_CHART.height - 8, textAnchor: 'middle' }, String(Number(row.chapter)))
-            : null),
-          designPath ? h('path', { className: 'sd-att-design-line', d: designPath }) : null,
-          scorePath ? h('path', { className: 'sd-att-score-line', d: scorePath }) : null,
-          axisRows.map((row, index) => (attentionHasDesign(row)
-            ? h('circle', { key: `design-${index}`, className: 'sd-att-design-dot', cx: xAt(index), cy: yAt(row.designScore), r: 2.6 },
-                h('title', null, `第 ${Number(row.chapter)} 章 · 目标分 ${Number(row.designScore)}`))
-            : null)),
-          axisRows.map((row, index) => (attentionHasScore(row)
-            ? h('circle', {
-                key: `score-${index}`,
-                className: `sd-att-dot ${ATTENTION_TYPE_CLASS[row.type] ?? ''}${row.dropRisk ? ' sd-att-dot-risk' : ''}`,
-                cx: xAt(index),
-                cy: yAt(row.score),
-                r: row.dropRisk ? 5 : 4.2,
-                onClick: () => attentionFocusCard(row.chapter),
-              },
-              h('title', null, `第 ${Number(row.chapter)} 章 · ${ATTENTION_TYPE_LABEL[row.type] ?? '未分型'} · ${Number(row.score)} 分${row.dropRisk ? ` · 弃读点：${row.dropRisk}` : ''}`))
-            : null)),
-          ),
-        ),
-      )
-    }
+    })()
 
-    function AttentionStatsBar({ stats }) {
-      return h(React.Fragment, null,
-        h('div', { className: 'sd-att-stats' },
-          h('div', { className: 'sd-att-stat' },
-            h('div', { className: 'sd-att-stat-label' }, '全书平均分'),
-            h('div', { className: `sd-att-stat-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
-            h('div', { className: 'sd-hint' }, `${stats.scored.length} 章有实测分`)),
-          h('div', { className: 'sd-att-stat' },
-            h('div', { className: 'sd-att-stat-label' }, '最低三章'),
-            stats.lowest.length === 0
-              ? h('div', { className: 'sd-hint' }, '还没有实测分')
-              : h('div', { className: 'sd-att-stat-list' }, stats.lowest.map((row) => h('div', { key: row.id ?? `low-${row.chapter}`, className: 'sd-att-lowrow' },
-                  h('span', null, `第 ${Number(row.chapter)} 章`),
-                  h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`))))),
-          h('div', { className: 'sd-att-stat' },
-            h('div', { className: 'sd-att-stat-label' }, '未标章数'),
-            h('div', { className: 'sd-att-stat-big' }, String(stats.unmarked.length)),
-            h('div', { className: 'sd-hint' }, '有正文但无注意力记录')),
-          h('div', { className: 'sd-att-stat' },
-            h('div', { className: `sd-att-stat-label` }, '疲劳 / 骤降预警'),
-            h('div', { className: `sd-att-stat-big${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
-            h('div', { className: 'sd-hint' }, '同类型连续 >3 章、相邻章降 ≥15'))),
-        stats.warnings.length > 0
-          ? h('div', { className: 'sd-att-warns' }, stats.warnings.map((warning, index) => h('div', { key: `warn-${index}`, className: 'sd-att-warn' }, `⚠ ${warning.text}`)))
-          : null,
-      )
-    }
-
-    function AttentionCard({ row, bundle, onEdit, onGoTab }) {
-      const chapter = Number(row.chapter)
-      const subs = attentionSubItems(bundle, chapter)
-      const score = attentionHasScore(row) ? Number(row.score) : null
-      const design = attentionHasDesign(row) ? Number(row.designScore) : null
-      const gap = score !== null && design !== null ? score - design : null
-      const chapterTitle = (bundle.chapters ?? []).find((item) => Number(item.id) === chapter)?.title
-      const verdictTone = ATTENTION_VERDICT_TONE[row.verdict] ?? ''
-      const state = attentionStatusOf(row)
-      const needsDesign = state.key === 'nodesign' || state.key === 'blank'
-      const aggRow = (key, title, meta) => h('div', { key, className: 'sd-att-agg-row' },
-        h('span', { className: 'sd-att-agg-title', title }, title),
-        meta ? h('span', { className: 'sd-att-agg-meta' }, meta) : null)
-      return h('article', { id: `sd-att-card-${chapter}`, className: 'sd-att-card' },
-        h('div', { className: 'sd-att-card-head' },
-          h('div', { className: 'sd-att-chapter' },
-            `第 ${chapter} 章`,
-            chapterTitle ? h('span', { className: 'sd-att-chapter-title' }, chapterTitle) : null),
-          h('span', { className: `sd-att-type ${ATTENTION_TYPE_CLASS[row.type] ?? ''}` },
-            h('span', { className: 'sd-att-swatch' }),
-            ATTENTION_TYPE_LABEL[row.type] ?? '未分型'),
-          h('span', { className: `sd-att-state sd-att-state-${state.key}`, title: '已闭环 = 设计 + 实测都有；待冷读 = 有设计没实测；缺设计 = 有实测没设计；空白 = 都没有' }, state.label),
-          needsDesign ? h('span', { className: 'sd-att-design-hint' }, '补设计：点页面顶部「＋ 加入清单：AI 补齐注意力机制」') : null,
-          score !== null
-            ? h('span', { className: `sd-att-score${attentionScoreTone(score)}` }, String(score), h('span', { className: 'sd-att-score-unit' }, '/100'))
-            : h('span', { className: 'sd-att-score sd-att-tone-missing' }, '未测'),
-          design !== null ? h('span', { className: 'sd-att-design', title: '设计时定下的目标分' }, `目标 ${design}`) : null,
-          gap !== null && Math.abs(gap) >= 20
-            ? h('span', { className: `sd-att-gap${gap < 0 ? ' sd-att-gap-bad' : ''}`, title: '目标分与实测分差 ≥20：设计可能没兑现，值得复读这一章' }, `Δ ${gap > 0 ? '+' : ''}${gap}`)
-            : null,
-          row.verdict ? h(Tag, { tone: verdictTone }, `下一章：${row.verdict}`) : null,
-          row.weakest ? h('span', { className: 'sd-att-meta' }, `最弱：${ATTENTION_WEAKEST_LABEL[row.weakest] ?? row.weakest}`) : null,
-          row.status ? h(Tag, { tone: 'muted' }, ATTENTION_STATUS_LABEL[row.status] ?? row.status) : null,
-          h('div', { className: 'sd-att-card-actions' }, h(Btn, { small: true, onClick: () => onEdit(row) }, '编辑'))),
-        row.dropRisk ? h('div', { className: 'sd-att-drop' }, h('strong', null, '弃读点'), h('span', null, row.dropRisk)) : null,
-        h('div', { className: 'sd-att-beats' }, ATTENTION_BEATS.map(([key, label, placeholder]) => h('div', { key, className: 'sd-att-beat' },
-          h('div', { className: 'sd-att-beat-label' }, label),
-          h('div', { className: `sd-att-beat-text${String(row[key] ?? '').trim() ? '' : ' sd-att-beat-empty'}` }, String(row[key] ?? '').trim() || placeholder)))),
-        String(row.emotion ?? '').trim() ? h('div', { className: 'sd-att-emotion' }, h('strong', null, '情绪'), h('span', null, row.emotion)) : null,
-        String(row.question ?? '').trim() ? h('div', { className: 'sd-att-question' }, h('strong', null, '读者最想知道'), h('span', null, row.question)) : null,
-        String(row.detail ?? '').trim()
-          ? h('details', { className: 'sd-att-detail' },
-              h('summary', null, '详细说明'),
-              h('div', { className: 'sd-att-detail-body' }, row.detail))
-          : null,
-        h('div', { className: 'sd-att-aggs' },
-          h('details', { className: 'sd-att-agg' },
-            h('summary', null, `🧩 本章伏笔 · 埋 ${subs.plants.length} / 收 ${subs.payoffs.length}`),
-            h('div', { className: 'sd-att-agg-body' },
-              subs.plants.map((item, index) => aggRow(`plant-${index}`, `埋：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '未回收')),
-              subs.payoffs.map((item, index) => aggRow(`payoff-${index}`, `收：${item.title ?? '未命名'}`, item.status === 'paid' ? '已回收' : '计划回收')),
-              subs.plants.length + subs.payoffs.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有埋设或回收伏笔') : null,
-              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('foreshadow') }, '去伏笔页维护')) : null)),
-          h('details', { className: 'sd-att-agg' },
-            h('summary', null, `⚔️ 本章冲突 · 引爆 ${subs.conflicts.length}`),
-            h('div', { className: 'sd-att-agg-body' },
-              subs.conflicts.map((item, index) => aggRow(`conflict-${index}`, item.title ?? '未命名', CONFLICT_STATUS[item.status] ?? item.status ?? '—')),
-              subs.conflicts.length === 0 ? h('div', { className: 'sd-hint' }, '本章没有计划引爆 / 解决的冲突') : null,
-              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('conflicts') }, '去冲突页维护')) : null)),
-          h('details', { className: 'sd-att-agg' },
-            h('summary', null, `✨ 本章高光 · ${subs.highlights.length} 条`),
-            h('div', { className: 'sd-att-agg-body' },
-              subs.highlights.map((item, index) => aggRow(`highlight-${index}`, String(item.text ?? '未命名').slice(0, 120), displayValue('type', item.type))),
-              subs.highlights.length === 0 ? h('div', { className: 'sd-hint' }, '本章还没有记录高光') : null,
-              onGoTab ? h('div', { className: 'sd-att-agg-actions' }, h(Btn, { small: true, onClick: () => onGoTab('highlights') }, '去高光页维护')) : null))),
-      )
-    }
-
-    function AttentionUnmarkedCard({ chapter, onEdit }) {
-      return h('div', { id: `sd-att-card-${Number(chapter.id)}`, className: 'sd-att-unmarked' },
-        h('div', { className: 'sd-att-unmarked-main' },
-          h('span', { className: 'sd-att-unmarked-ch' }, `第 ${Number(chapter.id)} 章`),
-          h('span', { className: 'sd-att-unmarked-title' }, chapter.title || '未命名'),
-          h('span', { className: 'sd-att-unmarked-tag' }, '未标注意力')),
-        h(Btn, { small: true, onClick: () => onEdit({ chapter: Number(chapter.id) }) }, '编辑'))
-    }
-
-    function AttentionTab({ bundle, projectId, onChanged, onGoTab, onAddCart }) {
-      const meta = KIND_META.attention
-      const [editing, setEditing] = useState(null)
-      const stats = attentionStats(bundle)
-      const rows = stats.rows
-      const ordered = rows.slice().reverse() // 最新章在前
-      const unmarked = stats.unmarked
-      const hasChapters = (bundle.chapters ?? []).length > 0
-      const emptyCopy = hasChapters
-        ? `还没有注意力记录：点上方「＋ 加入清单：AI 补齐注意力机制」，或写下一章方案时让 AI 自动带设计。${unmarked.length > 0 ? ` 当前还有 ${unmarked.length} 章有正文但未标注意力。` : ''}`
-        : '还没有注意力记录，也还没有章节：写大纲 / 下一章时会自动生成设计；冷读打分在分工页的独立审稿人卡片。'
-      return h('div', { className: 'sd-page' },
-        h('div', { className: 'sd-pagehead' },
-          h('div', null,
-            h('h2', { className: 'sd-h2' }, meta.icon + ' ' + meta.title),
-            h('p', { className: 'sd-principle-inline' },
-              h('strong', null, PRINCIPLE_SLOGAN),
-              h('span', null, PRINCIPLE_REVIEW_HINT)),
-            h('p', { className: 'sd-desc' }, meta.desc),
-            h('p', { className: 'sd-att-guide' }, '设计（类型 / 四拍 / 读者问题 / 目标分）由注意力设计师产出：写大纲 / 下一章方案时自动带，老作品点「＋ 加入清单：AI 补齐注意力机制」补齐；0–100 实测分由分工页的独立审稿人冷读（清单是唯一 AI 入口）。')),
-          h('div', { className: 'sd-pagehead-actions' },
-            onAddCart ? h(Btn, { onClick: () => onAddCart(ATTENTION_DESIGN_CART) }, '＋ 加入清单：AI 补齐注意力机制') : null,
-            onGoTab ? h(Btn, { onClick: () => onGoTab('agents') }, '去分工页冷读') : null,
-            h(Btn, { kind: 'primary', onClick: () => setEditing({}) }, '＋ 新增'))),
-        h(AttentionStatsBar, { stats }),
-        h(AttentionChart, { rows }),
-        rows.length === 0
-          ? h(Empty, null, emptyCopy)
-          : h('section', { className: 'sd-att-cards' },
-              h('h3', { className: 'sd-h3' }, `章节诊断（${rows.length}）· 最新章在前`),
-              ordered.map((row) => h(AttentionCard, { key: row.id ?? `att-${row.chapter}`, row, bundle, onEdit: setEditing, onGoTab }))),
-        unmarked.length > 0
-          ? h('section', { className: 'sd-section sd-mt' },
-              h('h3', { className: 'sd-h3' }, `未标注意力的章节（${unmarked.length}）`),
-              h('p', { className: 'sd-hint' }, '这些章有正文但还没有 attention 记录：点「编辑」直接新建，章号已预填。'),
-              h('div', { className: 'sd-att-unmarked-grid' }, unmarked.slice().reverse().map((chapter) => h(AttentionUnmarkedCard, { key: chapter.id, chapter, onEdit: setEditing }))))
-          : null,
-        editing !== null ? h(EntityEditor, { kind: 'attention', item: editing, projectId, onClose: () => setEditing(null), onSaved: onChanged }) : null,
-      )
-    }
-
-    /** 总览页的注意力卡：平均分（大字）+ 最低三章 + 未标章数 + 预警数 + 补齐设计入口。 */
-    function AttentionOverviewCard({ bundle, onGoTab, onAddCart }) {
-      const stats = attentionStats(bundle)
-      const hasAny = stats.rows.length > 0
-      return h('section', { className: 'sd-section sd-mt' },
-        h('div', { className: 'sd-att-ov-head' },
-          h('h3', { className: 'sd-h3 sd-att-ov-title' }, '⚡ 注意力'),
-          h('div', { className: 'sd-att-ov-actions' },
-            onAddCart ? h(Btn, { small: true, onClick: () => onAddCart(ATTENTION_DESIGN_CART) }, '＋ 加入清单：AI 补齐注意力机制') : null,
-            hasAny && onGoTab ? h(Btn, { small: true, onClick: () => onGoTab('attention') }, '查看完整曲线与诊断 ▸') : null)),
-        hasAny
-          ? h('div', { className: 'sd-att-ov' },
-              h('div', { className: 'sd-att-ov-bigwrap' },
-                h('div', { className: `sd-att-ov-big${attentionScoreTone(stats.average)}` }, stats.average === null ? '—' : String(stats.average)),
-                h('div', { className: 'sd-att-ov-label' }, '全书平均分')),
-              h('div', { className: 'sd-att-ov-mini' },
-                h('div', { className: 'sd-att-ov-mini-label' }, '最低三章'),
-                stats.lowest.length === 0
-                  ? h('div', { className: 'sd-hint' }, '还没有实测分')
-                  : stats.lowest.map((row) => h('div', { key: row.id ?? `ov-low-${row.chapter}`, className: 'sd-att-ov-row' },
-                      h('span', null, `第 ${Number(row.chapter)} 章`),
-                      h('span', { className: `sd-att-lowscore${attentionScoreTone(row.score)}` }, `${Number(row.score)} 分`)))),
-              h('div', { className: 'sd-att-ov-mini' },
-                h('div', { className: 'sd-att-ov-mini-label' }, '未标章数'),
-                h('div', { className: 'sd-att-ov-num' }, String(stats.unmarked.length)),
-                h('div', { className: 'sd-hint' }, '有正文但没标')),
-              h('div', { className: 'sd-att-ov-mini' },
-                h('div', { className: 'sd-att-ov-mini-label' }, '疲劳 / 骤降预警'),
-                h('div', { className: `sd-att-ov-num${stats.warnings.length > 0 ? ' sd-att-tone-mid' : ''}` }, String(stats.warnings.length)),
-                stats.warnings.length > 0
-                  ? h('div', { className: 'sd-hint', title: stats.warnings.map((warning) => warning.text).join('\n') }, stats.warnings[0].text)
-                  : h('div', { className: 'sd-hint' }, '暂无')))
-          : h('p', { className: 'sd-desc' }, '还没有注意力记录：老作品点上方「＋ 加入清单：AI 补齐注意力机制」补齐，写下一章方案时 AI 也会自动带设计；冷读打分在分工页的独立审稿人卡片。有了分数，这里会显示平均分、最低三章、未标章数和疲劳 / 骤降预警。'),
-      )
-    }
-
-    // ══ v0.4 新增：章节历史版本 ═══════════════════════════════
-    function ChapterHistoryDialog({ projectId, chapterId, currentContent, onClose, onRestored }) {
-      const [versions, setVersions] = useState(null)
-      const [error, setError] = useState('')
-      const [selectedFile, setSelectedFile] = useState('')
-      const [version, setVersion] = useState(null)
-      const [busy, setBusy] = useState(false)
-
-      useEffect(() => {
-        let alive = true
-        setVersions(null)
-        setError('')
-        setSelectedFile('')
-        setVersion(null)
-        api('chapter.history', { projectId, chapterId }).then((value) => {
-          if (!alive) return
-          setVersions(Array.isArray(value) ? value : (value?.versions ?? []))
-        }).catch((err) => {
-          if (!alive) return
-          setVersions([])
-          setError(err.message)
-          window.alert(`读取历史版本列表失败：${err.message}`)
-        })
-        return () => { alive = false }
-      }, [projectId, chapterId])
-
-      const openVersion = async (file) => {
-        setSelectedFile(file)
-        setVersion(null)
-        try {
-          const value = await api('chapter.version', { projectId, chapterId, file })
-          setVersion(value && typeof value === 'object' ? value : null)
-        } catch (err) {
-          window.alert(`读取历史版本失败：${err.message}`)
-        }
-      }
-
-      const restore = async () => {
-        if (!version) return
-        if (!window.confirm(`用 ${formatDateTime(version.savedAt) || version.file} 的版本覆盖当前正文？覆盖前会自动备份当前正文。`)) return
-        setBusy(true)
-        try {
-          const value = await api('chapter.restore', { projectId, chapterId, file: selectedFile })
-          const chapter = value?.chapter && typeof value.chapter === 'object' ? value.chapter : {}
-          if (typeof chapter.content !== 'string' && typeof version.content === 'string') chapter.content = version.content
-          window.alert('已恢复所选版本，恢复前的正文已自动备份。')
-          onRestored(chapter)
-        } catch (err) {
-          window.alert(`恢复失败：${err.message}`)
-        } finally {
-          setBusy(false)
-        }
-      }
-
-      const diff = React.useMemo(() => (version ? diffLines(currentContent ?? '', stripChapterFrontmatter(version.content)) : []), [version, currentContent])
-      const changed = diff.filter((line) => line.type !== 'same').length
-
-      return h(
-        'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h(
-          'div',
-          { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, `历史版本 · 第 ${chapterId} 章`),
-            h('span', { className: 'sd-hint' }, versions ? `${versions.length} 个备份` : '读取中…'),
-            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h(
-            'div',
-            { className: 'sd-modal-body' },
-            error ? h('div', { className: 'sd-error sd-error-inline' }, `读取历史失败：${error}`) : null,
-            versions === null
-              ? h('p', { className: 'sd-hint' }, '读取中…')
-              : versions.length === 0 && !error
-                ? h(Empty, null, '还没有历史版本。往后再保存已有章节且正文有变化时，旧正文会自动备份到 .backups/。')
-                : h('div', { className: 'sd-history' },
-                    h('div', { className: 'sd-history-list' }, versions.map((item) => h('button', {
-                      key: item.file,
-                      type: 'button',
-                      className: `sd-history-item${selectedFile === item.file ? ' sd-history-item-active' : ''}`,
-                      onClick: () => openVersion(item.file),
-                    },
-                      h('div', null, formatDateTime(item.savedAt) || item.file),
-                      h('div', { className: 'sd-hint' }, `${item.bytes ?? '?'} 字节`)),
-                    )),
-                    h('div', { className: 'sd-history-diff' },
-                      version
-                        ? h('div', null,
-                            h('div', { className: 'sd-hint' }, `${formatDateTime(version.savedAt) || version.file} ｜ 与当前正文对比：${changed} 行不同`),
-                            h('div', { className: 'sd-diff' }, diff.slice(0, 220).map((line, index) => h('div', { key: index, className: `sd-diff-${line.type}` }, `${line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' '} ${line.text}`))),
-                          )
-                        : h('p', { className: 'sd-hint' }, '点左侧某个版本查看 diff。'),
-                    ),
-                  ),
-          ),
-          h('div', { className: 'sd-modal-foot' },
-            h(Btn, { onClick: onClose }, '关闭'),
-            h(Btn, { kind: 'primary', onClick: restore, disabled: !version || busy }, busy ? '恢复中…' : '恢复此版本')),
-        ),
-      )
-    }
-
-    // ══ v0.4 新增：导入 Markdown ══════════════════════════════
-    function PathPickerDialog({ initialPath, onPick, onClose }) {
-      const [path, setPath] = useState(initialPath || '')
-      const [data, setData] = useState(null)
-      const [error, setError] = useState('')
-      const [busy, setBusy] = useState(false)
-      const load = useCallback(async (target) => {
-        setBusy(true)
-        try {
-          const value = await api('import.browse', { path: target })
-          setData(value)
-          setPath(value.path)
-          setError('')
-        } catch (err) {
-          setError(err.message)
-        } finally {
-          setBusy(false)
-        }
-      }, [])
-      useEffect(() => { load(initialPath) }, [initialPath, load])
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, '📁 选择文件或目录'),
-            h('span', { className: 'sd-hint' }, '支持 .md .txt .epub .pdf .mobi'),
-            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body' },
-            h('div', { className: 'sd-inline-row' },
-              h(TextInput, { value: path, onChange: setPath }),
-              h(Btn, { onClick: () => load(path), disabled: busy }, busy ? '读取中…' : '转到'),
-              h(Btn, { onClick: () => data && load(data.parent), disabled: !data?.parent }, '上一级')),
-            error ? h('div', { className: 'sd-error sd-error-inline' }, error) : null,
-            h('div', { className: 'sd-picker-list' },
-              (data?.entries ?? []).map((entry) => h('button', {
-                key: entry.path,
-                type: 'button',
-                className: `sd-picker-row${entry.dir ? ' sd-picker-dir' : ''}`,
-                onClick: () => (entry.dir ? load(entry.path) : onPick(entry.path)),
-              }, h('span', { className: 'sd-picker-icon' }, entry.dir ? '📁' : '📄'), h('span', { className: 'sd-picker-name' }, entry.name)))),
-            (data?.entries ?? []).length === 0 && !busy ? h('p', { className: 'sd-hint' }, '这个目录里没有可导入的文件。') : null,
-          ),
-          h('div', { className: 'sd-modal-foot' },
-            h(Btn, { onClick: onClose }, '取消'),
-            h(Btn, { kind: 'primary', disabled: !data?.path, onClick: () => onPick(data.path) }, '用这个目录'))),
-      )
-    }
-
-    function CartDialog({ items, projectId, workspacePath = '', sending, onRemove, onNote, onClose, onSend, defaultTarget = 'current' }) {
-      const [allowContinue, setAllowContinue] = useState(false)
-      const [target, setTarget] = useState('')
-      const [targets, setTargets] = useState([])
-      const [currentSession, setCurrentSession] = useState('')
-      const [multiAgent, setMultiAgent] = useState(true)
-      const [preview, setPreview] = useState('')
-      const [busy, setBusy] = useState(false)
-      // 清单里全是审稿项时，可整批「生成修订提案」（逐条出 chapter 提案，不直改正文）
-      const [reviewMode, setReviewMode] = useState('proposals')
-      const reviewOnly = items.length > 0 && items.every((item) => item.kind === 'review' && item.id)
-      const toProposals = reviewOnly && reviewMode === 'proposals'
-      const isNewTarget = !target || target === '__new__'
-      const buildPayload = () => ({
-        projectId,
-        ...(toProposals ? { task: 'review-to-proposals', items } : { items, allowContinue, multiAgent }),
-        ...(isNewTarget ? { newSession: true } : { sessionId: target }),
-      })
-      const targetLabel = (session) => sessionTitleOf(session?.sessionId, session?.title) || (session?.sessionId ? `会话 ${session.sessionId.slice(0, 8)}` : '')
-      const chosenTarget = targets.find((session) => session.sessionId === target)
-      const chosenLabel = chosenTarget ? targetLabel(chosenTarget) : ''
-      useEffect(() => {
-        let alive = true
-        api('chat.sessions').then((value) => {
-          if (!alive) return
-          const rows = (value?.items ?? [])
-            .filter((item) => !item.blank && !item.parentSessionId && !item.origin && (!workspacePath || item.cwd === workspacePath))
-            .sort((a, b) => (Date.parse(b.updatedAt ?? 0) || 0) - (Date.parse(a.updatedAt ?? 0) || 0))
-          const ids = new Set(rows.map((row) => row.sessionId))
-          const main = currentMainSessionId()
-          const saved = window.localStorage.getItem(`sd.cartSession.${projectId}`) || ''
-          const preferred = (main && ids.has(main) && main) || (saved && ids.has(saved) && saved) || rows[0]?.sessionId || ''
-          setTargets(rows)
-          setCurrentSession(main && ids.has(main) ? main : '')
-          setTarget((prev) => prev || (defaultTarget === 'new' ? '__new__' : preferred || '__new__'))
-        }).catch(() => {
-          if (alive) setTarget((prev) => prev || '__new__')
-        })
-        return () => { alive = false }
-      }, [projectId, workspacePath])
-      const showPreview = async () => {
-        setBusy(true)
-        try {
-          const value = await api('chat.send', { ...buildPayload(), dryRun: true })
-          setPreview(value.prompt)
-        } catch (error) {
-          window.alert(`生成预览失败：${error.message}`)
-        } finally {
-          setBusy(false)
-        }
-      }
-      return h('div', { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && !sending && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, `🧺 本次处理清单（${items.length}）`),
-            h('span', { className: 'sd-hint' }, '勾进来的问题会一次性发到左侧对话，由 Agent 逐项处理并写回提案/审稿'),
-            h(IconBtn, { onClick: () => !sending && onClose(), title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body' },
-            items.length === 0
-              ? h(Empty, null, '清单是空的。去审稿/提案/总览检查里点「加入清单」。')
-              : h('div', { className: 'sd-cart-list' },
-                  items.map((item) => h('div', { key: `${item.kind}:${item.id}`, className: 'sd-cart-row' },
-                    h('div', { className: 'sd-cart-item' },
-                      h(Tag, { tone: 'brand' }, { review: '审稿', proposal: '提案', check: '检查', chapter: '章节', task: '任务' }[item.kind] ?? item.kind),
-                      item.approved ? h(Tag, { tone: 'muted' }, '已同意') : null,
-                      h('span', { className: 'sd-cart-title' }, `${item.chapter ? `第${item.chapter}章 · ` : ''}${item.title || item.detail || item.id}`),
-                      h(Btn, { small: true, onClick: () => onRemove(item), disabled: sending }, '移除')),
-                    h(TextArea, { value: item.note ?? '', rows: 2, placeholder: '清单补充（可选；会随清单发给 AI，和提案卡上的作者意见分开）…', onChange: (value) => onNote(item, value) })))),
-            h('div', { className: 'sd-send-options' },
-              h('label', { className: 'sd-target-row' }, h('span', { className: 'sd-hint' }, '发送到'),
-                h('select', { className: 'sd-input sd-select-inline sd-target-select', value: target || '__new__', onChange: (e) => setTarget(e.target.value) },
-                  targets.map((session) => h('option', { key: session.sessionId, value: session.sessionId },
-                    `${session.sessionId === currentSession ? '🌀 当前 · ' : ''}${targetLabel(session)} · ${relativeTime(session.updatedAt)}${session.running ? ' · 运行中' : ''}`)),
-                  h('option', { value: '__new__' }, '＋ 在本工作区新开对话'))),
-              h('p', { className: 'sd-hint' }, isNewTarget ? '会新开一个对话并在里面执行，不影响你正在用的对话。' : `会发到你选中的「${chosenLabel || '会话'}」，不会改到别的对话。`),
-              reviewOnly ? h('div', null,
-                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'proposals', onChange: () => setReviewMode('proposals') }), '这批审稿项：批量生成修订提案（逐条出一个 chapter 提案，正文不直接改）'),
-                h('label', { className: 'sd-cb' }, h('input', { type: 'radio', name: 'review-mode', checked: reviewMode === 'generic', onChange: () => setReviewMode('generic') }), '按普通清单处理（交对话逐项处理）')) : null,
-              toProposals ? h('span', { className: 'sd-hint' }, '提案会进「提案」页等你验收；这条链路不做多 Agent 派单。') : h('div', null,
-                h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: allowContinue, onChange: (e) => setAllowContinue(e.target.checked) }), '允许 AI 连续执行下一步（明确的小步不用每步都问）'),
-                h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: multiAgent, onChange: (e) => setMultiAgent(e.target.checked) }), '按分工派子 Agent（总编拆单 / 多角色执行）'))),
-            h('div', { className: 'sd-form-actions' },
-              h(Btn, { onClick: showPreview, disabled: busy || items.length === 0 }, busy ? '生成中…' : '预览发过去的 Prompt')),
-            preview ? h('pre', { className: 'sd-ai-result' }, preview) : null,
-          ),
-          h('div', { className: 'sd-modal-foot' },
-            h(Btn, { onClick: () => !sending && onClose() }, '取消'),
-            h(Btn, { kind: 'primary', onClick: () => onSend(allowContinue, target, multiAgent, reviewOnly ? reviewMode : 'generic'), disabled: sending || items.length === 0 }, sending ? '发送中…' : (isNewTarget ? `新开对话并发送 ${items.length} 项` : `发送 ${items.length} 项到「${chosenLabel || '会话'}」`)))),
-      )
-    }
-
-    function ImportDialog({ onClose, onImported, onGo, onAddCart, onOpenCart }) {
-      const [path, setPath] = useState('')
-      const [split, setSplit] = useState('auto')
-      const [scan, setScan] = useState(null)
-      const [name, setName] = useState('')
-      const [workspaceTitle, setWorkspaceTitle] = useState('')
-      const [genre, setGenre] = useState('')
-      const [autoReview, setAutoReview] = useState(true)
-      const [busy, setBusy] = useState('')
-      const [error, setError] = useState('')
-      const [report, setReport] = useState(null)
-      const [reviewing, setReviewing] = useState(false)
-      const [review, setReview] = useState(null)
-      const [picking, setPicking] = useState(false)
-
-      const doScan = async () => {
-        const dir = path.trim()
-        if (!dir) {
-          window.alert('请填写本机作品目录或 .md 文件路径')
-          return
-        }
-        setBusy('scan')
-        setError('')
-        try {
-          const value = await api('import.scan', { path: dir, split })
-          setScan(value)
-          if (!name.trim() && value.bookTitle) setName(value.bookTitle)
-        } catch (err) {
-          setScan(null)
-          setError(err.message)
-          window.alert(`扫描失败：${err.message}`)
-        } finally {
-          setBusy('')
-        }
-      }
-
-      const doImport = async () => {
-        if (!scan) {
-          window.alert('请先点「扫描预览」')
-          return
-        }
-        if (!name.trim()) {
-          window.alert('请填写作品名')
-          return
-        }
-        const c = scan.counts ?? {}
-        if (!window.confirm(`导入《${name.trim()}》？\n工作区：${workspaceTitle.trim() || name.trim()}\n章节 ${c.chapters ?? 0} ｜ 人物 ${c.characters ?? 0} ｜ 大纲 ${c.outlines ?? 0} ｜ 事件 ${c.events ?? 0} ｜ 事实 ${c.facts ?? 0} ｜ 伏笔 ${c.foreshadow ?? 0} ｜ 预设 ${c.presets ?? 0}`)) return
-        setBusy('run')
-        try {
-          const value = await api('import.run', { path: path.trim(), projectName: name.trim(), workspaceTitle: workspaceTitle.trim(), genre: genre.trim(), mode: 'new', split })
-          if (!value?.projectId) throw new Error('导入没有返回作品 id')
-          onImported(value.projectId)
-          if (autoReview) {
-            await sendToChat({ projectId: value.projectId, task: 'import-review', newSession: true })
-            return
+    /**
+     * 让宿主用系统默认浏览器打开同一套工作台（宿主生成带 token 的 URL 并调 `open`）。
+     * 返回 null 表示宿主不可用 → 调用方退回当前窗口浮层，入口永远不空转。
+     */
+    async function openInBrowser() {
+      try {
+        const value = await api('app.open')
+        if (value && value.opened === false && value.url) {
+          try {
+            window.prompt && window.prompt('自动打开失败，请复制链接到浏览器：', value.url)
+          } catch {
+            /* 无 prompt 环境忽略 */
           }
-          setReport(value)
-        } catch (err) {
-          window.alert(`导入失败：${err.message}`)
-        } finally {
-          setBusy('')
         }
+        return value || null
+      } catch {
+        return null
       }
-
-      const startReview = async () => {
-        if (!report) return
-        setReviewing(true)
-        try {
-          await sendToChat({ projectId: report.projectId, task: 'import-review' })
-        } catch (err) {
-          window.alert(`发送到对话失败：${err.message}`)
-        } finally {
-          setReviewing(false)
-        }
-      }
-
-      const counts = report?.counts ?? {}
-      const scanCounts = scan?.counts ?? {}
-
-      const reportBody = report ? h('div', { className: 'sd-import-report' },
-        h('div', { className: 'sd-import-counts' },
-          [['章节', counts.chapters], ['人物', counts.characters], ['大纲', counts.outlines], ['事件', counts.events], ['事实', counts.facts], ['伏笔', counts.foreshadow], ['预设', counts.presets], ['冲突', counts.conflicts]]
-            .map(([label, value]) => h('div', { key: label, className: 'sd-import-count' }, h('strong', null, String(value ?? 0)), h('span', null, label)))),
-        h('p', { className: 'sd-desc' }, report.detected?.characters && report.detected?.outlines
-          ? '已从作品包里识别并导入人物卡、大纲、追踪与写作规范。'
-          : '没有找到完整的人物卡/大纲/追踪文件，AI 可以按正文补全。'),
-        report.workspacePath ? h('div', { className: 'sd-hint' }, `独立工作区：${report.workspacePath}（首次使用请点「新开对话」）`) : null,
-        review
-          ? h('div', { className: 'sd-import-review' },
-              h('h3', { className: 'sd-h3' }, '审阅完成'),
-              h('div', { className: 'sd-check sd-check-info' }, `已生成 ${review.proposalIds?.length ?? 0} 个补全提案，写入 ${review.reviews ?? 0} 条冲突审稿意见。`),
-              h('p', { className: 'sd-desc' }, '补全内容在「提案」页，冲突在「审稿」页；采纳/处理前不会改动正文和账本。'),
-              h('div', { className: 'sd-form-actions' },
-                h(Btn, { kind: 'primary', onClick: () => onGo('proposals') }, '去提案页'),
-                h(Btn, { onClick: () => onGo('reviews') }, '去审稿页'),
-                h(Btn, { onClick: onClose }, '完成')))
-          : h('div', { className: 'sd-import-review' },
-              h('p', { className: 'sd-desc' }, '「开始审阅」会做两件事：① 找齐/补齐人物卡、时间线、大纲；② 核查正文与设定、追踪、大纲之间的冲突。结果只进提案与审稿，不会直接改正文。'),
-              h('div', { className: 'sd-form-actions' },
-                h(Btn, { kind: 'primary', onClick: startReview, disabled: reviewing }, reviewing ? '发送中…' : '开始审阅（发送到对话）'),
-                h(Btn, { onClick: onClose, disabled: reviewing }, '暂不审阅，先看看'))),
-      ) : null
-
-      const formBody = !report ? h('div', null,
-        h(Field, { label: '本机路径 *', hint: '作品根目录，或整本书文件（.md/.txt/.epub/.pdf/.mobi）' },
-          h('div', { className: 'sd-inline-row' },
-            h(TextInput, { value: path, placeholder: '/Users/you/Documents/我的小说 或 /书/全本.epub', onChange: setPath }),
-            h(Btn, { onClick: () => setPicking(true) }, '浏览…'),
-            h(Btn, { onClick: doScan, disabled: busy === 'scan' }, busy === 'scan' ? '扫描中…' : '扫描预览'))),
-        h(Field, { label: '切章方式', hint: '默认：一个文件一章；整本书单文件含多个 # 标题时自动按 # 切' },
-          h(Select, { value: split, options: [
-            { value: 'auto', label: '自动（推荐）' },
-            { value: 'file', label: '一个文件一章' },
-            { value: 'h1', label: '按一级标题 # 切章' },
-          ], onChange: setSplit })),
-        error ? h('div', { className: 'sd-error sd-error-inline' }, `扫描失败：${error}`) : null,
-        scan ? h('div', { className: 'sd-import-preview' },
-          h('div', null, h('strong', null, '识别结果：'),
-            `章节 ${scanCounts.chapters ?? 0} ｜ 人物 ${scanCounts.characters ?? 0} ｜ 大纲 ${scanCounts.outlines ?? 0} ｜ 事件 ${scanCounts.events ?? 0} ｜ 事实 ${scanCounts.facts ?? 0} ｜ 伏笔 ${scanCounts.foreshadow ?? 0} ｜ 预设 ${scanCounts.presets ?? 0}`),
-          h('div', { className: 'sd-hint' }, `根目录：${scan.root || scan.path}`),
-          !scan.detected?.characters ? h('div', { className: 'sd-hint' }, '⚠ 没找到人物卡目录（wiki/entities、人物/、characters/），导入后可用 AI 补全') : null,
-          !scan.detected?.outlines ? h('div', { className: 'sd-hint' }, '⚠ 没找到大纲文件（大纲.md、wiki/raw/大纲.md），导入后可用 AI 补全') : null,
-          (scan.chapters ?? []).slice(0, 12).map((chapter, index) => h('div', { key: index, className: 'sd-import-chapter' },
-            `第 ${chapter.index ?? index + 1} 章 · ${chapter.title || '（无标题）'}${chapter.words ? ` · ${chapter.words} 字` : ''}`)),
-          (scanCounts.chapters ?? 0) > 12 ? h('div', { className: 'sd-hint' }, `… 另有 ${scanCounts.chapters - 12} 章`) : null,
-          (scan.characters ?? []).length > 0 ? h('div', { className: 'sd-hint' }, `人物：${scan.characters.slice(0, 8).map((c) => c.name).join('、')}${scan.characters.length > 8 ? '…' : ''}`) : null,
-          (scan.outlines ?? []).length > 0 ? h('div', { className: 'sd-hint' }, `大纲：第 ${scan.outlines[0].chapter}–${scan.outlines[scan.outlines.length - 1].chapter} 章，共 ${scan.outlines.length} 条`) : null,
-        ) : null,
-        h('div', { className: 'sd-form sd-form-2' },
-          h(Field, { label: '作品名 *' }, h(TextInput, { value: name, placeholder: '导入后的作品名', onChange: setName })),
-          h(Field, { label: '工作区名称（可选）', hint: '默认同作品名；会建在 DSH 默认工作区下' }, h(TextInput, { value: workspaceTitle, placeholder: '默认同作品名', onChange: setWorkspaceTitle })),
-          h(Field, { label: '类型（可选）' }, h(TextInput, { value: genre, placeholder: '武侠 / 科幻 / 悬疑…', onChange: setGenre }))),
-        h('label', { className: 'sd-cb' }, h('input', { type: 'checkbox', checked: autoReview, onChange: (e) => setAutoReview(e.target.checked) }), '导入完成后立即在新工作区开始审阅'),
-      ) : null
-
-      if (picking) return h(PathPickerDialog, {
-        initialPath: path.trim(),
-        onClose: () => setPicking(false),
-        onPick: (selected) => { setPath(selected); setPicking(false); setScan(null) },
-      })
-
-      return h(
-        'div',
-        { className: 'sd-modal-mask', onClick: (e) => e.target === e.currentTarget && busy !== 'run' && !reviewing && onClose() },
-        h('div', { className: 'sd-modal sd-modal-wide' },
-          h('div', { className: 'sd-modal-head' },
-            h('strong', null, report ? '✅ 导入完成' : '⬆ 导入作品 / 作品包'),
-            h('span', { className: 'sd-hint' }, report ? '检查导入结果，然后开始 AI 审阅' : '支持目录或整本书：md / txt / epub / pdf / mobi'),
-            h(IconBtn, { onClick: () => busy !== 'run' && !reviewing && onClose(), title: '关闭' }, '✕')),
-          h('div', { className: 'sd-modal-body' }, report ? reportBody : formBody),
-          h('div', { className: 'sd-modal-foot' },
-            report
-              ? h(Btn, { onClick: onClose }, review ? '完成' : '稍后处理')
-              : [h(Btn, { key: 'cancel', onClick: () => busy !== 'run' && onClose() }, '取消'),
-                 h(Btn, { key: 'run', kind: 'primary', onClick: doImport, disabled: busy === 'run' || !scan }, busy === 'run' ? '导入中…' : (autoReview ? '导入并开始审阅' : '导入并查看报告'))]),
-        ),
-      )
     }
 
-    // ── 工作台主壳 ────────────────────────────────────────────
-    /** 合并清单条目：去重（kind+id），支持一次传多条；纯函数，便于测试。 */
-    function mergeCartItems(prev, items) {
-      const next = Array.isArray(prev) ? [...prev] : []
-      for (const row of Array.isArray(items) ? items : [items]) {
-        if (!row?.id) continue
-        if (!next.some((existing) => existing.kind === row.kind && existing.id === row.id)) next.push(row)
+    // 作品/章号参数命名同时兼容 host 的两种写法（projectId / id、chapter / n）。
+    // 复制到剪贴板：优先 clipboard API，失败退回临时 textarea（DSH 内嵌 webview 有时没有权限）
+    async function copyText(text) {
+      const value = String(text ?? '')
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(value)
+          return true
+        }
+      } catch (err) {
+        /* 落到下面的兜底 */
       }
+      try {
+        const area = document.createElement('textarea')
+        area.value = value
+        area.style.position = 'fixed'
+        area.style.opacity = '0'
+        document.body.appendChild(area)
+        area.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(area)
+        return ok
+      } catch (err) {
+        return false
+      }
+    }
+    function scope(projectId, extra = {}) {
+      return { projectId, id: projectId, ...extra }
+    }
+    function chapterArgs(projectId, chapter, extra = {}) {
+      const n = Number(chapter) || 0
+      return { projectId, id: projectId, chapter: n, n, ...extra }
+    }
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value))
+    }
+    function fmtInt(value) {
+      const n = Number(value)
+      return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '—'
+    }
+    function fmtWords(value) {
+      const n = Number(value)
+      if (!Number.isFinite(n)) return '—'
+      if (n >= 10000) return `${(n / 10000).toFixed(1).replace(/\.0$/, '')} 万`
+      return String(n)
+    }
+    function fmtClock(iso) {
+      const ms = Date.parse(iso || '')
+      if (!Number.isFinite(ms)) return ''
+      const d = new Date(ms)
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+    }
+    function fmtAgo(value) {
+      const ms = Date.parse(value || '')
+      if (!Number.isFinite(ms)) return ''
+      const diff = Math.max(0, Date.now() - ms)
+      if (diff < 60000) return '刚刚'
+      if (diff < 3600000) return `${Math.round(diff / 60000)} 分钟前`
+      if (diff < 86400000) return `${Math.round(diff / 3600000)} 小时前`
+      return `${Math.round(diff / 86400000)} 天前`
+    }
+    function countWords(text) {
+      return String(text || '').replace(/\s+/g, '').length
+    }
+    function toList(value, key) {
+      if (Array.isArray(value)) return value
+      if (value && Array.isArray(value[key])) return value[key]
+      if (value && Array.isArray(value.items)) return value.items
+      return []
+    }
+    function toNumber(value, fallback = 0) {
+      const n = Number(value)
+      return Number.isFinite(n) ? n : fallback
+    }
+    function chapterNo(row) {
+      return toNumber(row && (row.chapter != null ? row.chapter : row.index != null ? row.index : row.id), 0)
+    }
+    function chapterTitle(row) {
+      const title = row && row.title != null ? String(row.title) : ''
+      return title || '未命名'
+    }
+    function projectTitle(project) {
+      if (!project) return ''
+      return String(project.title || project.name || project.id || '')
+    }
+    function docText(doc) {
+      if (!doc) return ''
+      if (typeof doc === 'string') return doc
+      if (typeof doc.text === 'string') return doc.text
+      return ''
+    }
+    function docHash(doc) {
+      if (!doc) return ''
+      return String((doc.meta && (doc.meta.contentHash || doc.meta.hash)) || doc.contentHash || doc.hash || '')
+    }
+    function normalRoute(rv) {
+      const source = String((rv && rv.source) || '')
+      if (source === 'reader') return 'reader'
+      if (ROUTE_LABEL[source]) return source
+      const dimension = String((rv && rv.dimension) || '')
+      if (/连续|逻辑|事实|情节/.test(dimension)) return 'logic'
+      if (/注意力|节奏|钩子|张力/.test(dimension)) return 'attention'
+      if (/AI|文笔|语言|首读|世界观/i.test(dimension)) return 'ai-style'
+      return 'logic'
+    }
+    function attentionList(raw) {
+      if (Array.isArray(raw)) return raw
+      if (raw && raw.chapters && typeof raw.chapters === 'object') {
+        return Object.entries(raw.chapters).map(([chapter, row]) => ({ chapter: toNumber(chapter), ...(row || {}) }))
+      }
+      return []
+    }
+    function attentionOf(raw, chapter) {
+      const n = Number(chapter)
+      return attentionList(raw).find((row) => toNumber(row.chapter) === n) || null
+    }
+    function attentionBeats(row) {
+      if (!row || typeof row !== 'object') return {}
+      if (row.breakdown && typeof row.breakdown === 'object') return row.breakdown
+      if (row.beats && typeof row.beats === 'object') return row.beats
+      return {}
+    }
+    function attentionScore(row) {
+      if (!row || typeof row !== 'object') return null
+      if (row.score != null && row.score !== '') return toNumber(row.score)
+      const beats = attentionBeats(row)
+      const sum = ATTENTION_BEATS.reduce((acc, beat) => acc + toNumber(beats[beat.id], 0), 0)
+      return sum > 0 ? sum : null
+    }
+    function hasCoords(location) {
+      if (!location || !location.coords) return false
+      return Number.isFinite(Number(location.coords.x)) && Number.isFinite(Number(location.coords.y))
+    }
+    function splitParagraphs(text) {
+      const value = String(text || '').replace(/\r\n?/g, '\n').trim()
+      if (!value) return []
+      return value.split(/\n{2,}/).map((p) => p.replace(/\n+$/, '')).filter((p) => p.length > 0)
+    }
+    // 段落起点/终点（与 splitParagraphs 对齐），用于「搜索结果精确跳到那一段」
+    function paragraphSpans(text) {
+      const value = String(text || '').replace(/\r\n?/g, '\n').trim()
+      const spans = []
+      const re = /[^\n]+(?:\n(?!\n)[^\n]*)*/g
+      let m = re.exec(value)
+      while (m) {
+        const raw = m[0].replace(/\n+$/, '')
+        spans.push({ start: m.index, end: m.index + raw.length })
+        m = re.exec(value)
+      }
+      return spans
+    }
+    // textarea 里某个字符在「内容坐标」里的纵向位置：用镜像 div 量，focus+setSelectionRange
+    // 在固定浮层里不一定会把光标滚进视口（实测 Chrome 不滚），所以自己算 scrollTop。
+    function caretOffsetTop(el, at) {
+      try {
+        const cs = window.getComputedStyle(el)
+        const mirror = document.createElement('div')
+        mirror.style.position = 'absolute'
+        mirror.style.left = '-99999px'
+        mirror.style.top = '0'
+        mirror.style.visibility = 'hidden'
+        mirror.style.margin = '0'
+        mirror.style.padding = '0'
+        mirror.style.whiteSpace = 'pre-wrap'
+        mirror.style.wordWrap = 'break-word'
+        mirror.style.overflowWrap = 'break-word'
+        mirror.style.fontFamily = cs.fontFamily
+        mirror.style.fontSize = cs.fontSize
+        mirror.style.fontWeight = cs.fontWeight
+        mirror.style.fontStyle = cs.fontStyle
+        mirror.style.lineHeight = cs.lineHeight
+        mirror.style.letterSpacing = cs.letterSpacing
+        mirror.style.boxSizing = 'border-box'
+        mirror.style.width = `${Math.max(0, el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight) - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth))}px`
+        mirror.textContent = String(el.value || '').slice(0, Math.max(0, at))
+        const marker = document.createElement('span')
+        marker.textContent = '\u200b'
+        mirror.appendChild(marker)
+        document.body.appendChild(mirror)
+        const top = marker.offsetTop
+        mirror.remove()
+        return top
+      } catch {
+        return 0
+      }
+    }
+    function fmtBytes(value) {
+      const n = Number(value)
+      if (!Number.isFinite(n)) return '—'
+      if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+      if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+      return String(n)
+    }
+    function getPath(item, path) {
+      const parts = String(path).split('.')
+      let cur = item
+      for (const part of parts) {
+        if (cur == null) return undefined
+        cur = cur[part]
+      }
+      return cur
+    }
+    function setPath(item, path, value) {
+      const parts = String(path).split('.')
+      const next = { ...(item || {}) }
+      let cur = next
+      for (let i = 0; i < parts.length - 1; i += 1) {
+        const key = parts[i]
+        cur[key] = { ...(cur[key] && typeof cur[key] === 'object' ? cur[key] : {}) }
+        cur = cur[key]
+      }
+      cur[parts[parts.length - 1]] = value
       return next
     }
+    function friendlyError(error) {
+      const code = error && error.code
+      const message = String((error && error.message) || error || '')
+      if (code === 'stale' || /stale|已在别处|别处修改/.test(message)) return '正文已在别处修改，重新加载'
+      return message || '请求失败'
+    }
+    function tagsText(value) {
+      if (Array.isArray(value)) return value.filter(Boolean).join('、')
+      return value == null ? '' : String(value)
+    }
+    function parseTags(text) {
+      return String(text || '')
+        .split(/[,，、;；]/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+    }
+    function sortChapters(list) {
+      return [...list].sort((a, b) => chapterNo(a) - chapterNo(b))
+    }
 
-    function Workbench() {
-      const open = useOpen()
-      const [tab, setTab] = useState('overview')
-      const [library, setLibrary] = useState(null)
-      const [projectId, setProjectId] = useState(() => window.localStorage.getItem('story-desk/project') || '')
-      const [bundle, setBundle] = useState(null)
-      const [error, setError] = useState('')
+    // ── 通用 hooks ────────────────────────────────────────────
+    function useAsync(loader, deps = []) {
+      const [state, setState] = useState({ data: null, error: '', loading: true })
+      const [tick, setTick] = useState(0)
+      const loaderRef = useRef(loader)
+      loaderRef.current = loader
+      useEffect(() => {
+        let cancelled = false
+        setState((prev) => ({ ...prev, loading: true, error: '' }))
+        Promise.resolve()
+          .then(() => loaderRef.current())
+          .then(
+            (data) => {
+              if (!cancelled) setState({ data, error: '', loading: false })
+            },
+            (error) => {
+              if (!cancelled) setState({ data: null, error: friendlyError(error), loading: false })
+            },
+          )
+        return () => {
+          cancelled = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [...deps, tick])
+      return { ...state, reload: () => setTick((x) => x + 1) }
+    }
+
+    // ── 宿主会话：跳回对话 / 选目标对话 ───────────────────────
+    let hostCtx = null
+    function hostService(name) {
+      try {
+        return hostCtx?.get?.(name) ?? null
+      } catch {
+        return null
+      }
+    }
+    function dshSessionRows() {
+      try {
+        const state = hostService('sessions')?.list?.getSnapshot?.() ?? null
+        const raw = state?.byId ? Object.values(state.byId) : Array.isArray(state?.items) ? state.items : []
+        return raw
+          .filter((row) => row && !row.parentSessionId && row.origin !== 'subagent' && row.agentAvailable !== false)
+          .map((row) => ({
+            id: String(row.id ?? row.sessionId ?? ''),
+            title: String(row.title ?? row.projections?.title ?? ''),
+            updatedAt: row.updatedAt ?? null,
+            running: Boolean(row.running),
+            blank: Boolean(row.blank),
+          }))
+          .filter((row) => row.id)
+          .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+      } catch {
+        return []
+      }
+    }
+    function openDshSession(sessionId) {
+      if (!sessionId) return false
+      try {
+        const workspace = hostService('uiWorkspace')
+        if (workspace?.openSession && workspace.openSession(sessionId)) {
+          return true
+        }
+      } catch (error) {
+        console.warn('[novel-desk] 打开会话失败', error)
+      }
+      return false
+    }
+    function closeDesk() {
+      setOpen(false)
+    }
+    function lastSessionHint(sessionId) {
+      return sessionId ? `（会话 ${String(sessionId).slice(0, 8)}）` : ''
+    }
+
+    /** 发到对话的目标选择：auto=最近在用，new=新开，其它=指定会话 */
+    function TargetPicker({ projectId, value, onChange }) {
+      const [rows, setRows] = useState([])
+      const [wsp, setWsp] = useState('')
+      useEffect(() => {
+        let alive = true
+        api('chat.sessions', { projectId })
+          .then((result) => {
+            if (!alive) return
+            setRows(Array.isArray(result?.sessions) ? result.sessions : [])
+            setWsp(String(result?.workspacePath || ''))
+          })
+          .catch(() => {})
+        return () => {
+          alive = false
+        }
+      }, [projectId])
+      const titles = useMemo(() => {
+        const map = new Map()
+        for (const row of dshSessionRows()) map.set(row.id, row.title)
+        return map
+      }, [rows.length])
+      return h(
+        'label',
+        { className: 'nd-field-row' },
+        h('span', { className: 'nd-field-label' }, '发到'),
+        h(
+          'select',
+          { className: 'nd-input', value: value || 'auto', onChange: (event) => onChange(event.target.value) },
+          [
+            h('option', { key: 'auto', value: 'auto' }, '自动（最近在用的对话）'),
+            h('option', { key: 'new', value: 'new' }, '新开一个对话'),
+            ...rows.map((row) => {
+              const title = titles.get(row.sessionId) || ''
+              const label = title ? `「${title}」${row.running ? '（进行中）' : ''}` : `${String(row.sessionId).slice(0, 8)}${row.running ? '（进行中）' : ''}`
+              return h('option', { key: row.sessionId, value: row.sessionId }, label)
+            }),
+          ],
+        ),
+      )
+    }
+    function targetPayload(target) {
+      if (!target || target === 'auto') return {}
+      if (target === 'new') return { newSession: true }
+      return { sessionId: target }
+    }
+
+    // ── 基础控件 ──────────────────────────────────────────────
+    function Btn({ children, onClick, kind, small, title, disabled, type, className }) {
+      return h(
+        'button',
+        {
+          type: type || 'button',
+          className: `nd-btn${kind ? ' nd-btn-' + kind : ''}${small ? ' nd-btn-sm' : ''}${className ? ' ' + className : ''}`,
+          onClick,
+          title,
+          disabled,
+        },
+        children,
+      )
+    }
+    function IconBtn({ children, onClick, title, disabled, className }) {
+      const classes = ['nd-iconbtn', className].filter(Boolean).join(' ')
+      return h('button', { type: 'button', className: classes, onClick, title, disabled }, children)
+    }
+    function Field({ label, hint, children }) {
+      return h('label', { className: 'nd-field' },
+        h('span', { className: 'nd-label' }, label),
+        hint ? h('span', { className: 'nd-hint' }, hint) : null,
+        children,
+      )
+    }
+    function TextInput({ value, onChange, placeholder, type, min, max, disabled }) {
+      return h('input', {
+        className: 'nd-input',
+        type: type || 'text',
+        value: value == null ? '' : value,
+        min,
+        max,
+        disabled,
+        placeholder: placeholder || '',
+        onChange: (e) => onChange(e.target.value),
+      })
+    }
+    function TextArea({ value, onChange, rows, placeholder, className }) {
+      return h('textarea', {
+        className: `nd-input nd-textarea${className ? ' ' + className : ''}`,
+        rows: rows || 3,
+        value: value == null ? '' : value,
+        placeholder: placeholder || '',
+        onChange: (e) => onChange(e.target.value),
+      })
+    }
+    function Select({ value, onChange, options, disabled }) {
+      return h('select', { className: 'nd-input nd-select', value: value == null ? '' : value, disabled, onChange: (e) => onChange(e.target.value) },
+        options.map((opt) => h('option', { key: String(opt.value), value: String(opt.value) }, opt.label)),
+      )
+    }
+    function Tag({ children, tone }) {
+      return h('span', { className: `nd-tag${tone ? ' nd-tag-' + tone : ''}` }, children)
+    }
+    function Dot({ tone }) {
+      return h('span', { className: `nd-dot${tone ? ' nd-dot-' + tone : ''}` })
+    }
+    function Empty({ children, action }) {
+      return h('div', { className: 'nd-empty' }, h('div', null, children), action || null)
+    }
+    function Loading({ children }) {
+      return h('div', { className: 'nd-loading' }, h('span', { className: 'nd-spinner' }), children || '加载中…')
+    }
+    function ErrorBox({ error, onRetry }) {
+      return h('div', { className: 'nd-errorbox' },
+        h('span', { className: 'nd-errorbox-icon' }, '⚠'),
+        h('span', { className: 'nd-errorbox-text' }, error || '请求失败'),
+        onRetry ? h(Btn, { small: true, onClick: onRetry }, '重试') : null,
+      )
+    }
+    function Msg({ tone, children, onClose }) {
+      if (!children) return null
+      return h('div', { className: `nd-msg nd-msg-${tone || 'info'}` },
+        h('span', { className: 'nd-msg-text' }, children),
+        onClose ? h(IconBtn, { onClick: onClose, title: '关闭' }, '✕') : null,
+      )
+    }
+    function Modal({ title, children, onClose, footer, wide }) {
+      return h('div', { className: 'nd-mask', onMouseDown: (e) => { if (e.target === e.currentTarget && onClose) onClose() } },
+        h('div', { className: `nd-modal${wide ? ' nd-modal-wide' : ''}` },
+          h('div', { className: 'nd-modal-head' },
+            h('strong', { className: 'nd-modal-title' }, title),
+            h(IconBtn, { onClick: onClose, title: '关闭' }, '✕'),
+          ),
+          h('div', { className: 'nd-modal-body' }, children),
+          footer ? h('div', { className: 'nd-modal-foot' }, footer) : null,
+        ),
+      )
+    }
+    // ── 导出 UI：弹窗（顶栏）与快捷按钮（设置页）──────────────
+    /** 导出弹窗：选格式 + 可选附提要，成功后自动下载。 */
+    function ExportDialog({ projectId, project, onClose }) {
+      const [format, setFormat] = useState('txt')
+      const [includeSummary, setIncludeSummary] = useState(false)
       const [busy, setBusy] = useState(false)
-      const [creating, setCreating] = useState(false)
-      const [importing, setImporting] = useState(false)
-      const [ai, setAi] = useState(null)
-      const [cart, setCart] = useState([])
-      const [cartOpen, setCartOpen] = useState(false)
-      const [sendingCart, setSendingCart] = useState(false)
-      const [focusLocation, setFocusLocation] = useState(null)
-      const [pipelineWizard, setPipelineWizard] = useState(null)
-      const [expansionIntent, setExpansionIntent] = useState(null)
-      const cartKey = projectId ? `story-desk/cart/${projectId}` : ''
-      const saveCart = (next) => setCart(next)
-      // 支持一次加入多条（审阅页全选批量加入）：用函数式更新合并，避免同一轮多次调用互相覆盖。
-      const addCart = (item) => {
-        const items = (Array.isArray(item) ? item : [item]).filter((row) => row?.id)
-        if (items.length === 0) return
-        setCart((prev) => mergeCartItems(prev, items))
-      }
-      const removeCart = (item) => saveCart(cart.filter((row) => !(row.kind === item.kind && row.id === item.id)))
-      const noteCart = (item, note) => saveCart(cart.map((row) => (row.kind === item.kind && row.id === item.id ? { ...row, note } : row)))
-      // 章节页 → 整本书「扩写」子页：带 token 的意图，重复点同一章也能重新预填。
-      const expandChapter = (chapterNumber) => {
-        setExpansionIntent({ mode: 'chapter', chapter: Number(chapterNumber) || 0, token: Date.now() })
-        setTab('pipeline')
-      }
-      // 章节地图 → 世界页联动：切页 + 带 token 的 focusLocation，重复点同一地点也能重新高亮。
-      const focusWorldLocation = (name) => {
-        setFocusLocation({ name: String(name ?? ''), token: Date.now() })
-        setTab('world')
-      }
-      const sendCart = async (allowContinue, target = '__new__', multiAgent = true, reviewMode = 'generic') => {
-        if (cart.length === 0) return
-        const reviewOnly = cart.every((item) => item.kind === 'review' && item.id)
-        const toProposals = reviewOnly && reviewMode === 'proposals'
-        const isNewTarget = !target || target === '__new__'
-        const targetPayload = isNewTarget ? { newSession: true } : { sessionId: target }
-        setSendingCart(true)
-        try {
-          await sendToChat(toProposals
-            ? { projectId, task: 'review-to-proposals', items: cart, ...targetPayload }
-            : { projectId, items: cart, allowContinue, multiAgent, ...targetPayload })
-          if (!isNewTarget) window.localStorage.setItem(`sd.cartSession.${projectId}`, target)
-          saveCart([])
-          setCartOpen(false)
-        } catch (error) {
-          window.alert(`发送到对话失败：${error.message}`)
-        } finally {
-          setSendingCart(false)
-        }
-      }
-      const [exportFormat, setExportFormat] = useState('md')
-      const [exporting, setExporting] = useState(false)
-
-      const [cartLoadedKey, setCartLoadedKey] = useState('')
-      useEffect(() => {
-        setCartLoadedKey('')
-        if (!cartKey) {
-          setCart([])
-          return
-        }
-        try {
-          const raw = window.localStorage.getItem(cartKey)
-          setCart(raw ? JSON.parse(raw) : [])
-        } catch {
-          setCart([])
-        }
-        setCartLoadedKey(cartKey)
-      }, [cartKey])
-      useEffect(() => {
-        if (!cartKey || cartLoadedKey !== cartKey) return
-        try {
-          window.localStorage.setItem(cartKey, JSON.stringify(cart))
-        } catch {
-          /* ignore */
-        }
-      }, [cart, cartKey, cartLoadedKey])
-
-      const refresh = useCallback(async (preferred) => {
+      const [error, setError] = useState('')
+      const [done, setDone] = useState('')
+      const current = EXPORT_CHOICES.find((row) => row.format === format) || EXPORT_CHOICES[0]
+      const doExport = async () => {
+        if (!projectId) return
         setBusy(true)
+        setError('')
+        setDone('')
         try {
-          const lib = await api('library')
-          setLibrary(lib)
-          const wanted = preferred ?? projectId
-          const nextId = lib.projects.some((p) => p.id === wanted) ? wanted : lib.projects[0]?.id ?? ''
-          if (nextId !== projectId) setProjectId(nextId)
-          if (nextId) {
-            const data = await api('bundle', { projectId: nextId })
-            setBundle(data)
-            window.localStorage.setItem('story-desk/project', nextId)
-          } else {
-            setBundle(null)
-          }
-          setError('')
+          const value = await downloadExport(projectId, format, includeSummary)
+          setDone(`已导出 ${value.filename}（${value.chapters} 章 / ${value.words} 字）`)
         } catch (err) {
-          setError(err.message)
+          setError(`导出失败：${friendlyError(err)}`)
         } finally {
           setBusy(false)
         }
-      }, [projectId])
-
-      useEffect(() => {
-        if (open) refresh()
-      }, [open])
-
-      useEffect(() => {
-        if (!open) return
-        const onKey = (event) => {
-          if (event.key === 'Escape') setOpen(false)
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-      }, [open])
-
-      if (!open) return null
-
-      const changeProject = (id) => {
-        setProjectId(id)
-        refresh(id)
       }
+      const title = (project && (project.title || project.name)) || '未命名作品'
+      return h(Modal, {
+        title: '📤 导出正文',
+        onClose,
+        footer: h('div', { className: 'nd-modal-actions' },
+          h(Btn, { onClick: onClose }, '关闭'),
+          h(Btn, { kind: 'primary', onClick: doExport, disabled: busy || !projectId }, busy ? '导出中…' : '导出并下载'),
+        ),
+      },
+        h('p', { className: 'nd-hint' }, `把《${title}》的全部章节导出成一个成品文件；正文是纯文本，导出时不会再出现 ##、** 之类写作期标记。`),
+        h(Field, { label: '导出格式', hint: current.desc },
+          h(Select, {
+            value: format,
+            onChange: setFormat,
+            options: EXPORT_CHOICES.map((row) => ({ value: row.format, label: row.label })),
+          }),
+        ),
+        h('label', { className: 'nd-form-row', style: { cursor: 'pointer' } },
+          h(Check, { checked: includeSummary, onChange: setIncludeSummary, title: '附章节提要' }),
+          h('span', { className: 'nd-hint' }, '附章节提要（写作期的剧情摘要，交稿前一般不要）'),
+        ),
+        error ? h(Msg, { tone: 'error', onClose: () => setError('') }, error) : null,
+        done ? h(Msg, { tone: 'ok', onClose: () => setDone('') }, done) : null,
+      )
+    }
 
-      const doExport = async () => {
-        if (!projectId) return
-        setExporting(true)
+    /** 设置页的快捷导出：四格式各一个按钮，一键下载。 */
+    function ExportQuick({ projectId }) {
+      const [busy, setBusy] = useState('')
+      const [info, setInfo] = useState('')
+      const run = async (format) => {
+        if (!projectId || busy) return
+        setBusy(format)
+        setInfo('')
         try {
-          await downloadExport(projectId, exportFormat)
-        } catch (error) {
-          window.alert(`导出失败：${error.message}`)
+          const value = await downloadExport(projectId, format, false)
+          setInfo(`已导出 ${value.filename}（${value.chapters} 章 / ${value.words} 字）`)
+        } catch (err) {
+          setInfo(`导出失败：${friendlyError(err)}`)
         } finally {
-          setExporting(false)
+          setBusy('')
+        }
+      }
+      return h(Fragment, null,
+        h('div', { className: 'nd-form-row', style: { flexWrap: 'wrap' } },
+          EXPORT_CHOICES.map((row) => h(Btn, {
+            key: row.format,
+            small: true,
+            kind: row.format === 'epub' ? 'primary' : undefined,
+            onClick: () => run(row.format),
+            disabled: !projectId || !!busy,
+            title: row.desc,
+          }, busy === row.format ? '导出中…' : row.label)),
+        ),
+        info ? h('p', { className: 'nd-hint' }, info) : null,
+      )
+    }
+
+    // ── 开新书向导：书名 → 预设（含「自定义：让 AI 定」）→ 说想法 → 确认 → 创建并让 AI 生成 ──
+    const AI_CUSTOM_PRESET = {
+      id: 'preset-ai-custom',
+      name: '自定义（让 AI 定）',
+      desc: '只给书名和想法：类型、基调、篇幅、结构、风格规则先由 AI 出方案；方案必须带「注意力总设计」，再按方案生成世界/人物/大纲（大纲每章带四拍设计）。',
+      custom: true,
+      genre: '',
+      plannedChapters: 0,
+      chapterWords: 0,
+    }
+
+    function NewBookDialog({ onClose, onCreated }) {
+      const [step, setStep] = useState(1)
+      const [presets, setPresets] = useState([])
+      const [presetId, setPresetId] = useState('')
+      const [form, setForm] = useState({ title: '', genre: '', era: '', idea: '', chapters: '', wordsPerChapter: '', generate: true })
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const [result, setResult] = useState(null)
+      const set = (key, value) => setForm((prev) => ({ ...prev, [key]: value }))
+
+      useEffect(() => {
+        let alive = true
+        api('preset.defaults')
+          .then((value) => {
+            if (!alive) return
+            const rows = Array.isArray(value) ? value : []
+            setPresets(rows)
+            if (rows.length) setPresetId(String(rows[0].id || ''))
+          })
+          .catch((err) => { if (alive) setError(`读取预设失败：${friendlyError(err)}`) })
+        return () => { alive = false }
+      }, [])
+
+      const isCustom = presetId === AI_CUSTOM_PRESET.id
+      const preset = isCustom ? AI_CUSTOM_PRESET : presets.find((row) => String(row.id) === presetId) || null
+      // 向导里只留「有明确口径的预设 + 自定义（让 AI 定）」；空模板（preset-custom）留给设置页手填
+      const options = presets.filter((row) => String(row.id) !== 'preset-custom').concat(presets.length ? [AI_CUSTOM_PRESET] : [])
+      const pickPreset = (row) => {
+        setPresetId(String(row.id))
+        if (row.custom) {
+          setForm((prev) => ({ ...prev, genre: '', chapters: '', wordsPerChapter: '' }))
+          return
+        }
+        setForm((prev) => ({
+          ...prev,
+          genre: String(row.genre || ''),
+          chapters: String(row.plannedChapters || ''),
+          wordsPerChapter: String(row.chapterWords || ''),
+        }))
+      }
+      const chapters = toNumber(form.chapters, 0)
+      const perChapter = toNumber(form.wordsPerChapter, 0)
+      const estimate = chapters > 0 && perChapter > 0 ? chapters * perChapter : 0
+      const ideaText = [form.idea.trim(), form.era.trim() ? `时代/背景：${form.era.trim()}` : ''].filter(Boolean).join('\n')
+
+      const submit = async () => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        try {
+          const created = await api('project.create', {
+            title: form.title.trim(),
+            genre: isCustom ? '' : form.genre.trim(),
+            style: preset && !isCustom ? String(preset.tone || '') : '',
+            presetId: isCustom ? 'preset-custom' : presetId || undefined,
+            idea: ideaText,
+            description: ideaText,
+            targetChapters: isCustom ? 0 : chapters,
+            wordsPerChapter: isCustom ? 0 : perChapter,
+          })
+          const projectId = String(created?.projectId || created?.project?.id || '')
+          if (!projectId) throw new Error('创建作品失败：没有拿到 projectId')
+          let warning = ''
+          let sessionId = ''
+          if (form.generate) {
+            try {
+              const sent = await api('chat.send', {
+                projectId,
+                workorder: 'newBookWorkorder',
+                brief: ideaText,
+                preset: isCustom ? AI_CUSTOM_PRESET : preset,
+                // 新书的工作单必须进「这本书自己的工作区」里新开的对话，不能塞进作者当前在聊的会话
+                newSession: true,
+              })
+              sessionId = String(sent?.sessionId || '')
+            } catch (err) {
+              warning = friendlyError(err)
+            }
+          }
+          const workspacePath = String(created?.workspacePath || '')
+          setResult({ projectId, title: form.title.trim() || '未命名作品', warning, generated: form.generate && !warning, custom: isCustom, sessionId, workspacePath })
+          setStep(5)
+        } catch (err) {
+          setError(`创建失败：${friendlyError(err)}`)
+        } finally {
+          setBusy(false)
         }
       }
 
-      return h(
-        'div',
-        { className: 'sd-backdrop', onClick: (e) => e.target === e.currentTarget && setOpen(false) },
-        h('div', { className: 'sd-panel' },
-          h('header', { className: 'sd-head' },
-            h('div', { className: 'sd-brand' }, h('span', { className: 'sd-brand-icon' }, '📖'), h('span', null, '长篇中文小说工作台')),
-            library && library.projects.length > 0
-              ? h('select', { className: 'sd-input sd-project-select', value: projectId, onChange: (e) => changeProject(e.target.value) }, library.projects.map((p) => h('option', { key: p.id, value: p.id }, p.name)))
-              : null,
-            h('div', { className: 'sd-head-actions' },
-              busy ? h('span', { className: 'sd-hint' }, '同步中…') : null,
-              h(Btn, { small: true, onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
-              h(Btn, { kind: 'primary', disabled: !bundle, title: '把提案/审稿/检查加进清单，统一发送到对话', onClick: () => setCartOpen(true) }, `🧺 清单${cart.length ? ` (${cart.length})` : ''}`),
-              bundle
-                ? h('select', { className: 'sd-input sd-export-select', value: exportFormat, title: '导出格式', onChange: (e) => setExportFormat(e.target.value) },
-                    h('option', { value: 'md' }, 'Markdown'),
-                    h('option', { value: 'epub' }, 'EPUB'),
-                    h('option', { value: 'docx' }, 'DOCX'))
-                : null,
-              h(Btn, { small: true, disabled: !bundle || exporting, onClick: doExport }, exporting ? '导出中…' : '⬇ 导出'),
-              h(Btn, { onClick: () => setCreating(true) }, '＋ 新建作品'),
-              h(Btn, { onClick: () => refresh() }, '刷新'),
-              h(IconBtn, { onClick: () => setOpen(false), title: '关闭（Esc）' }, '✕'),
-            ),
+      const presetCard = (row) => {
+        const active = String(row.id) === presetId
+        const total = toNumber(row.plannedChapters, 0) * toNumber(row.chapterWords, 0)
+        const meta = row.custom
+          ? '类型 / 篇幅 / 结构 / 风格 由 AI 出方案'
+          : `${row.genre || '通用'} ｜ ${row.pov || '—'} ｜ ${row.plannedChapters || '—'} 章 × ${row.chapterWords || '—'} 字${total > 0 ? `（${fmtWords(total)} 字）` : ''}`
+        return h('button', {
+          key: row.id,
+          type: 'button',
+          className: 'nd-card',
+          onClick: () => pickPreset(row),
+          style: {
+            textAlign: 'left',
+            cursor: 'pointer',
+            padding: '10px 12px',
+            border: `2px solid ${active ? 'var(--dsw-alias-brand,#2563eb)' : 'var(--dsw-alias-border,#e5e7eb)'}`,
+            background: active ? 'var(--dsw-alias-brand-weak,rgba(59,130,246,.10))' : 'var(--dsw-alias-bg,#fff)',
+          },
+        },
+          h('div', { className: 'nd-form-row', style: { justifyContent: 'space-between' } },
+            h('strong', null, row.name || row.id),
+            active ? h(Tag, { tone: 'brand' }, '已选') : (row.custom ? h(Tag, { tone: 'muted' }, 'AI 定') : null),
           ),
-          error ? h('div', { className: 'sd-error' }, error) : null,
-          !bundle
-            ? h('div', { className: 'sd-welcome' },
-                h('h2', null, '还没有作品'),
-                h('p', null, '工作台把作品数据存成普通文件（Markdown + JSON），可直接备份、进 Git。也可以把已有的 Markdown 小说目录导入成新作品。'),
-                h('div', { className: 'sd-form-actions' },
-                  h(Btn, { kind: 'primary', onClick: () => setCreating(true) }, '创建第一部作品'),
-                  h(Btn, { onClick: () => setImporting(true) }, '⬆ 导入 Markdown'),
-                ),
-              )
-            : h(React.Fragment, null,
-                h('div', { className: 'sd-principle-bar' },
-                  h('div', { className: 'sd-principle-main' },
-                    h('span', { className: 'sd-principle-slogan' }, PRINCIPLE_SLOGAN),
-                    h('span', { className: 'sd-principle-sub' }, PRINCIPLE_SUB)),
-                  h('span', { className: 'sd-principle-hint' }, PRINCIPLE_HINT)),
-                h('div', { className: 'sd-body' },
-                h(Nav, { tab, onPick: setTab }),
-                h('main', { className: 'sd-main' },
-                  tab === 'overview' ? h(OverviewTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, cartCount: cart.length, onOpenCart: () => setCartOpen(true), onGoTab: setTab }) : null,
-                  tab === 'attention' ? h(AttentionTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onAddCart: addCart }) : null,
-                  tab === 'dashboard' ? h(DashboardTab, { bundle, projectId }) : null,
-                  tab === 'pipeline' ? h(PipelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab, onOpenWizard: () => setPipelineWizard({}), expansionIntent, onExpansionConsumed: () => setExpansionIntent(null) }) : null,
-                  tab === 'chapters' ? h(ChaptersTab, { bundle, projectId, onChanged: () => refresh(projectId), onExpandChapter: expandChapter }) : null,
-                  tab === 'map' ? h(ChapterMapTab, { bundle, projectId, onGoTab: setTab, onFocusLocation: focusWorldLocation }) : null,
-                  tab === 'world' ? h(WorldTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, focusLocation }) : null,
-                  tab === 'timeline' ? h(TimelineTab, { bundle, projectId, onChanged: () => refresh(projectId), onGoTab: setTab }) : null,
-                  ['facts', 'foreshadow', 'conflicts', 'characters', 'highlights', 'agents'].includes(tab)
-                    ? h(EntityTab, { key: tab, kind: tab, bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart })
-                    : null,
-                  tab === 'reviews' ? h(ReviewsTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart }) : null,
-                  tab === 'presets' ? h(PresetsTab, { bundle, projectId, onChanged: () => refresh(projectId) }) : null,
-                  tab === 'proposals' ? h(ProposalTab, { bundle, projectId, onChanged: () => refresh(projectId), onAddCart: addCart, onGoTab: setTab, onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
-                  tab === 'alignment' ? h(AlignmentTab, { bundle, projectId, onChanged: () => refresh(projectId), onAskAi: (task) => setAi({ task, chapter: bundle.chapters.length > 0 ? Math.max(...bundle.chapters.map((c) => Number(c.id) || 0)) + 1 : 1 }) }) : null,
-                  tab === 'settings' ? h(SettingsTab, { bundle, projectId, onChanged: () => refresh(projectId), onProjectDeleted: () => { setProjectId(''); refresh('') } }) : null,
-                ),
-              ),
-              ),
-          creating ? h(CreateProjectDialog, {
-            onClose: () => setCreating(false),
-            onCreated: (id, options) => {
-              setTab(options?.openPipeline ? 'pipeline' : 'overview')
-              refresh(id)
-              if (options?.openPipeline) setPipelineWizard({ prefill: options.prefill ?? null, projectId: id })
+          h('p', { className: 'nd-hint', style: { margin: '4px 0' } }, row.desc || ''),
+          h('p', { className: 'nd-hint', style: { margin: 0 } }, meta),
+        )
+      }
+
+      let body = null
+      if (step === 1) {
+        body = h(Fragment, null,
+          h('p', { className: 'nd-hint' }, '先起个名——它既是书名，也是这部作品的「工作区名」；目录由系统按 id 自动建，不用你管。'),
+          h(Field, { label: '书名 / 工作区名 *', hint: '之后还能在新作品的「设置」里改。' },
+            h(TextInput, { value: form.title, onChange: (value) => set('title', value), placeholder: '如：长安十二时辰' })),
+        )
+      } else if (step === 2) {
+        body = h(Fragment, null,
+          h('p', { className: 'nd-hint' }, '再选写作口径：章数、字数、视角、风格规则、禁忌、审稿重点都会写进预设，AI 生成与审稿都按它来。没想好就选「自定义（让 AI 定）」，方案交给 AI——但它必须先出「注意力总设计」（核心钩子 / 前 3 章留人 / 主类型轮换 / 兑现节奏 / cliff 规则），大纲每章也带四拍设计。之后还能在「设置」里改。'),
+          presets.length === 0
+            ? (error ? null : h(Loading, null, '正在读取预设…'))
+            : h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 } }, options.map(presetCard)),
+        )
+      } else if (step === 3) {
+        body = h(Fragment, null,
+          h('p', { className: 'nd-hint' }, isCustom
+            ? '写你想看的故事。选了「自定义」：AI 会先给你一套方案（类型/篇幅/结构/风格规则），再按这套方案生成世界、人物与全书大纲。'
+            : '写你想看的那个故事：主角是谁、想要什么、最怕什么、有什么必须出现的场面。越具体，AI 生成的设定与大纲越不套路。'),
+          h(Field, { label: '作者的想法（一段话）*' },
+            h(TextArea, { value: form.idea, onChange: (value) => set('idea', value), rows: 6, placeholder: '如：唐末长安，一名失忆的仵作追查连环命案，牵出二十年前的宫变；他想不起自己是谁，但每次验尸都会流泪。风格要冷、克制，不要爽文。' })),
+          h('div', { className: 'nd-form-grid' },
+            h(Field, { label: '类型' }, h(TextInput, { value: form.genre, onChange: (value) => set('genre', value), placeholder: isCustom ? '（可空，交给 AI 定）' : '武侠 / 科幻 / 悬疑…' })),
+            h(Field, { label: '时代 / 背景（可选）' }, h(TextInput, { value: form.era, onChange: (value) => set('era', value), placeholder: '如：唐·天宝年间 / 架空蒸汽时代' })),
+            isCustom ? null : h(Field, { label: '目标章数' }, h(TextInput, { value: form.chapters, type: 'number', min: 1, onChange: (value) => set('chapters', value) })),
+            isCustom ? null : h(Field, { label: '每章字数' }, h(TextInput, { value: form.wordsPerChapter, type: 'number', min: 100, onChange: (value) => set('wordsPerChapter', value) })),
+          ),
+          isCustom
+            ? h('p', { className: 'nd-hint' }, '篇幅与结构由 AI 在方案里给出；批准那条「方案」提案后自动成为本书的当前预设。')
+            : estimate > 0
+              ? h('p', { className: 'nd-hint' }, `规模：${chapters} 章 × ${perChapter} 字 ≈ ${fmtWords(estimate)} 字`)
+              : null,
+          h('label', { className: 'nd-form-row', style: { cursor: 'pointer', marginTop: 6 } },
+            h(Check, { checked: form.generate, onChange: (value) => set('generate', value), title: '创建后自动生成方案/设定/大纲' }),
+            h('span', { className: 'nd-hint' }, isCustom
+              ? '创建后把工作单发到左侧对话：AI 先出「AI 自定义方案」，再提交世界/人物/大纲，全部以提案提交，你到「提案」页批量批准'
+              : '创建后自动把「生成世界 + 地点 + 人物 + 全书大纲 + 伏笔」的工作单发到左侧对话，AI 以提案提交，你到「提案」页批量批准后才进账本'),
+          ),
+        )
+      } else if (step === 4) {
+        body = h(Fragment, null,
+          h('p', { className: 'nd-hint' }, '确认一下，点「创建并生成」后会：'),
+          h('ul', { className: 'nd-ul', style: { margin: '4px 0 10px', paddingLeft: 18, fontSize: 13, lineHeight: 1.9 } },
+            h('li', null, `新建作品「${form.title.trim() || '未命名作品'}」`),
+            isCustom
+              ? h('li', null, '预设：自定义 —— AI 先提交一份方案提案，批准后自动成为本书当前预设')
+              : h('li', null, `套用预设「${preset?.name || '默认'}」：${preset?.genre || form.genre || '通用'} ｜ ${chapters || '—'} 章 × ${perChapter || '—'} 字`),
+            h('li', null, form.generate
+              ? (isCustom ? '建一个这本书专属的工作区，并在里面新开对话发工作单：AI 出方案 + 世界/人物/大纲，提案待你批准' : '建一个这本书专属的工作区，并在里面新开对话发工作单：AI 生成世界/人物/大纲，提案待你批准')
+              : '只创建作品（工作区照样建好），不自动生成'),
+          ),
+          ideaText ? h('p', { className: 'nd-hint', style: { whiteSpace: 'pre-wrap' } }, `想法：${ideaText.slice(0, 300)}`) : null,
+        )
+      } else {
+        body = h(Fragment, null,
+          h(Msg, { tone: 'ok' }, `已创建《${result?.title}》。`),
+          result?.generated
+            ? h(Fragment, null,
+                h(Msg, { tone: 'ok' }, `工作单已发到新工作区「${result?.title}」里新开的对话。`),
+                result?.workspacePath ? h('p', { className: 'nd-hint' }, `工作区目录：${result.workspacePath}`) : null,
+                h('p', { className: 'nd-hint' }, result?.custom
+                  ? '侧栏切到这本新书的工作区就能看到那个对话：AI 会先提交「AI 自定义方案」，再提交世界、地点、人物、全书大纲与伏笔。生成完成后到「提案」页批量批准；方案那条批准后会直接成为本书的当前预设。'
+                  : '侧栏切到这本新书的工作区就能看到那个对话：AI 会以提案提交世界、地点、人物、全书大纲与伏笔。生成完成后到「提案」页批量批准。'))
+
+            : result?.warning
+              ? h(Msg, { tone: 'error' }, `工作单没有发出去（${result.warning}）。作品已经建好，你可以在对话里说「给新书写世界观与大纲」，或到「提案」页手动创建。`)
+              : h('p', { className: 'nd-hint' }, '作品已建好，还没有生成设定。可以在对话里让 AI 生成，或直接去「正文」页开始写。'),
+          error ? h(Msg, { tone: 'error' }, error) : null,
+        )
+      }
+
+      const canNext = step === 1 ? Boolean(form.title.trim()) : step === 3 ? Boolean(form.idea.trim()) : true
+      const footer = step === 5
+        ? h('div', { className: 'nd-modal-actions' },
+            h(Btn, { onClick: onClose }, '关闭'),
+            h(Btn, { kind: 'primary', onClick: () => { onCreated?.(result?.projectId); onClose() } }, '进入作品'),
+          )
+        : h('div', { className: 'nd-modal-actions' },
+            h(Btn, { onClick: onClose, disabled: busy }, '取消'),
+            step > 1 ? h(Btn, { onClick: () => setStep(step - 1), disabled: busy }, '上一步') : null,
+            step < 4
+              ? h(Btn, { kind: 'primary', onClick: () => setStep(step + 1), disabled: busy || !canNext }, '下一步')
+              : h(Btn, { kind: 'primary', onClick: submit, disabled: busy || !canNext }, busy ? '创建中…' : '创建并生成'),
+          )
+
+      return h(Modal, { title: '🆕 开新书', onClose: busy ? () => {} : onClose, footer, wide: true },
+        h('div', { className: 'nd-form-row', style: { gap: 6, marginBottom: 10 } },
+          ['书名', '选预设', '说想法', '确认', '完成'].map((label, index) => h(Tag, { key: label, tone: step >= index + 1 ? 'brand' : 'muted' }, `${index + 1}. ${label}`)),
+        ),
+        body,
+        step === 4 && error ? null : error ? h(Msg, { tone: 'error', onClose: () => setError('') }, error) : null,
+      )
+    }
+
+    function Tabs({ value, onChange, items }) {
+      return h('div', { className: 'nd-tabs' },
+        items.map((item) =>
+          h(
+            'button',
+            {
+              key: item.value,
+              type: 'button',
+              className: `nd-tab${value === item.value ? ' nd-tab-active' : ''}`,
+              onClick: () => onChange(item.value),
             },
-          }) : null,
-          pipelineWizard && (!pipelineWizard.projectId || String(bundle?.project?.id ?? '') === String(pipelineWizard.projectId))
-            ? h(PipelineWizard, {
-                bundle,
-                projectId,
-                prefill: pipelineWizard.prefill ?? null,
-                onClose: () => setPipelineWizard(null),
-                onFinished: () => { setPipelineWizard(null); refresh(projectId) },
-              })
-            : null,
-          cartOpen ? h(CartDialog, { items: cart, projectId, workspacePath: bundle?.project?.workspacePath || '', sending: sendingCart, onRemove: removeCart, onNote: noteCart, defaultTarget: 'current', onClose: () => setCartOpen(false), onSend: sendCart }) : null,
-          importing ? h(ImportDialog, { onClose: () => setImporting(false), onGo: (nextTab) => { setImporting(false); if (nextTab) setTab(nextTab) }, onImported: (id) => { setTab('overview'); changeProject(id) }, onAddCart: addCart, onOpenCart: () => setCartOpen(true) }) : null,
+            item.label,
+            item.badge ? h('span', { className: 'nd-tab-badge' }, item.badge) : null,
+          ),
         ),
       )
+    }
+    function Check({ checked, onChange, title }) {
+      return h('input', { type: 'checkbox', className: 'nd-check', checked: !!checked, title, onChange: (e) => onChange(e.target.checked) })
+    }
+    function Bar({ value, max, tone }) {
+      const ratio = max > 0 ? clamp((Number(value) || 0) / Number(max), 0, 1) : 0
+      return h('div', { className: 'nd-bar' }, h('div', { className: `nd-bar-fill${tone ? ' nd-bar-' + tone : ''}`, style: { width: `${Math.round(ratio * 100)}%` } }))
+    }
+    function Seg({ value, onChange, items }) {
+      return h('div', { className: 'nd-seg' },
+        items.map((item) =>
+          h('button', { key: item.value, type: 'button', className: `nd-seg-item${value === item.value ? ' nd-seg-active' : ''}`, onClick: () => onChange(item.value) },
+            item.label,
+          ),
+        ),
+      )
+    }
+    // 纯文本渲染：只按空行分段，不解析任何 Markdown 语法。
+    function PlainText({ text, className }) {
+      const paragraphs = useMemo(() => splitParagraphs(text), [text])
+      if (paragraphs.length === 0) return h('div', { className: className || 'nd-plain' }, '（空）')
+      return h('div', { className: className || 'nd-plain' }, paragraphs.map((p, i) => h('p', { key: i }, p)))
+    }
+    function renderSegments(text, query) {
+      const value = String(text || '')
+      if (!query) return [value]
+      const parts = []
+      let from = 0
+      let count = 0
+      while (count < 300) {
+        const idx = value.indexOf(query, from)
+        if (idx < 0) break
+        if (idx > from) parts.push(value.slice(from, idx))
+        parts.push(h('mark', { className: 'nd-hl', key: `m${count}` }, query))
+        from = idx + query.length
+        count += 1
+      }
+      if (from < value.length) parts.push(value.slice(from))
+      return parts.length ? parts : [value]
     }
 
     // ── 侧栏入口 ──────────────────────────────────────────────
     function SidebarEntry({ wide }) {
+      // 只有一个入口：在默认浏览器打开网页后台（DSH 里不再套一层浮层）。
+      const launch = () => {
+        if (IS_BROWSER_TAB) {
+          setOpen(true)
+          return
+        }
+        void openInBrowser().then((value) => {
+          if (!value) window.alert('没能拉起默认浏览器。请确认 DSH 以 Web 模式运行，或手动复制地址打开。')
+        })
+      }
       return h(
         'button',
-        { type: 'button', className: 'sd-entry', title: '长篇中文小说工作台', onClick: () => setOpen(true) },
-        h('span', { className: 'sd-entry-icon' }, '📖'),
-        wide ? h('span', { className: 'sd-entry-label' }, '长篇中文小说工作台') : null,
+        {
+          type: 'button',
+          className: 'nd-entry',
+          title: '在默认浏览器打开小说工作台',
+          onClick: launch,
+        },
+        h('span', { className: 'nd-entry-icon' }, '📖'),
+        wide ? h('span', { className: 'nd-entry-label' }, '小说工作台') : null,
       )
     }
 
+    // ── 全局开合状态（侧栏入口 / 命令面板都可打开工作台）──────
+    let openState = false
+    const openListeners = new Set()
+    function setOpen(value) {
+      openState = !!value
+      openListeners.forEach((fn) => fn(openState))
+    }
+    function useOpen() {
+      const [open, setLocal] = useState(openState)
+      useEffect(() => {
+        const listener = (value) => setLocal(value)
+        openListeners.add(listener)
+        return () => openListeners.delete(listener)
+      }, [])
+      return open
+    }
+
+    // ── 工作台外壳 ────────────────────────────────────────────
+    function Workbench() {
+      const open = useOpen()
+      const [page, setPage] = useState(() => {
+        const saved = lsGet(LS.page, 'read')
+        if (saved === 'map') return 'ledger'
+        return PAGE_LABEL[saved] ? saved : 'read'
+      })
+      const [pageArg, setPageArg] = useState(null)
+      const [projectId, setProjectId] = useState(() => lsGet(LS.project, ''))
+      // 沉浸模式：只在正文页生效，顶栏 / 左导航 / 目录 / 右栏全收掉，只留阅读 / 编辑 / 审阅。
+      const [immersive, setImmersive] = useState(() => lsGet(LS.immersive, '0') === '1')
+      const immersiveNow = immersive && page === 'read'
+      const toggleImmersive = useCallback((next) => {
+        const value = next !== false
+        setImmersive(value)
+        lsSet(LS.immersive, value ? '1' : '0')
+      }, [])
+      const [exportOpen, setExportOpen] = useState(false)
+      const [newBookOpen, setNewBookOpen] = useState(false)
+      // 刚创建/刚导入的作品：列表刷新有延迟，校验 effect 不能把它当成非法 id 切回第一部
+      const pendingProjectRef = useRef({ id: '', at: 0 })
+
+      const projects = useAsync(() => api('projects.list'), [])
+      const projectList = useMemo(() => toList(projects.data, 'projects'), [projects.data])
+
+      useEffect(() => {
+        if (!projectList.length) return
+        const pending = pendingProjectRef.current
+        const valid = projectList.some((p) => String(p.id) === projectId)
+        if (valid) {
+          if (pending.id === projectId) pendingProjectRef.current = { id: '', at: 0 }
+          return
+        }
+        // 刚创建的作品还没出现在列表里：等它（最多 8 秒），别急着切走
+        if (pending.id && pending.id === projectId && Date.now() - pending.at < 8000) return
+        pendingProjectRef.current = { id: '', at: 0 }
+        const first = String(projectList[0].id || '')
+        if (first) {
+          setProjectId(first)
+          lsSet(LS.project, first)
+        }
+      }, [projectList, projectId, projects.loading])
+
+      const contextRes = useAsync(
+        () => (projectId ? api('project.context', scope(projectId)) : Promise.resolve(null)),
+        [projectId],
+      )
+      const tocRes = useAsync(
+        () => (projectId ? api('chapter.list', scope(projectId)) : Promise.resolve([])),
+        [projectId],
+      )
+      const toc = useMemo(() => sortChapters(toList(tocRes.data, 'chapters')), [tocRes.data])
+      const context = contextRes.data || null
+      const project = (context && context.project) || projectList.find((p) => String(p.id) === projectId) || null
+
+      const go = useCallback((next, arg) => {
+        setPage(next)
+        setPageArg(arg || null)
+        lsSet(LS.page, next)
+      }, [])
+      const openChapter = useCallback(
+        (chapter) => {
+          go('read', { chapter: Number(chapter) })
+        },
+        [go],
+      )
+
+      useEffect(() => {
+        if (!open) return undefined
+        const onKey = (e) => {
+          if (e.key !== 'Escape') return
+          // 沉浸模式里的 Esc 归正文页：先退出沉浸，不顺手把整个工作台关掉。
+          if (immersiveNow) return
+          const target = e.target
+          const tag = (target && target.tagName) || ''
+          if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (target && target.isContentEditable)) return
+          if (document.querySelector('.nd-mask')) return
+          setOpen(false)
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [open, immersiveNow])
+
+      if (!open) return null
+
+      const totalWords = toc.reduce((sum, row) => sum + toNumber(row.words, 0), 0)
+      const switchProject = (nextId) => {
+        setProjectId(nextId)
+        lsSet(LS.project, nextId)
+        setPage('read')
+        setPageArg(null)
+        lsSet(LS.page, 'read')
+        // 导入后切过来时，作品列表可能还没包含新作品：刷新一次，否则顶部下拉看不到它
+        if (nextId && !projectList.some((row) => row.id === nextId)) projects.reload()
+      }
+      // 开新书成功后：切到新作品并落到「提案」页，方便批量批准 AI 生成的设定/大纲
+      const enterNewBook = (nextId) => {
+        if (!nextId) return
+        pendingProjectRef.current = { id: String(nextId), at: Date.now() }
+        setProjectId(nextId)
+        lsSet(LS.project, nextId)
+        projects.reload()
+        setPage('proposals')
+        setPageArg(null)
+        lsSet(LS.page, 'proposals')
+      }
+      const openNewBook = () => setNewBookOpen(true)
+
+      let body
+      if (projects.loading && !projects.data) {
+        body = h(Loading, null, '正在读取作品列表…')
+      } else if (projects.error) {
+        body = h(ErrorBox, { error: projects.error, onRetry: projects.reload })
+      } else if (projectList.length === 0) {
+        body = h('div', { className: 'nd-welcome' },
+          h('div', { className: 'nd-welcome-icon' }, '📚'),
+          h('h2', null, '还没有作品'),
+          h('p', { className: 'nd-hint' }, '开一本新书：选预设、写一段想法，AI 会把世界、人物与全书大纲生成提案交给你批准。也可以让 AI 在对话里新建，或使用导入动作把旧稿接进来。'),
+          h(Btn, { kind: 'primary', onClick: () => setNewBookOpen(true) }, '＋ 开新书'),
+          h('p', { className: 'nd-code-hint' }, '~/StoryDesk/projects/<id>/'),
+        )
+      } else if (!projectId) {
+        body = h(Loading, null, '正在选择作品…')
+      } else {
+        const common = {
+          projectId,
+          project,
+          context,
+          toc,
+          pageArg,
+          go,
+          openChapter,
+          onChanged: tocRes.reload,
+          refreshContext: contextRes.reload,
+          openProject: switchProject,
+          onNewBook: openNewBook,
+          immersive,
+          setImmersive: toggleImmersive,
+        }
+        let pageNode
+        if (page === 'read') pageNode = h(ReadingTab, { ...common, key: `read:${projectId}` })
+        else if (page === 'reviews') pageNode = h(ReviewsTab, { ...common, key: `reviews:${projectId}` })
+        else if (page === 'proposals') pageNode = h(ProposalsTab, { ...common, key: `proposals:${projectId}` })
+        else if (page === 'run') pageNode = h(RunTab, { ...common, key: `run:${projectId}` })
+        else if (page === 'ledger') pageNode = h(LedgerTab, { ...common, key: `ledger:${projectId}` })
+        else if (page === 'overview') pageNode = h(OverviewTab, { ...common, key: `overview:${projectId}` })
+        else pageNode = h(SettingsTab, { ...common, key: `settings:${projectId}` })
+        body = h(Fragment, null, h('div', { className: 'nd-body' }, h(Nav, { page, go }), h('main', { className: 'nd-main' }, pageNode)))
+      }
+
+      return h('div', { className: `nd-overlay${IS_BROWSER_TAB ? ' nd-standalone' : ''}${immersiveNow ? ' nd-immersive' : ''}` },
+        h('div', { className: 'nd-panel' },
+          h('header', { className: 'nd-top' },
+            h('div', { className: 'nd-brand' }, h('span', { className: 'nd-brand-icon' }, '📖'), h('strong', null, '小说工作台')),
+            h('div', { className: 'nd-proj' },
+              h('span', { className: 'nd-proj-label' }, '作品'),
+              projectList.length
+                ? h(Select, {
+                    value: projectId,
+                    onChange: switchProject,
+                    options: projectList.map((p) => ({ value: String(p.id), label: projectTitle(p) || String(p.id) })),
+                  })
+                : h('span', { className: 'nd-hint' }, '无作品'),
+            ),
+            h('div', { className: 'nd-top-mid' }, h('span', { className: 'nd-page-name' }, PAGE_LABEL[page] || '')),
+            h('div', { className: 'nd-top-right' },
+              toc.length ? h('span', { className: 'nd-top-meta' }, `${toc.length} 章 · ${fmtWords(totalWords)} 字`) : null,
+              h(Btn, { small: true, onClick: () => setExportOpen(true), disabled: !projectId, title: '导出正文：TXT / Markdown / EPUB / DOCX' }, '⬇ 导出'),
+              h(Btn, { small: true, onClick: () => go('settings'), title: '导入旧稿：设置页「📥 导入旧稿」可填目录或单个 .md/.txt' }, '⬆ 导入'),
+              IS_BROWSER_TAB
+                ? null
+                : h(IconBtn, { onClick: () => { void openInBrowser() }, title: '在默认浏览器打开' }, '🌐'),
+              h(IconBtn, { onClick: () => setOpen(false), title: '关闭（Esc）', className: 'nd-top-close' }, '✕'),
+            ),
+          ),
+          h('div', { className: 'nd-principle-bar', title: '创作第一原则：所有写/改正文的工作单首行都注入它' },
+            h('span', { className: 'nd-principle-slogan' }, '⚡ ATTENTION IS ALL YOU NEED'),
+            h('span', { className: 'nd-principle-text' }, '怎么吸引读者怎么来，一切为读者服务；事实自洽是底线，不是目标。写/改正文前先定本章注意力设计（四拍 + designScore）。'),
+          ),
+          body,
+          // 手机兜底关闭：顶栏溢出/被裁时也一定能退出工作台回到 DSH。
+          h('button', { type: 'button', className: 'nd-mobile-close', onClick: () => setOpen(false), title: '关闭工作台', 'aria-label': '关闭工作台' }, '✕'),
+          exportOpen ? h(ExportDialog, { projectId, project, onClose: () => setExportOpen(false) }) : null,
+          newBookOpen ? h(NewBookDialog, { onClose: () => setNewBookOpen(false), onCreated: enterNewBook }) : null,
+        ),
+      )
+    }
+
+    function Nav({ page, go }) {
+      const groups = []
+      for (const item of PAGES) {
+        let group = groups.find((g) => g.name === item.group)
+        if (!group) {
+          group = { name: item.group, items: [] }
+          groups.push(group)
+        }
+        group.items.push(item)
+      }
+      return h('nav', { className: 'nd-nav' },
+        groups.map((group) =>
+          h('div', { className: 'nd-nav-group', key: group.name },
+            h('div', { className: 'nd-nav-title' }, group.name),
+            group.items.map((item) =>
+              h(
+                'button',
+                {
+                  key: item.id,
+                  type: 'button',
+                  className: `nd-nav-item${page === item.id ? ' nd-nav-active' : ''}`,
+                  onClick: () => go(item.id),
+                },
+                h('span', { className: 'nd-nav-icon' }, item.icon),
+                h('span', null, item.label),
+              ),
+            ),
+          ),
+        ),
+      )
+    }
+
+    // ── 正文页 ────────────────────────────────────────────────
+    const READ_BATCH = 4
+
+    function ReadingTab({ projectId, context, toc, pageArg, go, openChapter, onChanged, immersive, setImmersive }) {
+      const chapters = toc
+      const tocNums = useMemo(() => chapters.map(chapterNo).filter((n) => n > 0), [chapters])
+      const tocKey = tocNums.join(',')
+
+      const [docs, setDocs] = useState([])
+      const [docsLoading, setDocsLoading] = useState(false)
+      const [docsError, setDocsError] = useState('')
+      const [active, setActive] = useState(() => {
+        const fromArg = Number(pageArg && pageArg.chapter)
+        if (fromArg > 0) return fromArg
+        return toNumber(lsGet(LS.pos + projectId, '0'), 0)
+      })
+      const [mode, setMode] = useState(() => {
+        const saved = lsGet(LS.mode, 'read')
+        return MODES.some((m) => m.id === saved) ? saved : 'read'
+      })
+      const [tocFilter, setTocFilter] = useState('')
+      const [creating, setCreating] = useState(false)
+      const createChapter = async () => {
+        if (creating) return
+        setCreating(true)
+        try {
+          const nums = chapters.map((row) => chapterNo(row)).filter((n) => n > 0)
+          const next = (nums.length ? Math.max(...nums) : 0) + 1
+          await api('chapter.save', { projectId, chapter: next, text: '', create: true, baseHash: null, meta: { title: `第 ${next} 章`, status: 'draft' } })
+          await onChanged(); setActive(next); if (mode === 'edit') openEdit(next)
+          setNotice(`已新建第 ${next} 章，可以直接开始写`)
+        } catch (err) { setNotice(`新建章节失败：${friendlyError(err)}`) } finally { setCreating(false) }
+      }
+      const [deletingChapter, setDeletingChapter] = useState(false)
+      const deleteActiveChapter = async (chapter) => {
+        if (!chapter || deletingChapter) return
+        if (!window.confirm(`删除第 ${chapter} 章？正文会进回收站（.backups 里仍保留历史版本），本章的审阅、批注与待批准提案一并清除。已采纳/已驳回的提案留作历史。`)) return
+        setDeletingChapter(true)
+        try {
+          await api('chapter.delete', scope(projectId, { chapter }))
+          const rest = tocNums.filter((n) => n !== chapter)
+          setActive(rest.length ? Math.max(...rest) : 0)
+          setNotice(`已删除第 ${chapter} 章`)
+          await onChanged()
+        } catch (err) {
+          setNotice(`删除失败：${friendlyError(err)}`)
+        } finally {
+          setDeletingChapter(false)
+        }
+      }
+      const [search, setSearch] = useState('')
+      const [results, setResults] = useState(null)
+      const [searching, setSearching] = useState(false)
+      const [searchError, setSearchError] = useState('')
+      const [highlight, setHighlight] = useState('')
+      const [jumpOffset, setJumpOffset] = useState(null) // { chapter, offset } 搜索结果精确落点
+      const focusRef = useRef(null)
+      const [notice, setNotice] = useState('')
+      const [pop, setPop] = useState(null)
+      const [runDialog, setRunDialog] = useState(null)
+      const [historyChapter, setHistoryChapter] = useState(0)
+      const [prefs, setPrefs] = useState(() => ({ size: toNumber(lsGet('nd.fontSize', '15'), 15), lead: toNumber(lsGet('nd.lineHeight', '1.95'), 1.95) }))
+      const [edit, setEdit] = useState({
+        chapter: 0, text: '', baseHash: '', meta: {},
+        dirty: false, saving: false, savedAt: '', error: '', stale: false,
+      })
+
+      const scrollRef = useRef(null)
+      const secRefs = useRef({})
+      const rafRef = useRef(0)
+      const restoredFor = useRef('')
+      const searchRef = useRef(null)
+      const popRef = useRef(pop)
+      popRef.current = pop
+      const editorRef = useRef(null)
+      const modeRef = useRef(mode)
+      modeRef.current = mode
+      // 模式切换的位置同步：读到哪里 → 编辑器光标也放到那一段 → 切回来还落回那一段
+      const pendingEditAnchor = useRef(null)
+      const pendingReadAnchor = useRef(null)
+      const anchorTimer = useRef(0)
+      const editRef = useRef(edit)
+      editRef.current = edit
+      const activeRef = useRef(active)
+      activeRef.current = active
+      const saveTimer = useRef(null)
+
+      const reviews = useAsync(
+        () => (projectId ? api('review.list', scope(projectId)) : Promise.resolve([])),
+        [projectId],
+      )
+      const proposals = useAsync(
+        () => (projectId ? api('proposal.list', scope(projectId, { status: 'pending', filter: { status: 'pending' } })) : Promise.resolve([])),
+        [projectId],
+      )
+
+      // 全本正文：分批拉取，边到边渲染（打开就能读到全文）。
+      useEffect(() => {
+        if (!projectId || tocNums.length === 0) {
+          setDocs([])
+          return undefined
+        }
+        let cancelled = false
+        const list = tocNums
+        const acc = []
+        setDocs([])
+        setDocsError('')
+        setDocsLoading(true)
+        ;(async () => {
+          try {
+            for (let i = 0; i < list.length; i += READ_BATCH) {
+              const batch = list.slice(i, i + READ_BATCH)
+              const rows = await Promise.all(
+                batch.map(async (chapter) => {
+                  try {
+                    const value = await api('chapter.get', chapterArgs(projectId, chapter))
+                    return {
+                      chapter,
+                      text: docText(value),
+                      meta: (value && value.meta) || {},
+                      hash: docHash(value && value.meta ? { meta: value.meta } : value),
+                      error: '',
+                    }
+                  } catch (err) {
+                    return { chapter, text: '', meta: {}, hash: '', error: friendlyError(err) }
+                  }
+                }),
+              )
+              if (cancelled) return
+              rows.forEach((row) => acc.push(row))
+              setDocs(acc.slice())
+            }
+          } catch (err) {
+            if (!cancelled) setDocsError(friendlyError(err))
+          } finally {
+            if (!cancelled) setDocsLoading(false)
+          }
+        })()
+        return () => {
+          cancelled = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [projectId, tocKey])
+
+      // 当前章必须存在
+      useEffect(() => {
+        if (tocNums.length === 0) return
+        if (!tocNums.includes(active)) setActive(tocNums[0])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [tocKey, active])
+
+      useEffect(() => {
+        if (active > 0) lsSet(LS.pos + projectId, active)
+      }, [active, projectId])
+
+      // 章节节点相对滚动容器的真实偏移：offsetTop 跟 offsetParent 走（这里是 .nd-overlay），
+      // 沉浸模式切换后外壳高度会变，只有用 rect + scrollTop 算才不会被顶栏/原则条带偏。
+      const nodeTopInScroll = useCallback((node) => {
+        const box = scrollRef.current
+        if (!box || !node) return 0
+        return node.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
+      }, [])
+
+      const scrollToChapter = useCallback(
+        (chapter, smooth = true) => {
+          const n = Number(chapter)
+          if (!n) return
+          setActive(n)
+          lsSet(LS.pos + projectId, n)
+          requestAnimationFrame(() => {
+            const box = scrollRef.current
+            const node = secRefs.current[n]
+            if (!box || !node) return
+            const top = Math.max(0, nodeTopInScroll(node) - 8)
+            if (typeof box.scrollTo === 'function') box.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' })
+            else box.scrollTop = top
+          })
+        },
+        [projectId, nodeTopInScroll],
+      )
+
+      // ── 阅读 / 编辑 / 审阅 之间的位置同步 ──────────────────────
+      // 现在的「正在读的那一段」：先按滚动位置找章，再找视口里第一个还没滚出去的段落。
+      const readParagraphAnchor = useCallback(() => {
+        const chapter = activeRef.current
+        const box = scrollRef.current
+        if (!box) return { chapter, para: 0 }
+        const boxTop = box.getBoundingClientRect().top
+        let section = secRefs.current[chapter] || null
+        for (const doc of docs) {
+          const node = secRefs.current[doc.chapter]
+          if (!node || !node.isConnected) continue
+          if (node.getBoundingClientRect().top - boxTop <= 40) section = node
+          else break
+        }
+        if (!section) return { chapter, para: 0 }
+        const n = Number(section.getAttribute('data-ch')) || chapter
+        const paras = section.querySelectorAll('.nd-para')
+        let para = 0
+        for (let i = 0; i < paras.length; i += 1) {
+          const rect = paras[i].getBoundingClientRect()
+          // 取「已经露到视口里超过半段」的第一段：段落只露一条尾巴时算下一段
+          if (rect.bottom - boxTop > Math.min(rect.height, 200) * 0.5) { para = i; break }
+          para = i
+        }
+        return { chapter: n, para }
+      }, [docs])
+
+      const saveAnchor = useCallback((anchor) => {
+        if (!anchor) return
+        lsSet(LS.pos + projectId, anchor.chapter)
+        lsSet(`${LS.pos + projectId}.para`, String(anchor.para || 0))
+      }, [projectId])
+
+      // 把正文滚到某个段落（段落 0 = 章首，露章标题；其它段落贴视口顶部）。
+      const scrollReaderToAnchor = useCallback((anchor, maxTries = 12) => {
+        if (!anchor) return
+        let tries = 0
+        const step = () => {
+          const box = scrollRef.current
+          const section = secRefs.current[anchor.chapter]
+          if (!box || !section || !section.isConnected) {
+            if (tries < maxTries) { tries += 1; window.setTimeout(step, 120) }
+            return
+          }
+          const paras = section.querySelectorAll('.nd-para')
+          const para = Math.max(0, Number(anchor.para) || 0)
+          const target = para > 0 ? (paras[Math.min(para, paras.length - 1)] || section) : section
+          const top = target.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop - 8
+          if (typeof box.scrollTo === 'function') box.scrollTo({ top: Math.max(0, top), behavior: 'auto' })
+          else box.scrollTop = Math.max(0, top)
+          activeRef.current = anchor.chapter
+          setActive(anchor.chapter)
+          saveAnchor(anchor)
+        }
+        requestAnimationFrame(step)
+      }, [saveAnchor])
+
+      // 首次渲染完成后恢复上次阅读位置（章 + 段）
+      useEffect(() => {
+        if (docs.length === 0) return
+        const marker = `${projectId}:${tocKey}`
+        if (restoredFor.current === marker) return
+        restoredFor.current = marker
+        const saved = toNumber(lsGet(LS.pos + projectId, '0'), 0) || Number(docs[0] && docs[0].chapter) || 0
+        const savedPara = toNumber(lsGet(`${LS.pos + projectId}.para`, '0'), 0)
+        scrollReaderToAnchor({ chapter: saved, para: savedPara }, 40)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [docs, tocKey, projectId])
+
+      // 进编辑：等本章正文进 textarea 后，把光标放到正在读的那一段（浏览器会把光标滚进视口）。
+      useEffect(() => {
+        if (mode !== 'edit') return
+        const anchor = pendingEditAnchor.current
+        const el = editorRef.current
+        if (!anchor || !el || !edit.text) return
+        if (anchor.chapter !== edit.chapter) { pendingEditAnchor.current = null; return }
+        pendingEditAnchor.current = null
+        requestAnimationFrame(() => {
+          const spans = paragraphSpans(edit.text)
+          const idx = Math.min(anchor.para || 0, Math.max(0, spans.length - 1))
+          const at = spans[idx] ? spans[idx].start : 0
+          try {
+            el.focus()
+            el.setSelectionRange(at, at)
+            // focus + setSelectionRange 在固定浮层里不会把光标滚进视口，自己按镜像位置滚；
+            // 手机弹出键盘后 textarea 会变矮，再补两次。
+            const apply = () => { try { el.scrollTop = Math.max(0, caretOffsetTop(el, at) - 12) } catch { /* 忽略 */ } }
+            apply()
+            window.setTimeout(apply, 180)
+            window.setTimeout(apply, 420)
+          } catch {
+            // 个别 WebView 不支持 focus + setSelectionRange 组合：忽略，正文仍可继续编辑
+          }
+        })
+      }, [mode, edit.chapter, edit.text])
+
+      // 出编辑：切回阅读 / 审阅后落回刚编辑的那一段，而不是书首 / 章首。
+      useEffect(() => {
+        if (mode === 'edit') return
+        const anchor = pendingReadAnchor.current
+        if (!anchor) return
+        pendingReadAnchor.current = null
+        scrollReaderToAnchor(anchor)
+      }, [mode, scrollReaderToAnchor])
+
+      // 进出沉浸模式外壳高度/正文宽度都会变：按「当前正在读的那一段」重新落位，
+      // 不要退回章首（否则沉浸切一下就把段落位置丢了）。
+      const wasImmersive = useRef(immersive)
+      useEffect(() => {
+        if (wasImmersive.current === immersive) return
+        wasImmersive.current = immersive
+        if (mode === 'edit') return
+        requestAnimationFrame(() => {
+          pendingReadAnchor.current = null
+          scrollReaderToAnchor(readParagraphAnchor())
+        })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [immersive, mode])
+
+      // pageArg 指定章号（来自地图 / 总览 / 审阅跳转）
+      useEffect(() => {
+        const n = Number(pageArg && pageArg.chapter)
+        if (n > 0 && docs.length > 0 && mode !== 'edit') scrollToChapter(n)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [pageArg])
+
+      // 搜索结果落到具体段落：目录跳到章首后，再把那一段滚到视口中间并高亮 1.4s
+      useEffect(() => {
+        if (!jumpOffset) return undefined
+        let tries = 0
+        let timer = 0
+        const step = () => {
+          const el = focusRef.current
+          const box = scrollRef.current
+          if (el && box) {
+            // 直接算 scrollTop：正文可能还在分批加载，scrollIntoView 会被后续布局挤走
+            const elBox = el.getBoundingClientRect()
+            const boxRect = box.getBoundingClientRect()
+            const delta = elBox.top - boxRect.top - box.clientHeight / 2 + elBox.height / 2
+            if (box.style.scrollBehavior !== 'auto') box.style.scrollBehavior = 'auto' // CSS 里是 smooth，会跟重试打架
+            box.scrollTop = Math.max(0, box.scrollTop + delta)
+            const after = el.getBoundingClientRect()
+            if (after.top > boxRect.top && after.bottom < boxRect.bottom) {
+              focusRef.current = null
+              timer = setTimeout(() => setJumpOffset(null), 1600)
+              return
+            }
+          }
+          tries += 1
+          if (tries < 20) timer = setTimeout(step, 180)
+        }
+        timer = setTimeout(step, 240)
+        return () => clearTimeout(timer)
+      }, [jumpOffset])
+      const onScroll = useCallback(() => {
+        if (modeRef.current === 'edit') return
+        if (rafRef.current) return
+        rafRef.current = window.requestAnimationFrame(() => {
+          rafRef.current = 0
+          const box = scrollRef.current
+          if (!box) return
+          const marker = box.scrollTop + 120
+          let current = Number(docs[0] && docs[0].chapter) || 0
+          for (const doc of docs) {
+            const node = secRefs.current[doc.chapter]
+            if (!node) continue
+            if (nodeTopInScroll(node) <= marker) current = doc.chapter
+            else break
+          }
+          if (current && current !== activeRef.current) {
+            activeRef.current = current
+            setActive(current)
+            lsSet(LS.pos + projectId, current)
+          }
+          // 滚动停 300ms 后记住读到的段落：切模式 / 下次打开都回到这一段
+          if (anchorTimer.current) window.clearTimeout(anchorTimer.current)
+          anchorTimer.current = window.setTimeout(() => {
+            anchorTimer.current = 0
+            if (modeRef.current === 'edit') return
+            saveAnchor(readParagraphAnchor())
+          }, 300)
+        })
+      }, [docs, mode, projectId, nodeTopInScroll, saveAnchor, readParagraphAnchor])
+
+      useEffect(() => () => {
+        if (rafRef.current) window.cancelAnimationFrame(rafRef.current)
+        if (anchorTimer.current) window.clearTimeout(anchorTimer.current)
+      }, [])
+
+      // 键盘：j/k 翻章、/ 聚焦搜索；输入框内不拦截；沉浸模式里 Esc 先退沉浸
+      useEffect(() => {
+        const onKey = (e) => {
+          const target = e.target
+          const tag = (target && target.tagName) || ''
+          if (e.key === 'Escape' && immersive) {
+            e.preventDefault()
+            e.stopImmediatePropagation()
+            if (target && target.blur) target.blur()
+            setImmersive(false)
+            return
+          }
+          if (/^(INPUT|TEXTAREA|SELECT)$/.test(tag) || (target && target.isContentEditable)) return
+          if (pop || runDialog) return
+          if (e.key === 'j' || e.key === 'k') {
+            const idx = tocNums.indexOf(activeRef.current)
+            if (idx < 0) return
+            const next = e.key === 'j' ? tocNums[idx + 1] : tocNums[idx - 1]
+            if (next) {
+              e.preventDefault()
+              scrollToChapter(next)
+            }
+          } else if (e.key === '/') {
+            e.preventDefault()
+            if (searchRef.current) searchRef.current.focus()
+          } else if (e.key === 'Escape') {
+            if (results) {
+              setResults(null)
+              setSearch('')
+            }
+          }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [tocKey, pop, runDialog, results, scrollToChapter, immersive, setImmersive])
+
+      const doSearch = async () => {
+        const q = search.trim()
+        if (!q) {
+          setResults(null)
+          setHighlight('')
+          return
+        }
+        setSearching(true)
+        setSearchError('')
+        try {
+          const value = await api('chapter.search', scope(projectId, { query: q, q }))
+          const list = Array.isArray(value) ? value : (value && (value.results || value.hits)) || []
+          setResults(list)
+          setHighlight(q)
+        } catch (err) {
+          setSearchError(friendlyError(err))
+          setResults([])
+        } finally {
+          setSearching(false)
+        }
+      }
+
+      const jumpToResult = (row) => {
+        const chapter = chapterNo(row) || toNumber(row && row.chapter, 0)
+        const offset = row && row.offset != null ? toNumber(row.offset, -1) : -1
+        if (chapter) scrollToChapter(chapter)
+        setJumpOffset(chapter ? { chapter, offset } : null)
+        setResults(null)
+      }
+
+      const openEdit = async (chapter) => {
+        const n = Number(chapter)
+        const doc = docs.find((d) => d.chapter === n)
+        if (doc) {
+          setEdit({
+            chapter: n, text: doc.text || '', baseHash: doc.hash || '', meta: doc.meta || {},
+            dirty: false, saving: false, savedAt: '', error: '', stale: false,
+          })
+          return
+        }
+        setEdit({ chapter: n, text: '', baseHash: '', meta: {}, dirty: false, saving: false, savedAt: '', error: '', stale: false })
+        try {
+          const value = await api('chapter.get', chapterArgs(projectId, n))
+          setEdit((cur) => (cur.chapter !== n ? cur : {
+            ...cur, text: docText(value), meta: (value && value.meta) || {},
+            baseHash: docHash(value && value.meta ? { meta: value.meta } : value), error: '',
+          }))
+        } catch (err) {
+          setEdit((cur) => (cur.chapter !== n ? cur : { ...cur, error: `正文读取失败：${friendlyError(err)}` }))
+        }
+      }
+
+      const saveNow = useCallback(async () => {
+        const cur = editRef.current
+        if (!cur || !cur.chapter || cur.saving) return
+        if (saveTimer.current) {
+          window.clearTimeout(saveTimer.current)
+          saveTimer.current = null
+        }
+        setEdit((state) => ({ ...state, saving: true, error: '' }))
+        try {
+          const value = await api('chapter.save', chapterArgs(projectId, cur.chapter, {
+            text: cur.text,
+            baseHash: cur.baseHash,
+            meta: cur.meta && cur.meta.title ? { title: cur.meta.title } : {},
+            opts: { baseHash: cur.baseHash },
+          }))
+          const nextHash =
+            (value && (value.contentHash || (value.meta && value.meta.contentHash))) ||
+            docHash(value && value.meta ? { meta: value.meta } : value) ||
+            (cur.baseHash || '')
+          const nextMeta = value && value.meta && typeof value.meta === 'object' ? value.meta : cur.meta
+          const words = countWords(cur.text)
+          setEdit((state) => (state.chapter !== cur.chapter ? state : {
+            ...state, saving: false, dirty: false, baseHash: nextHash, meta: nextMeta || {},
+            savedAt: new Date().toISOString(), error: '', stale: false,
+          }))
+          setDocs((prev) => prev.map((doc) => (doc.chapter === cur.chapter ? { ...doc, text: cur.text, meta: { ...(nextMeta || doc.meta), words }, hash: nextHash || doc.hash } : doc)))
+          setNotice('本章已保存')
+          if (onChanged) onChanged()
+        } catch (err) {
+          const stale = err && (err.code === 'stale' || /stale|已在别处|别处修改/.test(String(err.message || '')))
+          setEdit((state) => (state.chapter !== cur.chapter ? state : {
+            ...state, saving: false, error: stale ? '' : friendlyError(err), stale,
+          }))
+          if (stale) setNotice('正文已在别处修改，重新加载')
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [projectId, onChanged])
+
+      // 编辑模式：2 秒防抖自动保存
+      useEffect(() => {
+        if (mode !== 'edit' || !edit.dirty) return undefined
+        if (saveTimer.current) window.clearTimeout(saveTimer.current)
+        saveTimer.current = window.setTimeout(() => {
+          saveTimer.current = null
+          saveNow()
+        }, 2000)
+        return () => {
+          if (saveTimer.current) {
+            window.clearTimeout(saveTimer.current)
+            saveTimer.current = null
+          }
+        }
+      }, [edit.text, edit.dirty, mode, saveNow])
+
+      useEffect(() => {
+        if (mode === 'edit' && editRef.current.chapter === 0 && docs.length > 0) openEdit(activeRef.current)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [mode, docs.length])
+
+      const switchMode = (next) => {
+        if (next === mode) return
+        modeRef.current = next
+        if (mode === 'edit' && editRef.current.dirty) saveNow()
+        // 位置同步：阅读/审阅 → 编辑时记住当前段；编辑 → 阅读/审阅时按 textarea 光标换算回段落
+        if (next === 'edit') {
+          const anchor = readParagraphAnchor()
+          pendingEditAnchor.current = anchor
+          saveAnchor(anchor)
+          setActive(anchor.chapter)
+          openEdit(anchor.chapter)
+        } else if (mode === 'edit') {
+          const cur = editRef.current
+          const el = editorRef.current
+          let para = 0
+          if (el && cur.text) {
+            const at = Number(el.selectionStart) || 0
+            const spans = paragraphSpans(cur.text)
+            const idx = spans.findIndex((span) => at >= span.start && at < span.end)
+            para = idx < 0 ? Math.max(0, spans.length - 1) : idx
+          }
+          pendingReadAnchor.current = { chapter: cur.chapter || activeRef.current, para }
+          saveAnchor(pendingReadAnchor.current)
+        }
+        setMode(next)
+        lsSet(LS.mode, next)
+        if (next === 'reader') setNotice('审阅模式：选中正文文字即可加批注（不改正文）')
+        if (next === 'read') setNotice('')
+      }
+
+      const reloadEdit = async () => {
+        const n = editRef.current.chapter
+        if (!n) return
+        try {
+          const value = await api('chapter.get', chapterArgs(projectId, n))
+          const text = docText(value)
+          const meta = (value && value.meta) || {}
+          setEdit({ chapter: n, text, baseHash: docHash({ meta }), meta, dirty: false, saving: false, savedAt: '', error: '', stale: false })
+          setDocs((prev) => prev.map((doc) => (doc.chapter === n ? { ...doc, text, meta, hash: docHash({ meta }) } : doc)))
+          setNotice('已重新加载本章')
+        } catch (err) {
+          setNotice(`重新加载失败：${friendlyError(err)}`)
+        }
+      }
+
+      // 从当前选区取出「章号 + 逐字引文 + 弹窗落点」。
+      // 手机长按选中不会触发 mouseup（iOS / Android 都不发），所以鼠标拖动和
+      // selectionchange / touchend 都走这一个入口，不能只挂在 onMouseUp 上。
+      const pickReaderSelection = (sourceEl) => {
+        if (mode !== 'reader') return
+        if (sourceEl && sourceEl.closest && sourceEl.closest('.nd-note-pop')) return
+        const sel = window.getSelection && window.getSelection()
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0) return
+        const quote = String(sel.toString ? sel.toString() : '').trim()
+        if (quote.length < 4) return
+        const range = sel.getRangeAt(0)
+        const start = range.startContainer
+        const el = start && (start.nodeType === 1 ? start : start.parentElement)
+        if (el && el.closest && el.closest('.nd-note-pop')) return
+        const section = el && el.closest ? el.closest('[data-ch]') : null
+        if (!section) return
+        const chapter = Number(section.getAttribute('data-ch')) || activeRef.current
+        const cur = popRef.current
+        // 同一段已经在写批注：别把作者刚输入的内容冲掉
+        if (cur && cur.quote === quote && cur.chapter === chapter) return
+        const rect = range.getBoundingClientRect()
+        setPop({
+          quote,
+          chapter,
+          x: clamp(rect.left, 12, Math.max(12, window.innerWidth - 320)),
+          y: clamp(rect.bottom + 8, 12, Math.max(12, window.innerHeight - 260)),
+          issue: '',
+          severity: 'minor',
+          saving: false,
+          error: '',
+        })
+      }
+
+      const onReaderMouseUp = (e) => pickReaderSelection(e.target)
+
+      // 触屏兜底：选区变化 / 手指抬起后 260ms 再看一次（等系统选字手柄稳定）。
+      useEffect(() => {
+        if (mode !== 'reader') return undefined
+        let timer = 0
+        const schedule = () => {
+          if (timer) window.clearTimeout(timer)
+          timer = window.setTimeout(() => {
+            timer = 0
+            pickReaderSelection(null)
+          }, 260)
+        }
+        const onSelectionChange = () => {
+          const sel = window.getSelection && window.getSelection()
+          if (!sel || sel.isCollapsed) return
+          schedule()
+        }
+        // 只有手指落在正文里才算选字，避免点顶栏字号 −/+ 也去取一次选区
+        const onTouchEnd = (event) => {
+          const el = event && event.target
+          if (!el || !el.closest || !el.closest('.nd-reader-body')) return
+          schedule()
+        }
+        document.addEventListener('selectionchange', onSelectionChange)
+        document.addEventListener('touchend', onTouchEnd, { passive: true })
+        return () => {
+          document.removeEventListener('selectionchange', onSelectionChange)
+          document.removeEventListener('touchend', onTouchEnd)
+          if (timer) window.clearTimeout(timer)
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [mode])
+
+      const submitNote = async () => {
+        const cur = pop
+        if (!cur) return
+        if (!cur.issue.trim()) {
+          setPop((p) => (p ? { ...p, error: '请先写批注内容' } : p))
+          return
+        }
+        setPop({ ...cur, saving: true, error: '' })
+        const item = {
+          chapter: cur.chapter,
+          source: 'reader',
+          dimension: '读者',
+          severity: cur.severity,
+          quote: cur.quote,
+          issue: cur.issue.trim(),
+          suggestion: '',
+          status: 'open',
+        }
+        try {
+          const value = await api('review.add', scope(projectId, { chapter: cur.chapter, reviews: [item], items: [item] }))
+          const added = value && typeof value.added === 'number' ? value.added : 1
+          setPop(null)
+          if (window.getSelection) window.getSelection().removeAllRanges()
+          reviews.reload()
+          setNotice(added > 0 ? '已提交读者批注' : '没有新增：可能重复或引文未命中正文')
+        } catch (err) {
+          setPop((p) => (p ? { ...p, saving: false, error: friendlyError(err) } : p))
+        }
+      }
+
+      // 派生数据
+      const reviewsList = useMemo(
+        () => toList(reviews.data, 'reviews').map((rv) => ({ ...rv, route: normalRoute(rv) })),
+        [reviews.data],
+      )
+      const proposalsList = useMemo(
+        () => toList(proposals.data, 'proposals').filter((p) => PROPOSAL_KINDS.includes(p.kind) && (!p.status || p.status === 'pending')),
+        [proposals.data],
+      )
+      const chapterReviews = useMemo(() => reviewsList.filter((rv) => chapterNo(rv) === active), [reviewsList, active])
+      const chapterProposals = useMemo(() => proposalsList.filter((p) => chapterNo(p) === active), [proposalsList, active])
+      const readerNotes = chapterReviews.filter((rv) => rv.route === 'reader' && (!rv.status || rv.status === 'open'))
+      const routeCounts = useMemo(() => {
+        const counts = {}
+        for (const route of ROUTES) counts[route.id] = 0
+        for (const rv of chapterReviews) {
+          if (rv.status && rv.status !== 'open') continue
+          if (counts[rv.route] == null) counts[rv.route] = 0
+          counts[rv.route] += 1
+        }
+        return counts
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [chapterReviews])
+
+      const activeInfo = chapters.find((row) => chapterNo(row) === active) || null
+      const activeAtt = attentionOf(context && context.attention, active)
+      const activeTitle = activeInfo ? chapterTitle(activeInfo) : ''
+      const tocRows = useMemo(() => {
+        const q = tocFilter.trim()
+        if (!q) return chapters
+        return chapters.filter((row) => String(chapterNo(row)).includes(q) || chapterTitle(row).includes(q))
+      }, [chapters, tocFilter])
+
+      const registerRef = useCallback((chapter, el) => {
+        if (el) secRefs.current[chapter] = el
+      }, [])
+
+      const tocByChapter = useMemo(() => {
+        const map = {}
+        for (const row of chapters) map[chapterNo(row)] = row
+        return map
+      }, [chapters])
+
+      const editStateText = edit.saving
+        ? '保存中…'
+        : edit.dirty
+          ? '未保存 · 2 秒后自动保存'
+          : edit.savedAt
+            ? `已保存 ${fmtClock(edit.savedAt)}`
+            : '尚无改动'
+
+      const editorPane = h('div', { className: 'nd-edit' },
+        immersive
+          ? null
+          : h('div', { className: 'nd-edit-bar' },
+              h('strong', null, edit.chapter ? `第 ${edit.chapter} 章` : '选择章节'),
+              h('span', { className: 'nd-hint nd-edit-title' }, edit.chapter ? chapterTitle(edit.meta) : ''),
+              h('span', { className: 'nd-edit-state' }, editStateText),
+              h('span', { className: 'nd-edit-words' }, `${fmtInt(countWords(edit.text))} 字`),
+              h(Btn, { small: true, kind: 'primary', onClick: saveNow, disabled: edit.saving || !edit.dirty }, '保存（⌘S）'),
+              h(Btn, { small: true, onClick: () => setHistoryChapter(edit.chapter), disabled: !edit.chapter }, '历史'),
+            ),
+        edit.stale
+          ? h('div', { className: 'nd-banner nd-banner-warn' },
+              h('span', null, '正文已在别处修改，重新加载后再编辑'),
+              h(Btn, { small: true, onClick: reloadEdit }, '重新加载'),
+            )
+          : null,
+        edit.error ? h(Msg, { tone: 'error' }, edit.error) : null,
+        h('textarea', {
+          className: 'nd-editor',
+          ref: editorRef,
+          value: edit.text,
+          spellCheck: false,
+          placeholder: '本章还没有正文',
+          style: { fontSize: `${prefs.size}px`, lineHeight: prefs.lead },
+          onChange: (e) => {
+            const value = e.target.value
+            setEdit((state) => ({ ...state, text: value, dirty: true, error: '' }))
+          },
+          onKeyDown: (e) => {
+            if ((e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 's') {
+              e.preventDefault()
+              saveNow()
+            }
+          },
+        }),
+      )
+
+      const bumpPref = (key, delta, min, max) =>
+        setPrefs((prev) => {
+          const next = { ...prev, [key]: Math.min(max, Math.max(min, Math.round((prev[key] + delta) * 100) / 100)) }
+          lsSet(key === 'size' ? 'nd.fontSize' : 'nd.lineHeight', String(next[key]))
+          return next
+        })
+
+      const readerBody = h('div', { className: 'nd-reader-body', onMouseUp: onReaderMouseUp, style: { fontSize: `${prefs.size}px`, lineHeight: prefs.lead } },
+        docs.length === 0 && docsLoading ? h(Loading, null, '正在加载全书正文…') : null,
+        docsError ? h(ErrorBox, { error: docsError }) : null,
+        docs.length === 0 && !docsLoading && !docsError
+          ? h(Empty, null, '这本书还没有正文。可以让 AI 先写第一章。')
+          : null,
+        docs.map((doc) =>
+          h(ChapterBlock, {
+            key: doc.chapter,
+            doc,
+            info: tocByChapter[doc.chapter] || null,
+            attention: context && context.attention,
+            highlight,
+            registerRef,
+            focusOffset: jumpOffset && jumpOffset.chapter === doc.chapter && jumpOffset.offset >= 0 ? jumpOffset.offset : null,
+            focusRef,
+          }),
+        ),
+        docs.length > 0 && docsLoading ? h('div', { className: 'nd-loading-more' }, `正在加载其余章节…（${docs.length}/${tocNums.length}）`) : null,
+      )
+
+      return h('div', { className: 'nd-read' },
+        h('aside', { className: 'nd-toc' },
+          h('div', { className: 'nd-toc-head' },
+            h('div', { className: 'nd-toc-headline' },
+              h('strong', null, '目录'), h('span', { className: 'nd-hint' }, `${chapters.length} 章`),
+              h(Btn, { small: true, kind: 'ghost', onClick: createChapter, disabled: creating, title: '在最后新建一章（纯文本）' }, creating ? '新建中…' : '＋ 新章'),
+            ),
+          ),
+          h(TextInput, { value: tocFilter, onChange: setTocFilter, placeholder: '过滤章节 / 标题' }),
+          h('div', { className: 'nd-toc-list' },
+            tocRows.length === 0
+              ? h('p', { className: 'nd-muted' }, chapters.length ? '没有匹配的章节' : '还没有章节')
+              : tocRows.map((row) => {
+                  const n = chapterNo(row)
+                  const att = attentionOf(context && context.attention, n)
+                  const score = attentionScore(att)
+                  const status = row.status || ''
+                  return h('div', { key: n, className: `nd-toc-row${n === active ? ' nd-toc-active-row' : ''}` },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: `nd-toc-item${n === active ? ' nd-toc-active' : ''}`,
+                        onClick: () => {
+                          if (mode === 'edit') {
+                            if (editRef.current.dirty) saveNow()
+                            setActive(n)
+                            openEdit(n)
+                          } else {
+                            scrollToChapter(n)
+                          }
+                        },
+                      },
+                      h('span', { className: 'nd-toc-no' }, String(n).padStart(2, '0')),
+                      h('span', { className: 'nd-toc-main' }, h('span', { className: 'nd-toc-title' }, chapterTitle(row)), h('span', { className: 'nd-toc-sub' }, `${fmtWords(row.words)} 字`)),
+                      h('span', { className: 'nd-toc-right' },
+                        status ? h(Dot, { tone: CHAPTER_STATUS_TONE[status] || 'muted' }) : null,
+                        score != null ? h('span', { className: `nd-score${score >= 70 ? ' nd-score-ok' : score >= 50 ? '' : ' nd-score-warn'}` }, score) : null,
+                      ),
+                    ),
+                    h('button', { type: 'button', className: 'nd-toc-del', title: `删除第 ${n} 章`, onClick: (event) => { event.stopPropagation(); deleteActiveChapter(n) } }, '✕'),
+                  )
+                }),
+          ),
+          h('div', { className: 'nd-toc-foot' }, 'j / k 翻章 · / 搜索'),
+        ),
+        h('section', { className: 'nd-read-main' },
+          h('div', { className: 'nd-read-head' },
+            h('div', { className: 'nd-read-row' },
+              immersive
+                ? h('div', { className: 'nd-im-left' },
+                    h('span', { className: 'nd-im-state' },
+                      mode === 'edit'
+                        ? (edit.saving ? '保存中…' : edit.dirty ? '未保存 · 自动保存中' : edit.savedAt ? `已保存 ${fmtClock(edit.savedAt)}` : '尚无改动')
+                        : mode === 'reader'
+                          ? '审阅：选中文字 → 加批注'
+                          : active > 0 ? `第 ${active} 章 / ${chapters.length}` : ''),
+                    h('span', { className: 'nd-im-size', role: 'group', 'aria-label': '字号' },
+                      h('button', { type: 'button', className: 'nd-im-size-btn', title: '字号减小（A−）', onClick: () => bumpPref('size', -1, 13, 28) }, '−'),
+                      h('span', { className: 'nd-im-size-val' }, String(prefs.size)),
+                      h('button', { type: 'button', className: 'nd-im-size-btn', title: '字号增大（A+）', onClick: () => bumpPref('size', 1, 13, 28) }, '+'),
+                    ),
+                  )
+                : null,
+              h(Seg, { value: mode, onChange: switchMode, items: MODES.map((m) => ({ value: m.id, label: m.label })) }),
+              mode === 'edit' ? null : h('span', { className: 'nd-read-prefs' },
+                h(Btn, { small: true, onClick: () => bumpPref('size', -1, 13, 28) }, 'A−'),
+                h(Btn, { small: true, onClick: () => bumpPref('size', 1, 13, 28) }, 'A+'),
+                h(Btn, { small: true, onClick: () => bumpPref('lead', 0.15, 1.6, 2.4) }, '行距'),
+              ),
+              h(Btn, { small: true, onClick: () => active > 0 && setHistoryChapter(active) }, '历史版本'),
+              immersive
+                ? null
+                : h(Btn, { small: true, className: 'nd-im-toggle', onClick: () => setImmersive(true), title: '沉浸模式：只留阅读 / 编辑 / 审阅三个按钮，正文接近全屏（Esc 退出）' }, '⛶ 沉浸'),
+              h('span', { className: 'nd-read-pos' }, active > 0 ? `第 ${active} 章 / ${chapters.length}` : ''),
+              h('span', { className: 'nd-hint nd-mode-legend' },
+                mode === 'read'
+                  ? '阅读＝纯读，不会改正文 · j/k 翻章 · / 搜索'
+                  : mode === 'reader'
+                    ? '审阅＝选中正文文字提交批注，不改正文'
+                    : '编辑＝直接修改正文 · 2 秒自动保存 · ⌘S 立即保存'),
+              immersive
+                ? h('button', { type: 'button', className: 'nd-im-exit', onClick: () => setImmersive(false), title: '退出沉浸（Esc）' },
+                    h('span', { className: 'nd-im-exit-icon' }, '⤢'),
+                    h('span', { className: 'nd-im-exit-text' }, '退出沉浸'),
+                  )
+                : null,
+            ),
+            mode !== 'edit'
+              ? h('div', { className: 'nd-search' },
+                  h('input', {
+                    ref: searchRef,
+                    className: 'nd-input nd-search-input',
+                    value: search,
+                    placeholder: '全文搜索…（Enter 搜索）',
+                    onChange: (e) => setSearch(e.target.value),
+                    onKeyDown: (e) => {
+                      if (e.key === 'Enter') doSearch()
+                      if (e.key === 'Escape') {
+                        setResults(null)
+                        setSearch('')
+                      }
+                    },
+                  }),
+                  h(Btn, { small: true, onClick: doSearch, disabled: searching }, searching ? '搜索中…' : '搜索'),
+                  highlight ? h('button', { type: 'button', className: 'nd-linkbtn', onClick: () => { setHighlight(''); setSearch(''); setResults(null) } }, '清除高亮') : null,
+                  results
+                    ? h('div', { className: 'nd-results' },
+                        searchError ? h(Msg, { tone: 'error' }, searchError) : null,
+                        !searchError && results.length === 0 ? h('p', { className: 'nd-muted' }, '没有找到匹配段落') : null,
+                        results.slice(0, 60).map((row, index) =>
+                          h('button', { key: index, type: 'button', className: 'nd-result', onClick: () => jumpToResult(row) },
+                            h('span', { className: 'nd-result-ch' }, `第 ${chapterNo(row) || row.chapter || '?'} 章`),
+                            h('span', { className: 'nd-result-text' }, String(row.snippet || row.text || row.quote || '')),
+                          ),
+                        ),
+                      )
+                    : null,
+                )
+              : null,
+            notice ? h(Msg, { tone: highlight ? 'info' : 'info', onClose: () => setNotice('') }, notice) : null,
+          ),
+          h('div', { className: 'nd-reader-scroll', ref: scrollRef, onScroll }, mode === 'edit' ? editorPane : readerBody),
+        ),
+        h('aside', { className: 'nd-side' },
+          h(
+            SideSection,
+            { title: '本章' },
+            h('div', { className: 'nd-side-titleline' }, h('strong', null, active > 0 ? `第 ${active} 章` : '未选择'), h('span', null, activeTitle)),
+            h('div', { className: 'nd-kv' },
+              h('span', null, '状态'), h('span', null, activeInfo && activeInfo.status ? (CHAPTER_STATUS[activeInfo.status] || activeInfo.status) : '—'),
+              h('span', null, '字数'), h('span', null, activeInfo ? fmtInt(activeInfo.words) : '—'),
+              h('span', null, '更新时间'), h('span', null, activeInfo ? fmtAgo(activeInfo.updatedAt) : '—'),
+            ),
+            h(AttentionBars, { row: activeAtt, chapter: active, projectId, onSaved: onChanged }),
+            h('div', { className: 'nd-actions' },
+              h(Btn, { small: true, onClick: () => go('reviews', { source: 'all', chapter: active, recheck: 1 }) }, '🧊 AI 冷读打分本章'),
+            ),
+          ),
+          h(
+            SideSection,
+            { title: '审阅统计', extra: h('span', { className: 'nd-hint' }, `${chapterReviews.filter((r) => !r.status || r.status === 'open').length} 条待处理`) },
+            h('div', { className: 'nd-routes' },
+              ROUTES.map((route) =>
+                h('button', { key: route.id, type: 'button', className: 'nd-route-row', onClick: () => go('reviews', { source: route.id, chapter: active }) },
+                  h('span', { className: 'nd-route-name' }, `${route.icon} ${route.label}`),
+                  h('span', { className: `nd-route-count${routeCounts[route.id] ? ' nd-route-hot' : ''}` }, routeCounts[route.id] || 0),
+                ),
+              ),
+            ),
+            readerNotes.length
+              ? h('div', { className: 'nd-notes' },
+                  h('div', { className: 'nd-side-sub' }, '本章读者批注'),
+                  readerNotes.slice(0, 3).map((note) => h('div', { key: note.id, className: 'nd-note' }, h('div', { className: 'nd-note-quote' }, String(note.quote || '').slice(0, 60)), h('div', null, String(note.issue || '')))),
+                )
+              : null,
+          ),
+          h(
+            SideSection,
+            { title: '待批准提案', extra: h('span', { className: 'nd-hint' }, `${chapterProposals.length} 条`) },
+            chapterProposals.length === 0
+              ? h('p', { className: 'nd-muted' }, '本章没有待批准提案。')
+              : chapterProposals.slice(0, 5).map((p) =>
+                  h('button', { key: p.id, type: 'button', className: 'nd-proposal-mini', onClick: () => go('proposals') },
+                    h('span', { className: 'nd-proposal-mini-title' }, String(p.title || '未命名提案')),
+                    h(Tag, null, PROPOSAL_KIND[p.kind] || p.kind),
+                  ),
+                ),
+          ),
+          h(
+            SideSection,
+            { title: '动作' },
+            h('div', { className: 'nd-actions' },
+              h(Btn, { small: true, kind: 'primary', onClick: () => setRunDialog({ kind: 'continue', scope: 'chapter', chapter: (tocNums.length ? Math.max(...tocNums) : 0) + 1, title: `从头写第 ${(tocNums.length ? Math.max(...tocNums) : 0) + 1} 章` }) }, '从头写下一章'),
+              h(Btn, { small: true, onClick: () => setRunDialog({ kind: 'expand', scope: 'chapter', chapter: active, title: `续写第 ${active} 章` }) }, '续写本章'),
+              h(Btn, { small: true, onClick: () => setRunDialog({ kind: 'rewrite', variant: 'logic', scope: 'chapter', chapter: active, title: `重写第 ${active} 章` }) }, '重写本章'),
+              active > 0
+                ? h(Btn, { small: true, kind: 'danger', disabled: deletingChapter, onClick: () => deleteActiveChapter(active) }, deletingChapter ? '删除中…' : '删除本章')
+                : null,
+            ),
+            h('p', { className: 'nd-hint' }, '「从头写下一章」会直接让 AI 写新章并落盘（过闸门）；续写/重写只创建全文动作，产物进提案。'),
+          ),
+        ),
+        pop
+          ? h('div', {
+              className: 'nd-note-pop',
+              // 手机上贴着底边当成批注面板（内联样式优先于媒体查询里的 left/right/bottom）
+              style: typeof window !== 'undefined' && window.innerWidth <= 900
+                ? { left: '10px', right: '10px', bottom: 'calc(10px + env(safe-area-inset-bottom,0px))', top: 'auto', width: 'auto' }
+                : { left: `${pop.x}px`, top: `${pop.y}px` },
+            },
+              h('div', { className: 'nd-note-pop-head' }, `第 ${pop.chapter} 章 · 加批注`),
+              h('div', { className: 'nd-note-quote' }, String(pop.quote).slice(0, 90)),
+              h(TextArea, {
+                value: pop.issue,
+                rows: 3,
+                placeholder: '这条批注想说什么？',
+                onChange: (value) => setPop((p) => (p ? { ...p, issue: value } : p)),
+              }),
+              h(Select, {
+                value: pop.severity,
+                onChange: (value) => setPop((p) => (p ? { ...p, severity: value } : p)),
+                options: SEVERITIES.map((s) => ({ value: s.id, label: s.label })),
+              }),
+              pop.error ? h(Msg, { tone: 'error' }, pop.error) : null,
+              h('div', { className: 'nd-note-actions' },
+                h(Btn, { small: true, onClick: () => setPop(null) }, '取消'),
+                h(Btn, { small: true, kind: 'primary', onClick: submitNote, disabled: pop.saving }, pop.saving ? '提交中…' : '提交批注'),
+              ),
+            )
+          : null,
+        runDialog
+          ? h(RunDialog, {
+              projectId,
+              toc,
+              defaults: runDialog,
+              onClose: () => setRunDialog(null),
+              onCreated: () => {
+                setRunDialog(null)
+                go('run')
+              },
+            })
+          : null,
+        historyChapter
+          ? h(HistoryDialog, {
+              projectId,
+              chapter: historyChapter,
+              onClose: () => setHistoryChapter(0),
+              onLoad: (text) => {
+                setHistoryChapter(0)
+                setEdit((state) => ({ ...state, text, dirty: true, error: '', stale: false }))
+                setNotice('已载入历史版本；保存后会写入正文，当前内容会先进入历史。')
+              },
+            })
+          : null,
+      )
+    }
+
+    function SideSection({ title, extra, children }) {
+      return h('section', { className: 'nd-side-sec' },
+        h('div', { className: 'nd-side-head' }, h('span', { className: 'nd-side-title' }, title), extra || null),
+        children,
+      )
+    }
+
+    function AttentionBars({ row, chapter, projectId, onSaved }) {
+      const [editing, setEditing] = useState(false)
+      const [draft, setDraft] = useState({})
+      const [verdict, setVerdict] = useState('')
+      const [weakest, setWeakest] = useState('')
+      const [saving, setSaving] = useState(false)
+      const [error, setError] = useState('')
+      const beats = attentionBeats(row)
+      const score = attentionScore(row)
+      const canEdit = !!(projectId && chapter)
+      const startEdit = () => {
+        const next = {}
+        for (const beat of ATTENTION_BEATS) next[beat.id] = String(toNumber(beats[beat.id], 0))
+        setDraft(next)
+        setVerdict(String((row && row.verdict) || ''))
+        setWeakest(String((row && row.weakest) || ''))
+        setError('')
+        setEditing(true)
+      }
+      const save = async () => {
+        if (!canEdit) return
+        setSaving(true)
+        setError('')
+        try {
+          const breakdown = {}
+          for (const beat of ATTENTION_BEATS) breakdown[beat.id] = clamp(toNumber(draft[beat.id], 0), 0, beat.max)
+          await api('attention.merge', scope(projectId, { chapter, patch: { breakdown, verdict: verdict.trim(), weakest: weakest.trim() } }))
+          setEditing(false)
+          if (onSaved) onSaved()
+        } catch (err) {
+          setError(friendlyError(err))
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      if (editing) {
+        return h('div', { className: 'nd-att' },
+          ATTENTION_BEATS.map((beat) => h('div', { className: 'nd-att-row', key: beat.id },
+            h('span', { className: 'nd-att-label' }, beat.label),
+            h(TextInput, {
+              type: 'number',
+              min: 0,
+              max: beat.max,
+              value: draft[beat.id],
+              onChange: (value) => setDraft((state) => ({ ...state, [beat.id]: value })),
+            }),
+            h('span', { className: 'nd-att-val' }, `/ ${beat.max}`),
+          )),
+          h(TextInput, { value: verdict, placeholder: '下一章意愿（会 / 不会）', onChange: setVerdict }),
+          h(TextInput, { value: weakest, placeholder: '最弱一环', onChange: setWeakest }),
+          error ? h(Msg, { tone: 'error' }, error) : null,
+          h('div', { className: 'nd-actions' },
+            h(Btn, { small: true, kind: 'primary', onClick: save, disabled: saving }, saving ? '保存中…' : '保存实测'),
+            h(Btn, { small: true, onClick: () => setEditing(false) }, '取消'),
+          ),
+        )
+      }
+
+      return h('div', { className: 'nd-att' },
+        row
+          ? h(
+              Fragment,
+              null,
+              h('div', { className: 'nd-att-score' },
+                h('strong', null, score == null ? '—' : score),
+                h('span', null, '/ 100 总分'),
+                row.designScore != null ? h('span', { className: 'nd-muted' }, `设计分 ${row.designScore}`) : null,
+              ),
+              ATTENTION_BEATS.map((beat) => {
+                const value = toNumber(beats[beat.id], 0)
+                const ratio = clamp(value / beat.max, 0, 1)
+                return h('div', { className: 'nd-att-row', key: beat.id },
+                  h('span', { className: 'nd-att-label' }, beat.label),
+                  h('div', { className: 'nd-bar nd-att-bar' }, h('div', { className: `nd-bar-fill${ratio >= 0.8 ? ' nd-bar-ok' : ratio < 0.5 ? ' nd-bar-warn' : ''}`, style: { width: `${Math.round(ratio * 100)}%` } })),
+                  h('span', { className: 'nd-att-val' }, `${value}/${beat.max}`),
+                )
+              }),
+              row.verdict ? h('p', { className: 'nd-hint' }, `下一章意愿：${row.verdict}`) : null,
+              row.weakest ? h('p', { className: 'nd-hint' }, `最弱一环：${row.weakest}`) : null,
+            )
+          : h('p', { className: 'nd-muted nd-att-empty' }, '本章还没有注意力记录'),
+        canEdit ? h('div', { className: 'nd-actions' }, h(Btn, { small: true, onClick: startEdit }, row ? '改实测分' : '记录实测分')) : null,
+      )
+    }
+
+    // 全本连续渲染：memo 避免滚动切换当前章时重渲染所有章节
+    const ChapterBlock = memo(function ChapterBlock({ doc, info, attention, highlight, registerRef, focusOffset, focusRef }) {
+      const paragraphs = useMemo(() => splitParagraphs(doc.text), [doc.text])
+      const spans = useMemo(() => paragraphSpans(doc.text), [doc.text])
+      const target = focusOffset == null ? -1 : spans.findIndex((span) => focusOffset >= span.start && focusOffset < span.end)
+      const att = attentionOf(attention, doc.chapter)
+      const score = attentionScore(att)
+      const meta = doc.meta || {}
+      const title = (info && chapterTitle(info)) || (meta.title ? String(meta.title) : '') || '未命名'
+      const status = (info && info.status) || meta.status || ''
+      const words = meta.words != null ? toNumber(meta.words) : countWords(doc.text)
+      return h(
+        'section',
+        {
+          className: 'nd-chapter',
+          'data-ch': String(doc.chapter),
+          ref: (el) => registerRef(doc.chapter, el),
+        },
+        h('header', { className: 'nd-chapter-head' },
+          h('span', { className: 'nd-ch-num' }, `第 ${doc.chapter} 章`),
+          h('h3', { className: 'nd-ch-title' }, title),
+          status ? h(Tag, { tone: CHAPTER_STATUS_TONE[status] || 'muted' }, CHAPTER_STATUS[status] || status) : null,
+          score != null ? h(Tag, { tone: score >= 70 ? 'ok' : score >= 50 ? 'warn' : 'error' }, `注意力 ${score}`) : null,
+          h('span', { className: 'nd-ch-words' }, `${fmtInt(words)} 字`),
+        ),
+        doc.error ? h('div', { className: 'nd-errorline' }, `正文读取失败：${doc.error}`) : null,
+        paragraphs.length === 0 && !doc.error ? h('p', { className: 'nd-muted' }, '（本章暂无正文）') : null,
+        paragraphs.map((paragraph, index) => h('p', {
+          className: index === target ? 'nd-para nd-target' : 'nd-para',
+          key: index,
+          ref: index === target && focusRef ? (el) => { focusRef.current = el } : undefined,
+        }, ...renderSegments(paragraph, highlight))),
+      )
+    })
+
+    // 章节历史：列出备份版本、预览、载入编辑器（写入仍走唯一的 saveChapter 闸门）
+    function HistoryDialog({ projectId, chapter, onClose, onLoad }) {
+      const history = useAsync(() => api('chapter.history', scope(projectId, { chapter })), [projectId, chapter])
+      const [preview, setPreview] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState('')
+      const rows = toList(history.data, 'versions')
+
+      const load = async (row) => {
+        setBusy(String(row.version))
+        setError('')
+        try {
+          const value = await api('chapter.version', scope(projectId, { chapter, version: row.version }))
+          setPreview({ version: row.version, savedAt: row.savedAt, text: docText(value) })
+        } catch (err) {
+          setError(friendlyError(err))
+        } finally {
+          setBusy('')
+        }
+      }
+
+      return h(
+        Modal,
+        {
+          title: `第 ${chapter} 章 · 历史版本`,
+          onClose,
+          wide: true,
+          footer: h(Fragment, null,
+            h(Btn, { onClick: onClose }, '关闭'),
+            preview ? h(Btn, { kind: 'primary', onClick: () => onLoad(preview.text) }, '载入编辑器') : null,
+          ),
+        },
+        error ? h(Msg, { tone: 'error' }, error) : null,
+        history.loading && !history.data ? h(Loading, null, '正在读取历史…') : null,
+        history.error ? h(ErrorBox, { error: history.error, onRetry: history.reload }) : null,
+        !history.loading && !history.error && rows.length === 0
+          ? h(Empty, null, '还没有历史版本。每次保存时若正文有变化，会自动备份上一版。')
+          : null,
+        rows.length ? h('div', { className: 'nd-history' }, rows.map((row) => h('button', {
+          key: String(row.version), type: 'button', disabled: busy === String(row.version),
+          className: `nd-history-row${preview && preview.version === row.version ? ' nd-history-active' : ''}`,
+          onClick: () => { void load(row) },
+        },
+          h('span', { className: 'nd-history-time' }, fmtClock(row.savedAt) || String(row.savedAt || row.version)),
+          h('span', { className: 'nd-history-meta' }, `${fmtBytes(row.bytes)} · ${row.source === '0.5' ? '旧插件备份' : '0.6 备份'}`),
+          h('span', { className: 'nd-hint' }, fmtAgo(row.savedAt)),
+        ))) : null,
+        preview
+          ? h('div', { className: 'nd-diff-col' },
+              h('div', { className: 'nd-diff-head' }, `预览 ${fmtClock(preview.savedAt) || ''}`),
+              h('pre', { className: 'nd-pre nd-pre-tall' }, String(preview.text || '（空）')),
+            )
+          : null,
+      )
+    }
+
+    // 章节勾选器：审阅/复测范围一律由用户自己选，不预设章数
+    function ChapterPicker({ chapters, stats, value, onChange }) {
+      const picked = new Set(value)
+      const toggleChapter = (n) => onChange(picked.has(n) ? value.filter((x) => x !== n) : [...value, n].sort((a, b) => a - b))
+      if (!chapters.length) return h('p', { className: 'nd-hint' }, '这本书还没有章节：先写正文，再回来审。')
+      return h('div', { className: 'nd-chapter-picker', style: { maxHeight: '260px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '2px' } },
+        chapters.map((row) => {
+          const stat = stats.get(row.chapter)
+          const mark = stat && stat.open ? ` ｜ ${stat.open} 条待处理` : stat ? ' ｜ 已审' : ' ｜ 未审'
+          return h('label', { key: row.chapter, className: 'nd-form-row nd-picker-row' },
+            h(Check, { checked: picked.has(row.chapter), onChange: () => toggleChapter(row.chapter) }),
+            h('span', null, `第 ${row.chapter} 章${row.title ? ` · ${row.title}` : ''}`),
+            h('span', { className: 'nd-hint' }, `${Number(row.words) || 0} 字${mark}`),
+          )
+        }),
+      )
+    }
+
+    // ── 审阅页 ────────────────────────────────────────────────
+    function ReviewsTab({ projectId, toc, pageArg, go, onChanged }) {
+      const [tab, setTab] = useState(() => (pageArg && pageArg.source) || 'all')
+      const [status, setStatus] = useState('open')
+      const [chapterFilter, setChapterFilter] = useState(() => (pageArg && pageArg.chapter ? String(pageArg.chapter) : ''))
+      const [selected, setSelected] = useState([])
+      const [notice, setNotice] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const [workorder, setWorkorder] = useState(null) // { title, text, sending, payload }
+      const [launcher, setLauncher] = useState(null) // 审阅/复测弹窗：{ source, mode, focus, chapters }
+      const recheckIntent = useRef(pageArg && pageArg.recheck ? Number(pageArg.chapter) || 0 : 0)
+
+      const reviews = useAsync(
+        () => (projectId ? api('review.list', scope(projectId)) : Promise.resolve([])),
+        [projectId],
+      )
+      const rows = useMemo(
+        () => toList(reviews.data, 'reviews').map((rv) => ({ ...rv, route: normalRoute(rv) })),
+        [reviews.data],
+      )
+      const filtered = useMemo(
+        () =>
+          rows.filter((rv) => {
+            const n = chapterNo(rv)
+            if (tab === 'book') {
+              if (n !== 0) return false
+            } else if (tab !== 'all' && rv.route !== tab) {
+              return false
+            }
+            if (status !== 'all' && String(rv.status || 'open') !== status) return false
+            if (chapterFilter !== '' && String(n) !== chapterFilter) return false
+            return true
+          }),
+        [rows, tab, status, chapterFilter],
+      )
+      const counts = useMemo(() => {
+        const out = { all: 0, book: 0 }
+        ROUTES.forEach((route) => { out[route.id] = 0 })
+        for (const rv of rows) {
+          if (rv.status && rv.status !== 'open' && rv.status !== 'proposed') continue
+          out.all += 1
+          if (chapterNo(rv) === 0) out.book += 1
+          out[rv.route] = (out[rv.route] || 0) + 1
+        }
+        return out
+      }, [rows])
+
+      // 审阅范围一律由用户勾选：默认整本书，不预设章数、不按顺序截断
+      const allChapters = useMemo(
+        () => sortChapters(toList(toc)).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' })).filter((row) => row.chapter > 0),
+        [toc],
+      )
+      const chapterStats = useMemo(() => {
+        const out = new Map()
+        for (const rv of rows) {
+          const n = chapterNo(rv)
+          if (n <= 0) continue
+          if (!out.has(n)) out.set(n, { open: 0, total: 0 })
+          const stat = out.get(n)
+          stat.total += 1
+          if (!rv.status || rv.status === 'open' || rv.status === 'proposed') stat.open += 1
+        }
+        return out
+      }, [rows])
+      useEffect(() => {
+        const n = recheckIntent.current
+        if (!n || !allChapters.some((row) => row.chapter === n)) return
+        recheckIntent.current = 0
+        setLauncher({ source: 'all', mode: 'recheck', focus: '', chapters: [n] })
+      }, [allChapters.length])
+      const selectedChapterRows = (numbers) => {
+        const wanted = new Set(numbers)
+        return allChapters.filter((row) => wanted.has(row.chapter))
+      }
+      const openLauncher = (source, mode = 'review') => {
+        setLauncher({ source, mode, focus: '', chapters: allChapters.map((row) => row.chapter) })
+      }
+      const launchWorkorder = async () => {
+        if (!projectId || busy || !launcher) return
+        const chapters = selectedChapterRows(launcher.chapters)
+        if (chapters.length === 0) {
+          setNotice({ tone: 'warn', text: '先勾选要审的章节：可以点「全书」，也可以逐章勾选。' })
+          return
+        }
+        const source = launcher.source
+        setBusy(true)
+        setNotice(null)
+        try {
+          const payload = {
+            workorder: 'reviewWorkorder',
+            chapters,
+            ...(source === 'all' ? {} : { sources: [source] }),
+            focus: String(launcher.focus || '').trim() || undefined,
+          }
+          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
+          setWorkorder({ title: `${source === 'all' ? '四路' : ROUTE_LABEL[source] || ''}审阅工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
+          setLauncher(null)
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      const launchRecheck = async () => {
+        if (!projectId || busy || !launcher) return
+        const chapters = selectedChapterRows(launcher.chapters)
+        if (chapters.length === 0) {
+          setNotice({ tone: 'warn', text: '先勾选要复测的章节。' })
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        try {
+          const payload = { workorder: 'attentionRecheckWorkorder', chapters, focus: String(launcher.focus || '').trim() || undefined }
+          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
+          setWorkorder({ title: `冷读打分工作单（${chapters.length} 章）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
+          setLauncher(null)
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成复测工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      const sendWorkorder = async () => {
+        if (!projectId || busy || !workorder) return
+        setWorkorder((prev) => (prev ? { ...prev, sending: true } : prev))
+        try {
+          const value = await sendToChat(projectId, workorder.payload || {}, workorder.target)
+          setWorkorder(null)
+          setNotice({ tone: 'ok', text: `已发到宿主对话（会话 ${String(value.sessionId || '').slice(0, 8) || '当前'}）：去 DSH 侧栏最近的会话里能看到它，让它按工作单执行并把结果提交回来。` })
+        } catch (err) {
+          setWorkorder((prev) => (prev ? { ...prev, sending: false } : prev))
+          setNotice({ tone: 'error', text: `发不出去：${friendlyError(err)}。可以点「复制」自己粘到对话里。` })
+        }
+      }
+      const selectedGlobalCount = rows.filter((rv) => selected.includes(String(rv.id)) && chapterNo(rv) === 0).length
+      const allChecked = filtered.length > 0 && filtered.every((rv) => selected.includes(String(rv.id)))
+      const toggleAll = () => {
+        if (allChecked) setSelected([])
+        else setSelected(filtered.map((rv) => String(rv.id)))
+      }
+      const toggle = (id) => {
+        setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      }
+
+      const pickSelectedReviews = () => rows.filter((rv) => selected.includes(String(rv.id)))
+      const cleanReview = (rv) => ({
+        id: String(rv.id),
+        chapter: chapterNo(rv),
+        source: rv.route,
+        severity: rv.severity || '',
+        quote: String(rv.quote || ''),
+        issue: String(rv.issue || ''),
+        suggestion: String(rv.suggestion || ''),
+      })
+      const launchProposalWorkorder = async () => {
+        if (!projectId || busy) return
+        const picked = pickSelectedReviews()
+        const local = picked.filter((rv) => chapterNo(rv) > 0)
+        const global = picked.filter((rv) => chapterNo(rv) === 0)
+        if (picked.length === 0) {
+          setNotice({ tone: 'warn', text: '先勾选审阅条目（左侧方框）：章节条目生成逐段修改提案，全书级条目不挑章、会并进全局修改意见。' })
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        try {
+          const parts = []
+          const titles = []
+          // 章节级意见：一章一条 patch-paragraph 工作单
+          if (local.length > 0) {
+            const byChapter = new Map()
+            for (const rv of local) {
+              const n = chapterNo(rv)
+              if (!byChapter.has(n)) byChapter.set(n, [])
+              byChapter.get(n).push(cleanReview(rv))
+            }
+            const groups = [...byChapter.keys()].sort((a, b) => a - b).map((chapter) => {
+              const row = allChapters.find((item) => item.chapter === chapter) || { chapter, title: '', words: 0, path: '' }
+              return { chapter, title: row.title, words: row.words, path: row.path, reviews: byChapter.get(chapter) }
+            })
+            const localPayload = { workorder: 'proposalGroupsWorkorder', groups, chapters: selectedChapterRows([...byChapter.keys()]), focus: '' }
+            const value = await api('chat.send', { projectId, ...localPayload, dryRun: true })
+            parts.push(String(value.prompt || ''))
+            titles.push(`${groups.length} 章 / ${local.length} 条章节意见`)
+          }
+          // 全书级意见：不管有没有同时选章节，都并到同一份工作单里走 book-fix，不再提示「先去点另一个按钮」
+          if (global.length > 0) {
+            const globalPayload = { workorder: 'globalFixWorkorder', chapters: allChapters, reviews: global.map(cleanReview), focus: '' }
+            const value = await api('chat.send', { projectId, ...globalPayload, dryRun: true })
+            parts.push(String(value.prompt || ''))
+            titles.push(`${global.length} 条全书级意见`)
+          }
+          const text = parts.join('\n\n====================\n\n')
+          setWorkorder({ title: `生成提案工作单（${titles.join(' + ')}）`, text, sending: false, confirming: false, target: '', payload: { prompt: text } })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      const launchGlobalWorkorder = async () => {
+        if (!projectId || busy) return
+        const pickedGlobal = pickSelectedReviews().filter((rv) => chapterNo(rv) === 0)
+        const picks = pickedGlobal.length ? pickedGlobal : rows.filter((rv) => chapterNo(rv) === 0 && (!rv.status || rv.status === 'open' || rv.status === 'proposed'))
+        if (picks.length === 0) {
+          setNotice({ tone: 'warn', text: '没有全书级审阅条目：先让 AI 用 chapter=0 提交全局问题。' })
+          return
+        }
+        setBusy(true)
+        setNotice(null)
+        try {
+          const payload = { workorder: 'globalFixWorkorder', chapters: allChapters, reviews: picks.map(cleanReview), focus: '' }
+          const value = await api('chat.send', { projectId, ...payload, dryRun: true })
+          setWorkorder({ title: `全局修改意见工作单（${picks.length} 条全书级意见）`, text: String(value.prompt || ''), sending: false, confirming: false, target: '', payload })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy(false)
+        }
+      }
+      const patchReview = async (id, patch) => {
+        try {
+          await api('review.patch', scope(projectId, { ids: [String(id)], patch }))
+          reviews.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `更新审阅状态失败：${friendlyError(err)}` })
+        }
+      }
+
+      const chapterOptions = [{ value: '', label: '全部章节' }].concat(
+        sortChapters(toc).map((row) => ({ value: String(chapterNo(row)), label: `第 ${chapterNo(row)} 章 ${chapterTitle(row)}` })),
+      )
+
+      return h('div', { className: 'nd-page' },
+        h('div', { className: 'nd-pagehead' },
+          h('h2', null, '审阅收件箱'),
+          h('span', { className: 'nd-hint' }, '四路同权：逻辑 / 注意力 / AI 味 / 读者；chapter 0 为全书级条目。'),
+        ),
+        h('div', { className: 'nd-review-launchers' },
+          [
+            { source: 'ai-style', icon: '🤖', title: 'AI 味审阅', hint: '机器痕迹 / 套话 / 节奏单一 / 文笔' },
+            { source: 'logic', icon: '⚖️', title: '事实逻辑审阅', hint: '因果 / 动机 / 连续性 / 事实自洽' },
+            { source: 'attention', icon: '⚡', title: '注意力审阅', hint: '钩子 / 张力 / 回报 / 章末牵引 / 弃读点' },
+          ].map((item) =>
+            h('button', { key: item.source, type: 'button', className: 'nd-launch-card', onClick: () => openLauncher(item.source) },
+              h('span', { className: 'nd-launch-icon' }, item.icon),
+              h('span', { className: 'nd-launch-main' }, h('strong', null, item.title), h('span', { className: 'nd-hint' }, item.hint)),
+              h('span', { className: 'nd-launch-go' }, '开始 →'),
+            ),
+          ),
+          h('button', { type: 'button', className: 'nd-launch-card nd-launch-mini', onClick: () => openLauncher('all'), disabled: busy },
+            h('span', { className: 'nd-launch-icon' }, '🧪'),
+            h('span', { className: 'nd-launch-main' }, h('strong', null, '四路一起审'), h('span', { className: 'nd-hint' }, '一次把四路口径都交给 AI')),
+            h('span', { className: 'nd-launch-go' }, '工作单 →'),
+          ),
+        ),
+        launcher
+          ? h(Modal, {
+              title: launcher.mode === 'recheck' ? '冷读打分（注意力复测）' : `${launcher.source === 'all' ? '四路' : ROUTE_LABEL[launcher.source] || ''}审阅`,
+              onClose: () => setLauncher(null),
+              footer: h(Fragment, null,
+                h(Btn, { onClick: () => setLauncher(null) }, '取消'),
+                h(Btn, { kind: 'primary', onClick: launcher.mode === 'recheck' ? launchRecheck : launchWorkorder, disabled: busy }, busy ? '生成中…' : '生成工作单'),
+              ),
+            },
+              h('div', { className: 'nd-field' },
+                h('div', { className: 'nd-form-row', style: { flexWrap: 'wrap', gap: '6px' } },
+                  h('span', { className: 'nd-label' }, launcher.mode === 'recheck' ? '打分范围' : '审阅范围'),
+                  h('span', { className: 'nd-hint' }, `已选 ${launcher.chapters.length} / ${allChapters.length} 章`),
+                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.map((row) => row.chapter) } : prev)) }, '全书'),
+                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.filter((row) => !chapterStats.get(row.chapter)?.total).map((row) => row.chapter) } : prev)) }, '未审过的'),
+                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: allChapters.filter((row) => chapterStats.get(row.chapter)?.open).map((row) => row.chapter) } : prev)) }, '有意见的'),
+                  h(Btn, { small: true, onClick: () => setLauncher((prev) => (prev ? { ...prev, chapters: [] } : prev)) }, '清空'),
+                ),
+                h(ChapterPicker, { chapters: allChapters, stats: chapterStats, value: launcher.chapters, onChange: (next) => setLauncher((prev) => (prev ? { ...prev, chapters: next } : prev)) }),
+              ),
+              h('div', { className: 'nd-field' },
+                h('span', { className: 'nd-label' }, launcher.mode === 'recheck' ? '打分说明（可留空）' : '这次重点是什么？（可留空）'),
+                h('textarea', {
+                  className: 'nd-input nd-textarea',
+                  rows: 3,
+                  value: launcher.focus,
+                  placeholder: launcher.mode === 'recheck' ? '例：重点看第 12–20 章的章末牵引是否失效。留空则按四拍完整复测。' : '例：这一章读者容易弃读，重点看章末牵引；或：注意华羽生和小蝶的关系变化是否突兀。留空则按四路口径完整审。',
+                  onChange: (e) => setLauncher((prev) => (prev ? { ...prev, focus: e.target.value } : prev)),
+                }),
+              ),
+              h('p', { className: 'nd-hint' }, launcher.mode === 'recheck' ? 'AI 零上下文通读后打实测分（钩子 / 张力 / 回报 / 章末牵引），写回注意力曲线；不会改正文。勾了哪些章就打分哪些章。' : '不会替你截断章数：勾了哪些章就审哪些章。生成后可以复制，也可以直接投递到宿主对话。'),
+            )
+          : null,
+        h(Tabs, {
+          value: tab,
+          onChange: setTab,
+          items: [
+            { value: 'all', label: '全部', badge: counts.all },
+            { value: 'book', label: '全书', badge: counts.book },
+            ...ROUTES.map((route) => ({ value: route.id, label: route.label, badge: counts[route.id] || 0 })),
+          ],
+        }),
+        h('div', { className: 'nd-toolbar' },
+          h(Select, {
+            value: status,
+            onChange: setStatus,
+            options: [
+              { value: 'open', label: '待处理' },
+              { value: 'proposed', label: '已进提案' },
+              { value: 'fixed', label: '已修复' },
+              { value: 'wontfix', label: '不修' },
+              { value: 'archived', label: '已归档' },
+              { value: 'all', label: '全部状态' },
+            ],
+          }),
+          h(Select, { value: chapterFilter, onChange: setChapterFilter, options: chapterOptions }),
+          h(Btn, { small: true, onClick: toggleAll }, allChecked ? '取消全选' : '全选当前'),
+          h('span', { className: 'nd-hint' }, `已选 ${selected.length} 条${selectedGlobalCount ? `（全书级 ${selectedGlobalCount} 条）` : ''}`),
+          h(Btn, { small: true, kind: 'primary', onClick: launchProposalWorkorder, disabled: busy }, busy ? '生成中…' : '生成修改提案'),
+          h(Btn, { small: true, onClick: launchGlobalWorkorder, disabled: busy }, '全局修改意见'),
+          h(Btn, { small: true, onClick: () => openLauncher('all'), disabled: busy }, 'AI 审阅工作单'),
+          h(Btn, { small: true, onClick: () => openLauncher('all', 'recheck'), disabled: busy }, '冷读打分 / 复测'),
+          h(Btn, { small: true, onClick: () => go('proposals') }, '去提案页'),
+        ),
+        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        workorder
+          ? h(Modal, {
+              title: workorder.title,
+              wide: true,
+              onClose: () => setWorkorder(null),
+              footer: h(Fragment, null,
+                h(Btn, {
+                  onClick: async () => {
+                    const ok = await copyText(workorder.text)
+                    setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '工作单已复制，可粘到对话里' : '复制失败：请手动全选复制' })
+                  },
+                }, '复制'),
+                workorder.confirming
+                  ? h(Btn, { onClick: () => setWorkorder((prev) => (prev ? { ...prev, confirming: false } : prev)) }, '返回改内容')
+                  : null,
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: workorder.sending,
+                  onClick: () => (workorder.confirming ? sendWorkorder() : setWorkorder((prev) => (prev ? { ...prev, confirming: true } : prev))),
+                }, workorder.sending ? '发送中…' : workorder.confirming ? '确定发送' : '下一步：确认发送'),
+              ),
+            },
+              h('p', { className: 'nd-hint' }, '这是给 AI 的完整工作单：审阅范围、隔离边界、提交格式都已写明。发出去后 AI 会按工作单执行（审阅用 novel_desk_review、改写提案用 novel_desk_propose），不会直接改你的正文文件。'),
+              h('div', { className: workorder.confirming ? 'nd-send-confirm' : '' },
+                workorder.confirming ? h('p', { className: 'nd-hint' }, '最后一步：确认发给谁。点「确定发送」才会真的发出去。') : null,
+                h(TargetPicker, { projectId, value: workorder.target, onChange: (next) => setWorkorder((prev) => (prev ? { ...prev, target: next } : prev)) }),
+              ),
+              h('pre', { className: 'nd-pre nd-pre-tall' }, workorder.text),
+            )
+          : null,
+        reviews.loading && !reviews.data
+          ? h(Loading, null, '正在读取审阅条目…')
+          : reviews.error
+            ? h(ErrorBox, { error: reviews.error, onRetry: reviews.reload })
+            : filtered.length === 0
+              ? h(Empty, null, '这个筛选下没有审阅条目。')
+              : h('div', { className: 'nd-review-list' },
+                  filtered.map((rv) =>
+                    h('div', { key: rv.id, className: 'nd-review-row' },
+                      h(Check, { checked: selected.includes(String(rv.id)), onChange: () => toggle(String(rv.id)) }),
+                      h('div', { className: 'nd-review-main' },
+                        h('div', { className: 'nd-review-meta' },
+                          h(Tag, { tone: 'brand' }, chapterNo(rv) === 0 ? '全书' : `第 ${chapterNo(rv)} 章`),
+                          h(Tag, { tone: rv.route === 'reader' ? 'ok' : rv.route === 'ai-style' ? 'warn' : 'muted' }, ROUTE_LABEL[rv.route] || rv.route),
+                          h(Tag, { tone: SEV_TONE[rv.severity] || 'muted' }, SEV_LABEL[rv.severity] || rv.severity || '—'),
+                          h(Tag, null, REVIEW_STATUS[rv.status || 'open'] || rv.status),
+                          h('span', { className: 'nd-hint' }, fmtAgo(rv.createdAt)),
+                        ),
+                        rv.quote ? h('blockquote', { className: 'nd-quote' }, String(rv.quote)) : h('div', { className: 'nd-hint' }, '（旧条目：无逐字引文）'),
+                        h('p', { className: 'nd-review-issue' }, String(rv.issue || '')),
+                        rv.suggestion ? h('p', { className: 'nd-review-advice' }, `改法：${String(rv.suggestion)}`) : null,
+                        chapterNo(rv) > 0 && rv.quote
+                          ? h('p', { className: 'nd-hint' }, '普通章节问题：勾选后点「生成修改提案」，AI 会按这条意见改写这一段，产出「原文 / 改为」提案；「改为」可在提案页直接改再批准。')
+                          : chapterNo(rv) === 0
+                            ? h('p', { className: 'nd-hint' }, '全书级问题：勾选后点「生成修改提案」会自动并进全局修改意见（也可以单独点「全局修改意见」），AI 会给出跨章修改提案。')
+                          : null,
+                      ),
+                      h('div', { className: 'nd-review-actions' },
+                        chapterNo(rv) > 0 ? h('button', { type: 'button', className: 'nd-linkbtn', onClick: () => go('read', { chapter: chapterNo(rv) }) }, '看正文') : null,
+                        h(Btn, { small: true, onClick: () => patchReview(rv.id, { status: 'fixed' }) }, '已处理'),
+                        h(Btn, { small: true, onClick: () => patchReview(rv.id, { status: 'wontfix' }) }, '忽略'),
+                      ),
+                    ),
+                  ),
+                ),
+      )
+    }
+
+    // ── 提案页 ────────────────────────────────────────────────
+    function proposalReasons(proposal) {
+      const out = []
+      if (!proposal || typeof proposal !== 'object') return '需要修改后重新生成'
+      if (Array.isArray(proposal.failures)) out.push(...proposal.failures.map(String))
+      const gates = proposal.gates || {}
+      if (gates.fidelity === 'fail') out.push('保真校验未通过（替换文本与当前正文不一致）')
+      if (gates.residue === 'fail') out.push('残留检查未通过')
+      if (gates.prose && gates.prose.normalized === false) out.push('正文规范化未通过')
+      if (gates.aistyle && gates.aistyle.pass === false) out.push(`AI 味分数 ${gates.aistyle.score}，未通过`)
+      if (Array.isArray(gates.failures)) out.push(...gates.failures.map(String))
+      return out.length ? out.join('；') : '需要修改后重新生成'
+    }
+
+    function GatesView({ gates }) {
+      if (!gates || typeof gates !== 'object') return null
+      const aistyle = gates.aistyle && typeof gates.aistyle === 'object' ? gates.aistyle : null
+      const prose = gates.prose && typeof gates.prose === 'object' ? gates.prose : null
+      const rows = [
+        ['正文规范化', prose ? (prose.normalized === false ? '未通过' : '通过') : '—', prose && prose.normalized !== false ? 'ok' : prose ? 'warn' : 'muted'],
+        ['保真校验', gates.fidelity === 'fail' ? '未通过' : gates.fidelity ? '通过' : '—', gates.fidelity === 'fail' ? 'warn' : gates.fidelity ? 'ok' : 'muted'],
+        ['残留检查', gates.residue === 'fail' ? '未通过' : gates.residue ? '通过' : '—', gates.residue === 'fail' ? 'warn' : gates.residue ? 'ok' : 'muted'],
+        ['AI 味', aistyle ? `${aistyle.score == null ? '—' : aistyle.score} 分${aistyle.pass === false ? '（未通过）' : aistyle.pass ? '（通过）' : ''}` : '—', aistyle && aistyle.pass === false ? 'warn' : aistyle ? 'ok' : 'muted'],
+      ]
+      return h('div', { className: 'nd-gates' },
+        h('div', { className: 'nd-side-sub' }, '闸门结果'),
+        rows.map((row) => h('div', { className: 'nd-gate-row', key: row[0] }, h('span', null, row[0]), h(Tag, { tone: row[2] }, row[1]))),
+      )
+    }
+
+    function ProposalsTab({ projectId, openChapter, go, onChanged }) {
+      const [status, setStatus] = useState('pending')
+      const [openId, setOpenId] = useState('')
+      const [notice, setNotice] = useState(null)
+      const [busyId, setBusyId] = useState('')
+      const [rejectId, setRejectId] = useState('')
+      const [reason, setReason] = useState('')
+      const [selected, setSelected] = useState([])
+      const [batchBusy, setBatchBusy] = useState(false)
+      const [batchReject, setBatchReject] = useState(false)
+      const [batchReason, setBatchReason] = useState('')
+      const [edit, setEdit] = useState(null) // 编辑改法：{ id, data, busy }
+
+      useEffect(() => { setSelected([]); setBatchReject(false); setBatchReason('') }, [projectId, status])
+
+      const proposals = useAsync(
+        () => (projectId ? api('proposal.list', scope(projectId, { status, filter: { status } })) : Promise.resolve([])),
+        [projectId, status],
+      )
+      const list = useMemo(
+        () => toList(proposals.data, 'proposals').filter((p) => PROPOSAL_KINDS.includes(p.kind)),
+        [proposals.data],
+      )
+
+      const startEdit = (proposal) => {
+        const data = JSON.parse(JSON.stringify(proposal.data || {}))
+        setEdit({ id: proposal.id, data, busy: false })
+        setOpenId(proposal.id)
+        setNotice(null)
+      }
+      const updateEditPatch = (index, after) => setEdit((prev) => {
+        if (!prev) return prev
+        const patches = Array.isArray(prev.data.patches) ? prev.data.patches.slice() : []
+        patches[index] = { ...patches[index], after }
+        return { ...prev, data: { ...prev.data, patches } }
+      })
+      const updateEditContent = (content) => setEdit((prev) => (prev ? { ...prev, data: { ...prev.data, content } } : prev))
+      const saveEdit = async (proposal) => {
+        if (!projectId || !edit || edit.busy) return
+        setEdit((prev) => (prev ? { ...prev, busy: true } : prev))
+        try {
+          await api('proposal.update', scope(projectId, { proposalId: proposal.id, patch: { data: edit.data } }))
+          setNotice({ tone: 'ok', text: `改法已保存：${proposal.title || proposal.id}（状态回到待批准）` })
+          setEdit(null)
+          setOpenId('')
+          proposals.reload()
+          if (onChanged) onChanged()
+        } catch (err) {
+          setEdit((prev) => (prev ? { ...prev, busy: false } : prev))
+          setNotice({ tone: 'error', text: `保存改法失败：${friendlyError(err)}` })
+        }
+      }
+
+      const accept = async (proposal) => {
+        setBusyId(proposal.id)
+        setNotice(null)
+        try {
+          const value = await api('proposal.accept', scope(projectId, { proposalId: proposal.id }))
+          const updated = (value && value.proposal) || null
+          const ok = !value || value.ok !== false
+          if (ok) {
+            setNotice({ tone: 'ok', text: `已采纳：${proposal.title || proposal.id}（正文已按补丁更新）` })
+            setOpenId('')
+          } else if (value && value.code === 'stale') {
+            setNotice({ tone: 'warn', text: '正文已变化，提案过期（stale）：请刷新后在审阅页重新生成提案。' })
+          } else {
+            setNotice({ tone: 'warn', text: `未通过闸门（needs-fix）：${proposalReasons(updated || proposal)}` })
+          }
+          proposals.reload()
+          if (onChanged) onChanged()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `采纳失败：${friendlyError(err)}` })
+        } finally {
+          setBusyId('')
+        }
+      }
+
+      const reject = async (proposal) => {
+        if (!reason.trim()) {
+          setNotice({ tone: 'warn', text: '请填写驳回原因。' })
+          return
+        }
+        setBusyId(proposal.id)
+        try {
+          await api('proposal.reject', scope(projectId, { proposalId: proposal.id, reason: reason.trim() }))
+          setNotice({ tone: 'ok', text: `已驳回：${proposal.title || proposal.id}` })
+          setOpenId('')
+          setRejectId('')
+          setReason('')
+          proposals.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `驳回失败：${friendlyError(err)}` })
+        } finally {
+          setBusyId('')
+        }
+      }
+
+      const openProposal = (proposal) => {
+        setOpenId((prev) => (prev === proposal.id ? '' : proposal.id))
+        setRejectId('')
+        setReason('')
+      }
+
+      const pendingIds = list.filter((p) => (p.status || 'pending') === 'pending').map((p) => p.id)
+      const selectedPending = selected.filter((id) => pendingIds.includes(id))
+      const allSelected = pendingIds.length > 0 && selectedPending.length === pendingIds.length
+      const toggleSelect = (id) => setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+      const toggleSelectAll = () => setSelected(allSelected ? [] : pendingIds)
+
+      const runBatch = async (action) => {
+        const ids = selectedPending
+        if (ids.length === 0) {
+          setNotice({ tone: 'warn', text: '先勾选要处理的提案。' })
+          return
+        }
+        if (action === 'reject' && !batchReason.trim()) {
+          setBatchReject(true)
+          setNotice({ tone: 'warn', text: '批量驳回需要填写原因。' })
+          return
+        }
+        setBatchBusy(true)
+        setNotice(null)
+        try {
+          const value = await api('proposal.batch', scope(projectId, { ids, action, reason: batchReason.trim() }))
+          const accepted = Array.isArray(value?.accepted) ? value.accepted.length : 0
+          const rejected = Array.isArray(value?.rejected) ? value.rejected.length : 0
+          const failed = Array.isArray(value?.failed) ? value.failed : []
+          const doneText = action === 'reject' ? `已驳回 ${rejected} 条` : `已批准 ${accepted} 条`
+          const failText = failed.length ? `；${failed.length} 条未处理（${failed.map((row) => row.message || row.id).slice(0, 3).join('；')}）` : ''
+          setNotice({ tone: failed.length ? 'warn' : 'ok', text: `${doneText}${failText}` })
+          setSelected([])
+          setBatchReject(false)
+          setBatchReason('')
+          proposals.reload()
+          if (onChanged) onChanged()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `批量处理失败：${friendlyError(err)}` })
+        } finally {
+          setBatchBusy(false)
+        }
+      }
+
+      return h('div', { className: 'nd-page' },
+        h('div', { className: 'nd-pagehead' },
+          h('h2', null, '提案'),
+          h('span', { className: 'nd-hint' }, '支持 patch-paragraph / rewrite-chapter / ledger-fix / book-fix 四种提案；「改为」可以直接编辑，再批准落盘。旧格式提案原样保留、不在此处理。'),
+        ),
+        h(Tabs, {
+          value: status,
+          onChange: setStatus,
+          items: [
+            { value: 'pending', label: '待批准' },
+            { value: 'needs-fix', label: '未过闸门' },
+            { value: 'accepted', label: '已采纳' },
+            { value: 'rejected', label: '已驳回' },
+            { value: 'revised', label: '已修订' },
+          ],
+        }),
+        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        status === 'pending' && list.length > 0
+          ? h('div', { className: 'nd-toolbar nd-proposal-batch' },
+              h('label', { className: 'nd-form-row', title: '全选本页待批准提案' },
+                h(Check, { checked: allSelected, onChange: toggleSelectAll, title: '全选' }),
+                h('span', { className: 'nd-hint' }, allSelected ? '取消全选' : '全选'),
+              ),
+              h('span', { className: 'nd-hint' }, `已选 ${selectedPending.length} / ${pendingIds.length} 条`),
+              h(Btn, { small: true, kind: 'primary', disabled: batchBusy || selectedPending.length === 0, onClick: () => runBatch('accept') }, batchBusy ? '处理中…' : '批量批准'),
+              h(Btn, { small: true, disabled: batchBusy || selectedPending.length === 0, onClick: () => setBatchReject((prev) => !prev) }, '批量驳回'),
+            )
+          : null,
+        batchReject && status === 'pending' && list.length > 0
+          ? h('div', { className: 'nd-reject' },
+              h(TextArea, { value: batchReason, rows: 2, placeholder: '批量驳回原因（必填，会写到每一条提案）', onChange: setBatchReason }),
+              h(Btn, { small: true, kind: 'danger', disabled: batchBusy || selectedPending.length === 0, onClick: () => runBatch('reject') }, batchBusy ? '处理中…' : '确认批量驳回'),
+              h(Btn, { small: true, disabled: batchBusy, onClick: () => { setBatchReject(false); setBatchReason('') } }, '取消'),
+            )
+          : null,
+        proposals.loading && !proposals.data
+          ? h(Loading, null, '正在读取提案…')
+          : proposals.error
+            ? h(ErrorBox, { error: proposals.error, onRetry: proposals.reload })
+            : list.length === 0
+              ? h(Empty, null, status === 'pending' ? '没有待批准提案。在审阅页勾选条目 → 生成修改提案 / 全局修改意见，AI 提交后出现在这里。' : '这个状态下没有提案。')
+              : h('div', { className: 'nd-proposals' },
+                  list.map((proposal) => {
+                    const data = proposal.data || {}
+                    const patches = Array.isArray(data.patches) ? data.patches : []
+                    const patchChapters = new Set(patches.map((patch) => Number(patch?.chapter) || 0).filter((n) => n > 0)).size
+                    const fixes = proposal.kind === 'ledger-fix' ? proposalLedgerFixes(data) : []
+                    const expanded = openId === proposal.id
+                    const pending = (proposal.status || 'pending') === 'pending'
+                    const editable = pending || proposal.status === 'needs-fix'
+                    const editing = Boolean(edit && edit.id === proposal.id)
+                    return h('article', { key: proposal.id, className: `nd-proposal${expanded ? ' nd-proposal-open' : ''}` },
+                      h('div', { className: 'nd-proposal-head', role: 'button', tabIndex: 0, onClick: () => openProposal(proposal), onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openProposal(proposal) } } },
+                        pending ? h('span', { className: 'nd-form-row', onClick: (e) => e.stopPropagation() },
+                          h(Check, { checked: selected.includes(proposal.id), title: '选择这条提案', onChange: () => toggleSelect(proposal.id) })) : null,
+                        h('span', { className: 'nd-proposal-arrow' }, expanded ? '▾' : '▸'),
+                        h('span', { className: 'nd-proposal-title' }, String(proposal.title || proposal.id)),
+                        h(Tag, { tone: 'brand' }, PROPOSAL_KIND[proposal.kind] || proposal.kind),
+                        patches.length ? h(Tag, { tone: 'muted' }, `${patches.length} 条补丁${patchChapters > 1 ? ` / ${patchChapters} 章` : ''}`) : null,
+                        chapterNo(proposal) ? h(Tag, null, `第 ${chapterNo(proposal)} 章`) : proposal.kind === 'book-fix' ? h(Tag, { tone: 'brand' }, '全书') : null,
+                        h(Tag, { tone: proposal.status === 'needs-fix' ? 'warn' : proposal.status === 'accepted' ? 'ok' : proposal.status === 'rejected' ? 'error' : 'muted' }, PROPOSAL_STATUS[proposal.status || 'pending'] || proposal.status),
+                        h('span', { className: 'nd-hint nd-proposal-when' }, fmtAgo(proposal.createdAt)),
+                        pending
+                          ? h('span', { className: 'nd-proposal-actions', style: { marginLeft: 'auto' }, onClick: (e) => e.stopPropagation() },
+                              h(Btn, { small: true, kind: 'primary', disabled: busyId === proposal.id, onClick: () => accept(proposal) }, busyId === proposal.id ? '批准中…' : '批准'),
+                              h(Btn, { small: true, disabled: busyId === proposal.id, onClick: () => { setRejectId(proposal.id); setReason('') } }, '驳回'),
+                            )
+                          : null,
+                      ),
+                      expanded
+                        ? h('div', { className: 'nd-proposal-body' },
+                            proposal.summary ? h('p', { className: 'nd-proposal-summary' }, String(proposal.summary)) : null,
+                            proposal.status === 'needs-fix' ? h(Msg, { tone: 'warn' }, `未通过闸门：${proposalReasons(proposal)}`) : null,
+                            proposal.kind === 'book-fix' && data.opinion
+                              ? h('div', { className: 'nd-field' },
+                                  h('div', { className: 'nd-side-sub' }, '全局修改意见'),
+                                  editing
+                                    ? h(TextArea, { value: String(data.opinion), rows: 6, onChange: (next) => setEdit((prev) => (prev ? { ...prev, data: { ...prev.data, opinion: next } } : prev)) })
+                                    : h('p', { className: 'nd-proposal-summary' }, String(data.opinion)),
+                                )
+                              : null,
+                            patches.length
+                              ? h('div', { className: 'nd-side-sub' }, `补丁（${patches.length} 条${patchChapters > 1 ? `，跨 ${patchChapters} 章` : ''}）${pending || proposal.status === 'needs-fix' ? ' · 可在下方直接编辑「改为」' : ''}`)
+                              : null,
+                            patches.length
+                              ? h('div', { className: 'nd-diffs' }, patches.map((patch, index) =>
+                                  h('div', { className: 'nd-diff', key: index },
+                                    h('div', { className: 'nd-diff-col' },
+                                      h('div', { className: 'nd-diff-head' }, `${proposal.kind === 'book-fix' && patch.chapter ? `第 ${patch.chapter} 章 · ` : ''}原文 ${index + 1}`),
+                                      h('pre', { className: 'nd-pre' }, String(patch.before || '—')),
+                                    ),
+                                    h('div', { className: 'nd-diff-col' },
+                                      h('div', { className: 'nd-diff-head' }, '改为'),
+                                      editing
+                                        ? h(TextArea, { value: String(patch.after || ''), rows: 4, onChange: (next) => updateEditPatch(index, next) })
+                                        : h('pre', { className: 'nd-pre' }, String(patch.after || '（留空 = 删除该段）')),
+                                    ),
+                                    patch.why ? h('div', { className: 'nd-diff-why' }, `理由：${patch.why}`) : null,
+                                    Array.isArray(patch.reviewIds) && patch.reviewIds.length ? h('div', { className: 'nd-hint' }, `来源审阅：${patch.reviewIds.join('、')}`) : null,
+                                  ),
+                                ))
+                              : null,
+                            data.content ? h('div', { className: 'nd-diff-col' },
+                              h('div', { className: 'nd-diff-head' }, '整章新正文（纯文本）'),
+                              editing ? h(TextArea, { value: String(data.content), rows: 12, onChange: updateEditContent }) : h('pre', { className: 'nd-pre nd-pre-tall' }, String(data.content)),
+                            ) : null,
+                            fixes.length
+                              ? h('div', { className: 'nd-fixes' },
+                                  h('div', { className: 'nd-side-sub' }, `账本修订（${fixes.length} 条）`),
+                                  fixes.map((fix, index) => h('div', { className: 'nd-fix', key: index }, ledgerFixSummary(fix))),
+                                )
+                              : null,
+                            h(GatesView, { gates: proposal.gates }),
+                            editing
+                              ? h('div', { className: 'nd-proposal-actions' },
+                                  h(Btn, { small: true, kind: 'primary', onClick: () => saveEdit(proposal), disabled: Boolean(edit && edit.busy) }, edit && edit.busy ? '保存中…' : '保存改法'),
+                                  h(Btn, { small: true, onClick: () => setEdit(null), disabled: Boolean(edit && edit.busy) }, '取消编辑'),
+                                )
+                              : editable
+                                ? h('div', { className: 'nd-proposal-actions' },
+                                    h(Btn, { small: true, onClick: () => startEdit(proposal) }, '编辑「改为」'),
+                                    pending ? h(Btn, { small: true, kind: 'primary', onClick: () => accept(proposal), disabled: busyId === proposal.id }, busyId === proposal.id ? '批准中…' : '批准') : null,
+                                    pending ? h(Btn, { small: true, onClick: () => { setRejectId(proposal.id); setReason('') } }, '驳回') : null,
+                                    chapterNo(proposal) ? h(Btn, { small: true, onClick: () => openChapter(chapterNo(proposal)) }, '看该章') : null,
+                                  )
+                                : null,
+                            rejectId === proposal.id
+                              ? h('div', { className: 'nd-reject' },
+                                  h(TextArea, { value: reason, rows: 2, placeholder: '驳回原因（必填）', onChange: setReason }),
+                                  h(Btn, { small: true, onClick: () => reject(proposal), disabled: busyId === proposal.id }, '确认驳回'),
+                                  h(Btn, { small: true, onClick: () => setRejectId('') }, '取消'),
+                                )
+                              : null,
+                          )
+                        : null,
+                    )
+                  }),
+                ),
+      )
+    }
+
+    // ── 全文动作：新建对话框 + 页面 ────────────────────────────
+    function RunDialog({ projectId, toc, defaults, onClose, onCreated }) {
+      const first = chapterNo(toc[0] || {}) || 1
+      const lastWritten = sortChapters(toc).reduce((max, row) => Math.max(max, chapterNo(row) || 0), 0)
+      const initialKind = (defaults && defaults.kind === 'rephrase') ? 'rewrite' : ((defaults && defaults.kind) || 'rewrite')
+      const [kind, setKind] = useState(initialKind)
+      const [variant, setVariant] = useState((defaults && defaults.kind === 'rephrase') ? 'style' : ((defaults && defaults.variant) || 'logic'))
+      const [scopeMode, setScopeMode] = useState((defaults && defaults.scope) || 'book')
+      const [chapter, setChapter] = useState(String((defaults && defaults.chapter) || (initialKind === 'continue' ? lastWritten + 1 : first)))
+      const [endChapter, setEndChapter] = useState(String((defaults && defaults.endChapter) || (initialKind === 'continue' ? Math.max(lastWritten + 1, Number(defaults && defaults.chapter) || lastWritten + 1) : first)))
+      const [maxTokens, setMaxTokens] = useState('200000')
+      const [maxCost, setMaxCost] = useState('20')
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+
+      const submit = async () => {
+        setBusy(true)
+        setError('')
+        try {
+          const budget = {
+            maxTokens: Math.max(0, toNumber(maxTokens, 200000)),
+            maxCostCNY: Math.max(0, toNumber(maxCost, 20)),
+            usedTokens: 0,
+            usedCostCNY: 0,
+          }
+          const start = Math.max(1, toNumber(chapter, first))
+          const patch = {
+            kind,
+            variant: kind === 'rewrite' ? variant : '',
+            scope: scopeMode,
+            chapter: scopeMode === 'book' ? null : start,
+            endChapter: scopeMode === 'range' ? Math.max(start, toNumber(endChapter, start)) : null,
+            budget,
+            status: 'ready',
+          }
+          await api('run.save', scope(projectId, { patch, run: patch, ...patch }))
+          onCreated()
+        } catch (err) {
+          setError(friendlyError(err))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const hint = kind === 'continue'
+        ? '从头写会把新章直接写进正文（过闸门后落盘）；其余动作的产物只进提案，不会直接改正文。已有动作会被新动作替换。'
+        : '产物只进提案，不会直接改正文。已有动作会被新动作替换。'
+
+      return h(
+        Modal,
+        {
+          title: (defaults && defaults.title) || '新建全文动作',
+          onClose,
+          footer: h(Fragment, null,
+            h(Btn, { onClick: onClose }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submit, disabled: busy }, busy ? '创建中…' : '创建动作'),
+          ),
+        },
+        h('p', { className: 'nd-hint' }, hint),
+        h(Field, { label: '动作类型' },
+          h(Select, {
+            value: kind,
+            onChange: (value) => { setKind(value); if (value === 'continue') { setScopeMode('book') } },
+            options: [
+              { value: 'continue', label: '从头写（从下一章开始写新章）' },
+              { value: 'expand', label: '扩写（把已有章节写足）' },
+              { value: 'rewrite', label: '改写（重写已有章节）' },
+            ],
+          }),
+        ),
+        kind === 'rewrite'
+          ? h(Field, { label: '改写侧重' },
+              h(Select, {
+                value: variant,
+                onChange: setVariant,
+                options: [
+                  { value: 'style', label: '文风：只动语言层，事实/专名/数字/对白条数冻结' },
+                  { value: 'logic', label: '逻辑与事实：可调因果与顺序，修漏洞与矛盾' },
+                  { value: 'structure', label: '结构与节奏：重排场景、详略与钩子' },
+                ],
+              }),
+            )
+          : null,
+        h(Field, { label: '范围' },
+          h(Select, {
+            value: scopeMode,
+            onChange: setScopeMode,
+            options: [
+              { value: 'book', label: '全书' },
+              { value: 'chapter', label: '单章' },
+              { value: 'range', label: '章节区间' },
+            ],
+          }),
+        ),
+        scopeMode !== 'book'
+          ? h('div', { className: 'nd-form-row' },
+              h(Field, { label: kind === 'continue' ? '起始章（可手填）' : '目标章' },
+                h(TextInput, { value: chapter, onChange: setChapter, type: 'number', min: 1, placeholder: `例如 ${lastWritten + 1}` }),
+              ),
+              scopeMode === 'range'
+                ? h(Field, { label: '结束章' }, h(TextInput, { value: endChapter, onChange: setEndChapter, type: 'number', min: 1 }))
+                : null,
+            )
+          : null,
+        scopeMode !== 'book' && toc.length === 0
+          ? h('p', { className: 'nd-hint' }, '这本书还没有章节：直接填章号（从头写默认从第 1 章开始）。')
+          : null,
+        h('div', { className: 'nd-form-row' },
+          h(Field, { label: '预算 tokens' }, h(TextInput, { value: maxTokens, onChange: setMaxTokens, type: 'number', min: 0 })),
+          h(Field, { label: '预算（元）' }, h(TextInput, { value: maxCost, onChange: setMaxCost, type: 'number', min: 0 })),
+        ),
+        error ? h(Msg, { tone: 'error' }, error) : null,
+      )
+    }
+
+    function RunTab({ projectId, toc, onChanged }) {
+      const [dialog, setDialog] = useState(false)
+      const [notice, setNotice] = useState(null)
+      const [busy, setBusy] = useState('')
+      const runRes = useAsync(() => (projectId ? api('run.get', scope(projectId)) : Promise.resolve(null)), [projectId])
+      const run = useMemo(() => {
+        const value = runRes.data
+        if (!value || typeof value !== 'object') return null
+        if (value.run && typeof value.run === 'object') return value.run
+        return value.id ? value : null
+      }, [runRes.data])
+      const runStatus = run && run.status ? run.status : ''
+
+      useEffect(() => {
+        if (runStatus !== 'running') return undefined
+        const timer = window.setInterval(() => runRes.reload(), 4000)
+        return () => window.clearInterval(timer)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [runStatus])
+
+      const saveRun = async (patch, label) => {
+        setBusy(label)
+        setNotice(null)
+        try {
+          await api('run.save', scope(projectId, { patch, run: patch, ...patch }))
+          setNotice({ tone: 'ok', text: `已${label}` })
+          runRes.reload()
+          if (onChanged) onChanged()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `${label}失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const resetRun = async () => {
+        if (!window.confirm('重置全文动作会清空当前进度，确定？')) return
+        setBusy('重置')
+        try {
+          await api('run.reset', scope(projectId))
+          setNotice({ tone: 'ok', text: '已重置全文动作' })
+          runRes.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `重置失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      // 开工：把当前 run 的 goal 工作单发进本书对话（0.6 之前只有状态，没有真正派活入口）。
+      const sendWorkorder = async () => {
+        if (!run) return
+        setBusy('开工')
+        setNotice(null)
+        try {
+          const res = await api('chat.send', scope(projectId, { workorder: 'runGoalPrompt', run, newSession: false }))
+          const patch = { status: 'running', startedAt: run.startedAt || new Date().toISOString(), updatedAt: new Date().toISOString() }
+          await api('run.save', scope(projectId, { patch, run: { ...run, ...patch }, ...patch }))
+          const session = res && res.sessionId ? String(res.sessionId).slice(0, 8) : '当前会话'
+          setNotice({ tone: 'ok', text: `工作单已发进对话（${session}），AI 会按阶段推进；进度用「刷新」看。` })
+          runRes.reload()
+          if (onChanged) onChanged()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `开工失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const stages = useMemo(() => {
+        if (run && Array.isArray(run.stages) && run.stages.length) return run.stages
+        return runStageTitles(run).map((title, index) => ({ id: `s${index}`, title, status: 'pending' }))
+      }, [run])
+      const doneStages = stages.filter((stage) => stage.status === 'done').length
+      const budget = (run && run.budget) || {}
+      const notes = run && Array.isArray(run.notes) ? run.notes : []
+
+      let content
+      if (!run) {
+        content = h(Empty, { action: h(Btn, { kind: 'primary', onClick: () => setDialog(true) }, '新建全文动作') },
+          '还没有全文动作。从头写新章 / 扩写 / 改写整本书；只有「从头写」会把新章直接写进正文，其余产物只进提案。',
+        )
+      } else {
+        content = h(
+          Fragment,
+          null,
+          h('div', { className: 'nd-run-head' },
+            h('div', { className: 'nd-run-title' },
+              h('strong', null, runKindLabel(run)),
+              h(Tag, { tone: RUN_STATUS_TONE[run.status] || 'muted' }, RUN_STATUS[run.status] || run.status || '—'),
+              h('span', { className: 'nd-hint' }, runScopeLabel(run)),
+            ),
+            h('div', { className: 'nd-run-meta' },
+              h('span', null, `开始 ${run.startedAt ? new Date(run.startedAt).toLocaleString('zh-CN') : '—'}`),
+              h('span', null, `结束 ${run.finishedAt ? new Date(run.finishedAt).toLocaleString('zh-CN') : '—'}`),
+              h('span', null, `更新 ${fmtAgo(run.updatedAt)}`),
+            ),
+          ),
+          h('div', { className: 'nd-run-actions' },
+            h(Btn, { small: true, kind: 'primary', onClick: sendWorkorder, disabled: !!busy }, busy === '开工' ? '发送中…' : '开工（发工作单）'),
+            (run.status === 'idle' || run.status === 'ready' || !run.status)
+              ? h(Btn, { small: true, onClick: () => saveRun({ status: 'running', startedAt: new Date().toISOString() }, '开始'), disabled: !!busy }, '开始')
+              : null,
+            run.status === 'running' ? h(Btn, { small: true, onClick: () => saveRun({ status: 'paused' }, '暂停'), disabled: !!busy }, '暂停') : null,
+            run.status === 'paused' ? h(Btn, { small: true, kind: 'primary', onClick: () => saveRun({ status: 'running' }, '继续'), disabled: !!busy }, '继续') : null,
+            (run.status === 'running' || run.status === 'paused')
+              ? h(Btn, { small: true, onClick: () => saveRun({ status: 'done', finishedAt: new Date().toISOString() }, '完成'), disabled: !!busy }, '完成')
+              : null,
+            (run.status === 'running' || run.status === 'paused' || run.status === 'ready')
+              ? h(Btn, { small: true, onClick: () => { if (window.confirm('确定中止这个全文动作？')) saveRun({ status: 'failed', finishedAt: new Date().toISOString() }, '中止') }, disabled: !!busy }, '中止')
+              : null,
+            h(Btn, { small: true, onClick: () => setDialog(true), disabled: !!busy }, '新建/替换'),
+            h(Btn, { small: true, onClick: resetRun, disabled: !!busy }, '重置'),
+            h(Btn, { small: true, onClick: runRes.reload }, '刷新'),
+          ),
+          notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+          h('div', { className: 'nd-run-grid' },
+            h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' }, h('strong', null, '阶段进度'), h('span', { className: 'nd-hint' }, `${doneStages}/${stages.length}`)),
+              h(Bar, { value: doneStages, max: stages.length || 1, tone: 'ok' }),
+              stages.length === 0
+                ? h('p', { className: 'nd-muted' }, '还没有阶段。')
+                : h('ol', { className: 'nd-stages' }, stages.map((stage) => h('li', { key: stage.id, className: `nd-stage nd-stage-${stage.status || 'pending'}` },
+                    h('span', { className: 'nd-stage-dot' }, stage.status === 'done' ? '✓' : stage.status === 'running' ? '●' : stage.status === 'skipped' ? '–' : '○'),
+                    h('span', { className: 'nd-stage-title' }, String(stage.title || stage.id || '')),
+                    stage.note ? h('span', { className: 'nd-hint' }, String(stage.note)) : null,
+                  ))),
+              h('p', { className: 'nd-hint' }, '阶段由宿主推进；这里只用 run.save 改状态。'),
+            ),
+            h('section', { className: 'nd-card' },
+              h('div', { className: 'nd-card-head' }, h('strong', null, '预算')),
+              h('div', { className: 'nd-budget' },
+                h('div', { className: 'nd-budget-row' }, h('span', null, 'tokens'), h('span', null, `${fmtInt(budget.usedTokens)} / ${fmtInt(budget.maxTokens)}`), h(Bar, { value: budget.usedTokens, max: budget.maxTokens, tone: 'brand' })),
+                h('div', { className: 'nd-budget-row' }, h('span', null, '费用（元）'), h('span', null, `${toNumber(budget.usedCostCNY, 0).toFixed(2)} / ${toNumber(budget.maxCostCNY, 0).toFixed(2)}`), h(Bar, { value: budget.usedCostCNY, max: budget.maxCostCNY, tone: 'warn' })),
+              ),
+              h('p', { className: 'nd-hint' }, run && run.kind === 'continue' ? '点「开工」把工作单发进对话后，AI 会按大纲逐章写新章（过闸门直接落盘）。' : '点「开工」把工作单发进对话后，AI 会按阶段推进；产物只进提案。'),
+            ),
+          ),
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' }, h('strong', null, '备注') ),
+            notes.length === 0
+              ? h('p', { className: 'nd-muted' }, '暂无备注。')
+              : h('ul', { className: 'nd-notes-list' }, notes.map((note, index) => h('li', { key: index }, typeof note === 'string' ? note : String(note.text || note.message || JSON.stringify(note))))),
+          ),
+        )
+      }
+
+      return h('div', { className: 'nd-page' },
+        h('div', { className: 'nd-pagehead' },
+          h('h2', null, '全文动作'),
+          h('span', { className: 'nd-hint' }, '整本书级动作只有一份状态（run 单例）。产物只进提案，不会直接改正文。'),
+        ),
+        h('div', { className: 'nd-attention-note' },
+          h('strong', null, '⚡ 第一步永远是注意力设计'),
+          h('span', null, '开工前先给本次范围每章提交四拍 + designScore（novel_desk_attention op="design"）；没有设计不许写/改正文，阶段 1 就是「先定注意力设计」。'),
+        ),
+        notice && !run ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        runRes.loading && !runRes.data ? h(Loading, null, '正在读取全文动作…') : runRes.error ? h(ErrorBox, { error: runRes.error, onRetry: runRes.reload }) : content,
+        dialog ? h(RunDialog, { projectId, toc, onClose: () => setDialog(false), onCreated: () => { setDialog(false); runRes.reload() } }) : null,
+      )
+    }
+
+    // ── 世界地图（世界坐标直绘：区域 / 山水 / 路线 / 地点共用一套坐标） ──
+    // 设计要点：
+    //  1. 不再把地点 bbox 拉伸到画布，也不做「疏密自适应」——直接画世界坐标，
+    //     所以山水、区域、路线、地名永远在同一套坐标系里，放大缩小都对得上。
+    //  2. AI 方案（mapStyle.aiPlan）里的【区域】【路线】会被解析成真实图元；
+    //     没有方案时退化成按 region/type 推导，绝不再画 24 个模糊泡泡。
+    //  3. 纯函数区（map-model start/end 之间）不许引用外部变量，测试直接切出来跑。
+    /* @novel-desk:map-model start */
+    const MAP_PALETTES = [
+      { id: 'ink', name: '水墨绢本', paper: '#f6f1e6', ink: '#8b8378', label: '#4f473c', water: '#9dc0cc', ridge: '#cbbfa3', accent: '#b45309' },
+      { id: 'ochre', name: '赭石古卷', paper: '#f3ead9', ink: '#7c6f5c', label: '#4a3f2e', water: '#93bdb6', ridge: '#c8b18a', accent: '#9a3412' },
+      { id: 'jade', name: '青绿山河', paper: '#f1f4ec', ink: '#6f7c6b', label: '#3f4b3c', water: '#8fc0c9', ridge: '#b7cbb0', accent: '#0f766e' },
+      { id: 'sepia', name: '羊皮纸', paper: '#efe2c9', ink: '#6d5c44', label: '#463726', water: '#b3c4ac', ridge: '#c6ab80', accent: '#8a5a12' },
+      { id: 'steel', name: '冷灰史诗', paper: '#e8eaec', ink: '#5b636b', label: '#39414a', water: '#9db4c2', ridge: '#b0b6bb', accent: '#38556b' },
+      { id: 'wine', name: '暗红纪事', paper: '#ede4d8', ink: '#6b5650', label: '#42302a', water: '#b9c4cb', ridge: '#c9ad9c', accent: '#7f1d1d' },
+    ]
+    const MAP_LEGEND = [
+      { glyph: 'capital', label: '都城' },
+      { glyph: 'city', label: '州府' },
+      { glyph: 'town', label: '城镇' },
+      { glyph: 'pass', label: '关隘' },
+      { glyph: 'temple', label: '寺观' },
+      { glyph: 'water', label: '津渡' },
+      { glyph: 'site', label: '遗迹' },
+    ]
+    const MAP_HILL_WORDS = /山|峰|岭|谷|崖|峡|陇|坂|陵/
+    const MAP_PASS_WORDS = /关$|关|隘|津|渡$/
+    const MAP_TEMPLE_WORDS = /寺|观|庙|祠|庵|阁$/
+    const MAP_WATER_WORDS = /河|江|湖|海|渠|溪|水$|渡|津|码头|浦|湾/
+    const MAP_WATER_NAME = /([\u4e00-\u9fa5]{1,3}(?:河|江|湖|渠|溪|水))/
+    function mapNum(value, fallback) {
+      const n = Number(value)
+      return Number.isFinite(n) ? n : fallback
+    }
+    function mapClamp(value, min, max) {
+      if (max < min) return (min + max) / 2
+      return Math.min(max, Math.max(min, value))
+    }
+    function mapRound(value, digits) {
+      const base = Math.pow(10, digits === undefined ? 1 : digits)
+      return Math.round(value * base) / base
+    }
+    function mapSize(world) {
+      const w = mapNum(world && world.mapSize && world.mapSize.w, 0)
+      const h = mapNum(world && world.mapSize && world.mapSize.h, 0)
+      return { w: w > 0 ? w : 1000, h: h > 0 ? h : 1000 }
+    }
+    function mapRandom(seed) {
+      let state = (Math.floor(mapNum(seed, 1)) || 1) >>> 0
+      return () => {
+        state ^= state << 13
+        state ^= state >>> 17
+        state ^= state << 5
+        state >>>= 0
+        return state / 4294967296
+      }
+    }
+    function mapPalette(world) {
+      const id = String((world && world.mapStyle && world.mapStyle.palette) || 'ink')
+      return MAP_PALETTES.find((row) => row.id === id) || MAP_PALETTES[0]
+    }
+    function mapPlanRaw(world) {
+      const raw = world && world.mapStyle && world.mapStyle.aiPlan
+      if (!raw) return null
+      if (typeof raw === 'string') return { text: raw.trim(), savedAt: '' }
+      return { text: String(raw.text || '').trim(), savedAt: String(raw.savedAt || '') }
+    }
+    function mapPlanSection(text, name) {
+      const hit = String(text || '').match(new RegExp('【' + name + '】([\\s\\S]*?)(?=【|$)'))
+      return hit ? hit[1].trim() : ''
+    }
+    function mapShort(text, max) {
+      const raw = String(text || '').trim()
+      if (!raw) return '未名'
+      const parts = raw.split(/[·・]/).filter(Boolean)
+      const tail = parts.length > 1 ? parts[parts.length - 1] : raw
+      const limit = max || 9
+      return tail.length > limit ? tail.slice(0, limit) : tail
+    }
+    function mapGlyphOf(row) {
+      const type = String((row && row.type) || '').toLowerCase()
+      const name = String((row && row.name) || '')
+      if (type === 'capital') return 'capital'
+      if (type === 'city' || type === 'prefecture') return 'city'
+      if (type === 'pass') return 'pass'
+      if (type === 'temple') return 'temple'
+      if (type === 'pier' || type === 'port' || type === 'waterside' || type === 'ford' || type === 'bridge') return 'water'
+      if (type === 'road') return 'road'
+      if (type === 'town') return 'town'
+      if (type === 'village' || type === 'dwelling' || type === 'building' || type === 'shop' || type === 'rest' || type === 'inn') return 'village'
+      if (MAP_HILL_WORDS.test(name)) return 'mountain'
+      if (MAP_PASS_WORDS.test(name)) return 'pass'
+      if (MAP_TEMPLE_WORDS.test(name)) return 'temple'
+      if (MAP_WATER_WORDS.test(name)) return 'water'
+      return 'site'
+    }
+    function mapPriorityOf(row, glyph) {
+      if (glyph === 'capital') return 0
+      if (glyph === 'city' || glyph === 'pass') return 1
+      if (glyph === 'temple' || glyph === 'town') return 2
+      if (glyph === 'village' || glyph === 'water') return 3
+      if (glyph === 'mountain') return 4
+      return 5
+    }
+    function mapPoints(locations, size) {
+      const out = []
+      const seen = new Set()
+      for (const row of Array.isArray(locations) ? locations : []) {
+        if (!row || !row.coords) continue
+        const x = mapNum(row.coords.x, NaN)
+        const y = mapNum(row.coords.y, NaN)
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+        const point = {
+          id: String(row.id === undefined || row.id === null ? out.length : row.id),
+          fullName: String(row.name || '').trim() || '未名地点',
+          type: String(row.type || ''),
+          region: String(row.region || ''),
+          glyph: '',
+          priority: 9,
+          aliases: (Array.isArray(row.aliases) ? row.aliases : []).map((item) => String(item || '').trim()).filter(Boolean),
+          x: mapClamp(x, 0, size.w),
+          y: mapClamp(y, 0, size.h),
+        }
+        point.glyph = mapGlyphOf(row)
+        point.priority = mapPriorityOf(row, point.glyph)
+        const key = point.fullName + '|' + Math.round(point.x) + '|' + Math.round(point.y)
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(point)
+      }
+      return out
+    }
+    function mapWaterChains(points) {
+      const spots = points.filter((point) => point.glyph === 'water')
+      const rest = spots.slice()
+      const used = new Set()
+      const chains = []
+      const limit = 150
+      const nearest = (from) => {
+        let best = null
+        let bestDistance = limit
+        for (const spot of rest) {
+          if (used.has(spot.id)) continue
+          const distance = Math.hypot(spot.x - from.x, spot.y - from.y)
+          if (distance < bestDistance) {
+            best = spot
+            bestDistance = distance
+          }
+        }
+        return best
+      }
+      for (const spot of spots) {
+        if (used.has(spot.id)) continue
+        used.add(spot.id)
+        const chain = [{ x: spot.x, y: spot.y, name: spot.fullName }]
+        let head = chain[0]
+        for (;;) {
+          const next = nearest(head)
+          if (!next) break
+          used.add(next.id)
+          chain.push({ x: next.x, y: next.y, name: next.fullName })
+          head = chain[chain.length - 1]
+        }
+        let tail = chain[0]
+        for (;;) {
+          const next = nearest(tail)
+          if (!next) break
+          used.add(next.id)
+          chain.unshift({ x: next.x, y: next.y, name: next.fullName })
+          tail = chain[0]
+        }
+        if (chain.length >= 2) chains.push(chain)
+      }
+      // 只有 2 个点、又贴得很近的水点，多半是「同一条河上的两个点位」：沿走向补长成一个河段
+      return chains.map((chain) => {
+        const a = chain[0]
+        const b = chain[chain.length - 1]
+        const span = Math.hypot(b.x - a.x, b.y - a.y)
+        const text = chain.map((row) => row.name).join(' ')
+        const name = mapWaterName(text) || '水系'
+        if (span >= 90) return { points: chain, name, kind: /运河|渠|漕/.test(text) ? 'canal' : 'river' }
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const norm = span > 0.5 ? span : 1
+        const extra = (170 - span) / 2
+        const head = { x: a.x - (dx / norm) * extra, y: a.y - (dy / norm) * extra }
+        const tail = { x: b.x + (dx / norm) * extra, y: b.y + (dy / norm) * extra }
+        return { points: [head, ...chain, tail], name, kind: /运河|渠|漕/.test(text) ? 'canal' : 'river' }
+      })
+    }
+    function mapPlanRivers(world, regions) {
+      const text = mapPlanRaw(world) ? mapPlanRaw(world).text : ''
+      if (!text) return []
+      const out = []
+      for (const region of regions) {
+        if (!region || !region.desc) continue
+        const hint = region.desc.match(/y\s*[≈~=]?\s*(\d{3})/)
+        if (!hint) continue
+        const waterName = mapWaterName(region.desc)
+        if (!waterName) continue
+        const baseY = mapNum(hint[1], NaN)
+        if (!Number.isFinite(baseY)) continue
+        const x1 = region.bounds.x1 + (region.bounds.x2 - region.bounds.x1) * 0.08
+        const x2 = region.bounds.x2 - (region.bounds.x2 - region.bounds.x1) * 0.08
+        const span = x2 - x1
+        const steps = Math.max(3, Math.round(span / 46))
+        const points = []
+        for (let index = 0; index <= steps; index += 1) {
+          const t = index / steps
+          points.push({
+            x: mapRound(x1 + span * t, 1),
+            y: mapRound(baseY + Math.sin(t * Math.PI * 2.1 + baseY) * 4, 1),
+          })
+        }
+        out.push({ points, name: waterName, kind: /运河|渠/.test(waterName) ? 'canal' : 'river' })
+      }
+      return out
+    }
+    function mapPlanRegions(world, size) {
+      const raw = mapPlanRaw(world)
+      if (!raw) return []
+      const body = mapPlanSection(raw.text, '区域')
+      if (!body) return []
+      const out = []
+      for (const line of body.split(/\n+/)) {
+        const parts = line.split(/[｜|]/).map((item) => item.trim())
+        if (parts.length < 2) continue
+        const range = parts[1]
+        const mx = range.match(/[xX]\s*(\d+(?:\.\d+)?)\s*[–—\-~～至到]\s*(\d+(?:\.\d+)?)/)
+        const my = range.match(/[yY]\s*(\d+(?:\.\d+)?)\s*[–—\-~～至到]\s*(\d+(?:\.\d+)?)/)
+        if (!mx || !my) continue
+        const x1 = mapClamp(Math.min(mapNum(mx[1], 0), mapNum(mx[2], 0)), 0, size.w)
+        const x2 = mapClamp(Math.max(mapNum(mx[1], 0), mapNum(mx[2], 0)), 0, size.w)
+        const y1 = mapClamp(Math.min(mapNum(my[1], 0), mapNum(my[2], 0)), 0, size.h)
+        const y2 = mapClamp(Math.max(mapNum(my[1], 0), mapNum(my[2], 0)), 0, size.h)
+        if (x2 - x1 < 20 || y2 - y1 < 20) continue
+        out.push({
+          fullName: parts[0],
+          desc: parts.slice(2).join('｜'),
+          bounds: { x1, y1, x2, y2 },
+          source: 'aiPlan',
+        })
+      }
+      return out
+    }
+    function mapDerivedRegions(points, size) {
+      const buckets = new Map()
+      for (const point of points) {
+        const key = String(point.region || '').split(/[·・]/)[0].trim() || '未分区'
+        if (!buckets.has(key)) buckets.set(key, [])
+        buckets.get(key).push(point)
+      }
+      const out = []
+      for (const [name, rows] of buckets) {
+        const xs = rows.map((row) => row.x)
+        const ys = rows.map((row) => row.y)
+        const pad = 55
+        const x1 = mapClamp(Math.min.apply(null, xs) - pad, 0, size.w)
+        const x2 = mapClamp(Math.max.apply(null, xs) + pad, 0, size.w)
+        const y1 = mapClamp(Math.min.apply(null, ys) - pad, 0, size.h)
+        const y2 = mapClamp(Math.max.apply(null, ys) + pad, 0, size.h)
+        out.push({
+          fullName: name,
+          desc: rows.length + ' 个地点',
+          bounds: {
+            x1,
+            x2: Math.max(x2, x1 + 120),
+            y1,
+            y2: Math.max(y2, y1 + 90),
+          },
+          source: 'derived',
+        })
+      }
+      return out.sort((a, b) => b.bounds.x2 - b.bounds.x1 - (a.bounds.x2 - a.bounds.x1))
+    }
+    function mapBoxDistance(box, x, y) {
+      const dx = x < box.x1 ? box.x1 - x : x > box.x2 ? x - box.x2 : 0
+      const dy = y < box.y1 ? box.y1 - y : y > box.y2 ? y - box.y2 : 0
+      return Math.hypot(dx, dy)
+    }
+    function mapRegionLabel(text) {
+      const raw = String(text || '').trim()
+      if (!raw) return '未名'
+      return raw.replace(/(地区|区域|区)$/, '') || raw
+    }
+    function mapWaterName(text) {
+      const raw = String(text || '')
+      const suffixes = ['河', '江', '渠', '溪', '水']
+      for (let index = 0; index < raw.length; index += 1) {
+        if (suffixes.indexOf(raw[index]) < 0) continue
+        for (const take of [2, 3, 1]) {
+          const start = index - take + 1
+          if (start < 0) continue
+          const name = raw.slice(start, index + 1)
+          if (!/^[\u4e00-\u9fa5]{2,3}$/.test(name)) continue
+          // 连接词、方位词、「水域/水名」这类普通词都不该被当成河名
+          if (/[与和及自之的在从到经沿向于对由]/.test(name[0])) continue
+          if (/[有的一是了内外中上下东西南北前后左右的个该此其名位量平面流注汇口为]/.test(name)) continue
+          return name
+        }
+      }
+      return ''
+    }
+    function mapHits(box, list) {
+      return list.some((other) => !(box.x2 < other.x1 || box.x1 > other.x2 || box.y2 < other.y1 || box.y1 > other.y2))
+    }
+    function mapInside(box, x, y, margin) {
+      const pad = margin || 0
+      return x >= box.x1 - pad && x <= box.x2 + pad && y >= box.y1 - pad && y <= box.y2 + pad
+    }
+    function mapRanges(regions, points, rivers, seed) {
+      const rand = mapRandom(seed * 7919 + 13)
+      const out = []
+      const tooClose = (x, y, gaps) => {
+        if (gaps.points && points.some((point) => Math.hypot(point.x - x, point.y - y) < gaps.points)) return true
+        if (gaps.rivers && rivers.some((river) => river.points.some((point) => Math.hypot(point.x - x, point.y - y) < gaps.rivers))) return true
+        if (gaps.ranges && out.some((range) => range.points.some((point) => Math.hypot(point.x - x, point.y - y) < gaps.ranges))) return true
+        return false
+      }
+      const makeChain = (cx, cy) => {
+        const angle = rand() * Math.PI * 2
+        const length = 55 + rand() * 65
+        const size = 7 + rand() * 4.5
+        const wobble = (rand() - 0.5) * 18
+        const dx = Math.cos(angle)
+        const dy = Math.sin(angle)
+        const midX = cx + dx * length * 0.5 - dy * wobble * 0.4
+        const midY = cy + dy * length * 0.5 + dx * wobble * 0.4
+        return {
+          size,
+          points: [
+            { x: cx - dx * length * 0.5, y: cy - dy * length * 0.5 },
+            { x: midX, y: midY },
+            { x: cx + dx * length * 0.5, y: cy + dy * length * 0.5 },
+          ],
+        }
+      }
+      // ① 关隘/山地类地点：就地长出一道山脊（关隘本来就在山口上）
+      const anchors = points.filter((point) => point.glyph === 'mountain' || point.glyph === 'pass')
+      for (const anchor of anchors) {
+        if (out.length >= 22) break
+        const near = out.some((range) => Math.hypot(range.points[1].x - anchor.x, range.points[1].y - anchor.y) < 60)
+        if (near) continue
+        out.push(Object.assign(makeChain(anchor.x, anchor.y), { name: mapShort(anchor.fullName, 4), tone: 'anchor' }))
+      }
+      // ② 区域描述里点了名的山：在区域内撒一两道，避开地点与水系
+      for (const region of regions) {
+        if (out.length >= 26) break
+        if (!region.desc || !/山|岭|峡|谷|峰|崖|丘陵|塬/.test(region.desc)) continue
+        const width = region.bounds.x2 - region.bounds.x1
+        const height = region.bounds.y2 - region.bounds.y1
+        const area = width * height
+        const count = Math.max(1, Math.min(3, Math.round(area / 52000)))
+        for (let index = 0; index < count; index += 1) {
+          for (let attempt = 0; attempt < 14; attempt += 1) {
+            const x = region.bounds.x1 + width * (0.12 + rand() * 0.76)
+            const y = region.bounds.y1 + height * (0.12 + rand() * 0.76)
+            if (tooClose(x, y, { points: 42, rivers: 26, ranges: 78 })) continue
+            out.push(Object.assign(makeChain(x, y), { name: '', tone: 'fill' }))
+            break
+          }
+        }
+      }
+      return out
+    }
+    function mapResolveName(text, points) {
+      const raw = String(text || '').trim()
+      if (!raw) return null
+      const clean = raw.replace(/[（(][^）)]*[）)]/g, '').replace(/\s+/g, '')
+      if (!clean) return null
+      return points.find((point) => point.fullName === raw)
+        || points.find((point) => point.fullName === clean)
+        || points.find((point) => point.aliases.indexOf(clean) >= 0)
+        || points.find((point) => clean.length >= 3 && point.fullName.length >= 3 && point.fullName.indexOf(clean) >= 0)
+        || points.find((point) => clean.length >= 3 && point.fullName.length >= 3 && clean.indexOf(point.fullName) >= 0)
+        || null
+    }
+    function mapPlanRoutes(world, points) {
+      const raw = mapPlanRaw(world)
+      if (!raw) return []
+      const body = mapPlanSection(raw.text, '路线')
+      if (!body) return []
+      const out = []
+      for (const line of body.split(/\n+/)) {
+        const parts = line.split(/[｜|]/).map((item) => item.trim())
+        if (!parts[0]) continue
+        const candidates = [parts[0].split(/→|->|\u2192/)]
+        if (parts[1]) candidates.push(parts[1].split(/[—–\-~～]|至/))
+        let best = null
+        for (const candidate of candidates) {
+          const names = candidate.map((item) => item.trim()).filter(Boolean)
+          const resolved = []
+          for (const name of names) {
+            const point = mapResolveName(name, points)
+            if (!point) continue
+            const last = resolved[resolved.length - 1]
+            if (last && last.id === point.id) continue
+            resolved.push(point)
+          }
+          if (resolved.length >= 2 && (!best || resolved.length > best.length)) best = resolved
+        }
+        if (!best) continue
+        const text = parts.join(' ')
+        out.push({
+          id: 'r' + out.length,
+          name: parts[0],
+          terrain: parts[1] || '',
+          note: parts[2] || '',
+          kind: /舟|船|水|江|河|运|渡|津/.test(text) ? 'water' : 'road',
+          stops: best.map((point) => ({ id: point.id, name: point.fullName, x: point.x, y: point.y })),
+        })
+      }
+      return out
+    }
+    function mapTrailRoutes(events, points) {
+      const rows = (Array.isArray(events) ? events : [])
+        .map((event, index) => ({ event, index }))
+        .sort((a, b) => mapNum(a.event && a.event.chapter, 99999) - mapNum(b.event && b.event.chapter, 99999) || a.index - b.index)
+      const stops = []
+      for (const row of rows) {
+        const name = String((row.event && row.event.location) || '').trim()
+        if (!name) continue
+        const point = mapResolveName(name, points)
+        if (!point) continue
+        const last = stops[stops.length - 1]
+        if (last && last.id === point.id) continue
+        stops.push({ id: point.id, name: point.fullName, x: point.x, y: point.y })
+      }
+      if (stops.length < 2) return []
+      return [{ id: 'trail', name: '行程（按事件顺序）', terrain: '', note: '', kind: 'trail', stops }]
+    }
+    function mapLabelLayout(points) {
+      const boxes = []
+      const glyphBoxes = points.map((point) => ({ x1: point.x - 5.5, y1: point.y - 5.5, x2: point.x + 5.5, y2: point.y + 5.5 }))
+      const hits = (box, list) => list.some((other) => !(box.x2 < other.x1 || box.x1 > other.x2 || box.y2 < other.y1 || box.y1 > other.y2))
+      const order = points.slice().sort((a, b) => a.priority - b.priority || a.y - b.y || a.x - b.x)
+      const labels = []
+      const fs = 11
+      const gap = 9
+      for (const point of order) {
+        const name = mapShort(point.fullName, 10)
+        const width = Math.max(22, name.length * fs + 6)
+        const height = fs + 5
+        const candidates = [
+          [gap, -height / 2, 'start'],
+          [-gap - width, -height / 2, 'start'],
+          [-width / 2, -gap - height, 'start'],
+          [-width / 2, gap, 'start'],
+          [gap, -gap - height, 'start'],
+          [-gap - width, -gap - height, 'start'],
+          [gap, gap, 'start'],
+          [-gap - width, gap, 'start'],
+          [gap, gap * 3, 'start'],
+          [-gap - width, gap * 3, 'start'],
+          [gap, -gap * 3 - height, 'start'],
+          [-gap - width, -gap * 3 - height, 'start'],
+          [gap * 2.4, -height / 2, 'start'],
+          [-gap * 2.4 - width, -height / 2, 'start'],
+          [-width / 2, -gap * 2.4 - height, 'start'],
+          [-width / 2, gap * 2.4, 'start'],
+          [gap * 2.4, -gap * 2.4 - height, 'start'],
+          [-gap * 2.4 - width, gap * 2.4, 'start'],
+        ]
+        let placed = null
+        for (const candidate of candidates) {
+          const box = {
+            x1: point.x + candidate[0],
+            y1: point.y + candidate[1],
+            x2: point.x + candidate[0] + width,
+            y2: point.y + candidate[1] + height,
+          }
+          if (hits(box, boxes) || hits(box, glyphBoxes)) continue
+          placed = { box, candidate }
+          break
+        }
+        if (placed) {
+          boxes.push(placed.box)
+          labels.push({
+            id: point.id,
+            name,
+            x: mapRound(placed.box.x1, 1),
+            y: mapRound(placed.box.y1 + height / 2, 1),
+            zoom: point.priority <= 2 ? 1 : point.priority === 3 ? 1.2 : 1.5,
+            leader: false,
+          })
+        } else {
+          labels.push({
+            id: point.id,
+            name,
+            x: mapRound(point.x + gap, 1),
+            y: mapRound(point.y - gap - height / 2, 1),
+            zoom: 1.55,
+            leader: true,
+            anchorX: point.x,
+            anchorY: point.y,
+          })
+        }
+      }
+      return labels
+    }
+    function mapViewBox(points, regions, labels, size) {
+      let x1 = Infinity
+      let y1 = Infinity
+      let x2 = -Infinity
+      let y2 = -Infinity
+      const take = (x, y) => {
+        if (x < x1) x1 = x
+        if (y < y1) y1 = y
+        if (x > x2) x2 = x
+        if (y > y2) y2 = y
+      }
+      for (const point of points) take(point.x, point.y)
+      for (const label of labels || []) {
+        take(label.x - 4, label.y - 9)
+        take(label.x + label.name.length * 10 + 6, label.y + 9)
+      }
+      if (x1 === Infinity) {
+        return { x: 0, y: 0, w: size.w, h: size.h }
+      }
+      const pad = Math.max(34, Math.max(size.w, size.h) * 0.045)
+      // 不夹到 mapSize：地名可能落在边界外一点，宁可让纸面多出一点，也不要裁掉字
+      x1 = Math.max(-40, x1 - pad)
+      y1 = Math.max(-40, y1 - pad)
+      x2 = Math.min(size.w + 60, x2 + pad)
+      y2 = Math.min(size.h + 60, y2 + pad)
+      void regions
+      return { x: mapRound(x1, 1), y: mapRound(y1, 1), w: mapRound(Math.max(120, x2 - x1), 1), h: mapRound(Math.max(120, y2 - y1), 1) }
+    }
+    function buildWorldMapScene(input) {
+      const source = input || {}
+      const world = source.world && typeof source.world === 'object' ? source.world : {}
+      const size = mapSize(world)
+      const palette = mapPalette(world)
+      const seed = mapNum(world && world.mapStyle && world.mapStyle.seed, 1)
+      const planRaw = mapPlanRaw(world)
+      const points = mapPoints(source.locations, size)
+      let regionRows = mapPlanRegions(world, size)
+      let regionSource = 'aiPlan'
+      if (regionRows.length < 2) {
+        regionRows = mapDerivedRegions(points, size)
+        regionSource = 'derived'
+      }
+      const regions = regionRows.map((row, index) => ({
+        id: 'z' + index,
+        name: mapRegionLabel(row.fullName),
+        fullName: row.fullName,
+        desc: row.desc || '',
+        bounds: row.bounds,
+        source: row.source,
+        cx: (row.bounds.x1 + row.bounds.x2) / 2,
+        cy: (row.bounds.y1 + row.bounds.y2) / 2,
+      }))
+      const planRivers = mapPlanRivers(world, regions)
+      const chainRivers = mapWaterChains(points)
+      const rivers = planRivers.concat(chainRivers)
+      const ranges = mapRanges(regions, points, rivers, seed)
+      let routes = mapPlanRoutes(world, points)
+      let routeSource = 'aiPlan'
+      if (routes.length === 0) {
+        routes = mapTrailRoutes(source.events, points)
+        routeSource = routes.length > 0 ? 'events' : 'none'
+      }
+      const labels = mapLabelLayout(points)
+      // 区域名、河名要避开地点符号与地名，否则「京畿关内」会压在「长安」上
+      const taken = points.map((point) => ({ x1: point.x - 7, y1: point.y - 7, x2: point.x + 7, y2: point.y + 7 }))
+      for (const label of labels) taken.push({ x1: label.x, y1: label.y - 8, x2: label.x + label.name.length * 11, y2: label.y + 8 })
+      for (const region of regions) {
+        const box = region.bounds
+        const width = Math.max(44, region.name.length * 12 + 12)
+        const height = 18
+        const options = [
+          { x: region.cx, y: box.y1 + 18, anchor: 'middle' },
+          { x: region.cx, y: box.y2 - 14, anchor: 'middle' },
+          { x: box.x1 + 14, y: box.y2 - 14, anchor: 'start' },
+          { x: box.x2 - 14, y: box.y2 - 14, anchor: 'end' },
+          { x: box.x1 + 14, y: box.y1 + 20, anchor: 'start' },
+          { x: region.cx, y: region.cy, anchor: 'middle' },
+        ]
+        let placed = null
+        for (const option of options) {
+          const x1 = option.anchor === 'middle' ? option.x - width / 2 : option.anchor === 'end' ? option.x - width : option.x
+          const rect = { x1, y1: option.y - height / 2, x2: x1 + width, y2: option.y + height / 2 }
+          if (mapHits(rect, taken)) continue
+          placed = { rect, option }
+          break
+        }
+        if (placed) {
+          taken.push(placed.rect)
+          region.labelX = placed.option.x
+          region.labelY = placed.option.y
+          region.labelAnchor = placed.option.anchor
+        } else {
+          region.labelX = region.cx
+          region.labelY = box.y1 + 18
+          region.labelAnchor = 'middle'
+          region.labelFaint = true
+        }
+      }
+      for (const river of rivers) {
+        if (!river.name || river.points.length < 2) continue
+        const width = Math.max(30, river.name.length * 11 + 8)
+        const height = 14
+        const options = []
+        const fracs = [0.5, 0.34, 0.66, 0.2, 0.8, 0.08, 0.92]
+        for (const frac of fracs) {
+          const at = river.points[Math.min(river.points.length - 1, Math.round((river.points.length - 1) * frac))]
+          if (!at) continue
+          options.push({ x: at.x, y: at.y - 16, anchor: 'middle' })
+          options.push({ x: at.x, y: at.y + 20, anchor: 'middle' })
+          options.push({ x: at.x + 15, y: at.y + 7, anchor: 'start' })
+          options.push({ x: at.x - 15, y: at.y + 7, anchor: 'end' })
+          options.push({ x: at.x + 15, y: at.y - 20, anchor: 'start' })
+          options.push({ x: at.x - 15, y: at.y - 20, anchor: 'end' })
+        }
+        let placed = null
+        for (const option of options) {
+          const x1 = option.anchor === 'middle' ? option.x - width / 2 : option.anchor === 'end' ? option.x - width : option.x
+          const rect = { x1, y1: option.y - height / 2, x2: x1 + width, y2: option.y + height / 2 }
+          if (mapHits(rect, taken)) continue
+          placed = { rect, option }
+          break
+        }
+        // 实在挤不下就不画河名：宁可少一个字，也不要压在地名上
+        if (!placed) continue
+        taken.push(placed.rect)
+        river.labelX = placed.option.x
+        river.labelY = placed.option.y
+        river.labelAnchor = placed.option.anchor
+      }
+      return {
+        name: String(world.name || '').trim() || '世界地图',
+        era: String(world.era || '').trim(),
+        palette,
+        mapSize: size,
+        seed,
+        viewBox: mapViewBox(points, regions, labels, size),
+        points,
+        regions,
+        rivers,
+        ranges,
+        routes,
+        labels,
+        planText: planRaw ? planRaw.text : '',
+        planSavedAt: planRaw ? planRaw.savedAt : '',
+        regionSource,
+        routeSource,
+        warnings: [],
+      }
+    }
+    function mapSpline(rows) {
+      const pts = (Array.isArray(rows) ? rows : []).filter((row) => row && Number.isFinite(row.x) && Number.isFinite(row.y))
+      if (pts.length === 0) return ''
+      if (pts.length === 1) return 'M' + mapRound(pts[0].x, 1) + ',' + mapRound(pts[0].y, 1)
+      if (pts.length === 2) return 'M' + mapRound(pts[0].x, 1) + ',' + mapRound(pts[0].y, 1) + 'L' + mapRound(pts[1].x, 1) + ',' + mapRound(pts[1].y, 1)
+      let path = 'M' + mapRound(pts[0].x, 1) + ',' + mapRound(pts[0].y, 1)
+      for (let index = 0; index < pts.length - 1; index += 1) {
+        const p0 = pts[Math.max(0, index - 1)]
+        const p1 = pts[index]
+        const p2 = pts[index + 1]
+        const p3 = pts[Math.min(pts.length - 1, index + 2)]
+        const c1x = p1.x + (p2.x - p0.x) / 6
+        const c1y = p1.y + (p2.y - p0.y) / 6
+        const c2x = p2.x - (p3.x - p1.x) / 6
+        const c2y = p2.y - (p3.y - p1.y) / 6
+        path += 'C' + mapRound(c1x, 1) + ',' + mapRound(c1y, 1) + ' ' + mapRound(c2x, 1) + ',' + mapRound(c2y, 1) + ' ' + mapRound(p2.x, 1) + ',' + mapRound(p2.y, 1)
+      }
+      return path
+    }
+    function mapPointAt(rows, ratio) {
+      const pts = Array.isArray(rows) ? rows : []
+      if (pts.length === 0) return null
+      if (pts.length === 1) return pts[0]
+      const clamped = Math.max(0, Math.min(1, ratio))
+      const total = pts.length - 1
+      const scaled = clamped * total
+      const index = Math.min(total - 1, Math.floor(scaled))
+      const t = scaled - index
+      return {
+        x: pts[index].x + (pts[index + 1].x - pts[index].x) * t,
+        y: pts[index].y + (pts[index + 1].y - pts[index].y) * t,
+      }
+    }
+    function mapRangeLength(rows) {
+      let total = 0
+      for (let index = 1; index < rows.length; index += 1) {
+        total += Math.hypot(rows[index].x - rows[index - 1].x, rows[index].y - rows[index - 1].y)
+      }
+      return total
+    }
+    function mapGlyphShapes(glyph, size, palette) {
+      const s = size / 9
+      const ink = palette.label
+      const paper = palette.paper
+      if (glyph === 'capital') {
+        return [
+          { t: 'rect', a: { x: -4.6 * s, y: -4.6 * s, width: 9.2 * s, height: 9.2 * s, fill: paper, stroke: ink, strokeWidth: 1.7 } },
+          { t: 'rect', a: { x: -2 * s, y: -2 * s, width: 4 * s, height: 4 * s, fill: ink } },
+        ]
+      }
+      if (glyph === 'city') {
+        return [{ t: 'rect', a: { x: -3.7 * s, y: -3.7 * s, width: 7.4 * s, height: 7.4 * s, fill: paper, stroke: ink, strokeWidth: 1.5 } }]
+      }
+      if (glyph === 'town') {
+        return [{ t: 'circle', a: { cx: 0, cy: 0, r: 2.9 * s, fill: ink, fillOpacity: 0.88 } }]
+      }
+      if (glyph === 'village') {
+        return [{ t: 'circle', a: { cx: 0, cy: 0, r: 2.1 * s, fill: ink, fillOpacity: 0.72 } }]
+      }
+      if (glyph === 'pass') {
+        return [{ t: 'path', a: { d: 'M' + (-5.2 * s) + ' ' + (4.2 * s) + 'V' + (-1.6 * s) + 'L0 ' + (-5 * s) + 'L' + (5.2 * s) + ' ' + (-1.6 * s) + 'V' + (4.2 * s), fill: 'none', stroke: ink, strokeWidth: 1.5, strokeLinejoin: 'round' } }]
+      }
+      if (glyph === 'temple') {
+        return [
+          { t: 'path', a: { d: 'M' + (-5 * s) + ' ' + (0.4 * s) + 'L0 ' + (-4.6 * s) + 'L' + (5 * s) + ' ' + (0.4 * s) + 'Z', fill: palette.ridge, stroke: ink, strokeWidth: 1.2, strokeLinejoin: 'round' } },
+          { t: 'path', a: { d: 'M0 ' + (0.4 * s) + 'V' + (4.2 * s), fill: 'none', stroke: ink, strokeWidth: 1.2 } },
+        ]
+      }
+      if (glyph === 'water') {
+        return [{ t: 'path', a: { d: 'M0 ' + (-3.7 * s) + 'L' + (3.7 * s) + ' 0L0 ' + (3.7 * s) + 'L' + (-3.7 * s) + ' 0Z', fill: palette.water, stroke: ink, strokeWidth: 1 } }]
+      }
+      if (glyph === 'road') {
+        return [
+          { t: 'path', a: { d: 'M' + (-4.6 * s) + ' ' + (-2.6 * s) + 'L' + (4.6 * s) + ' ' + (2.6 * s), fill: 'none', stroke: ink, strokeWidth: 1.5 } },
+          { t: 'path', a: { d: 'M' + (4.6 * s) + ' ' + (-2.6 * s) + 'L' + (-4.6 * s) + ' ' + (2.6 * s), fill: 'none', stroke: ink, strokeWidth: 1.5, strokeOpacity: 0.5 } },
+        ]
+      }
+      if (glyph === 'mountain') {
+        return [{ t: 'path', a: { d: 'M' + (-4.8 * s) + ' ' + (3.2 * s) + 'L0 ' + (-3.4 * s) + 'L' + (4.8 * s) + ' ' + (3.2 * s), fill: 'none', stroke: ink, strokeWidth: 1.4, strokeLinejoin: 'round' } }]
+      }
+      return [{ t: 'circle', a: { cx: 0, cy: 0, r: 1.9 * s, fill: ink, fillOpacity: 0.6 } }]
+    }
+    function mapNode(tag, attrs, children, key) {
+      return { t: tag, a: attrs || {}, c: children === undefined ? null : children, k: key }
+    }
+    function mapSceneLayers(scene, view, options) {
+      const opts = options || {}
+      const box = view || scene.viewBox
+      const scale = mapNum(opts.scale, 1) || 1
+      const thin = 1 / scale
+      const show = Object.assign({ regions: true, terrain: true, routes: true, labels: true }, opts.show || {})
+      const palette = scene.palette
+      const picked = opts.pickedId ? String(opts.pickedId) : ''
+      const layers = { view: box, paper: [], regions: [], water: [], ranges: [], routes: [], points: [], labels: [] }
+      layers.paper.push(mapNode('rect', { x: box.x, y: box.y, width: box.w, height: box.h, fill: palette.paper }, null, 'paper'))
+      const inset = 9 * thin
+      layers.paper.push(mapNode('rect', {
+        x: box.x + inset,
+        y: box.y + inset,
+        width: Math.max(1, box.w - inset * 2),
+        height: Math.max(1, box.h - inset * 2),
+        fill: 'none',
+        stroke: palette.ink,
+        strokeWidth: 1.2 * thin,
+        strokeOpacity: 0.28,
+      }, null, 'frame'))
+      if (show.regions) {
+        for (const region of scene.regions) {
+          const box2 = region.bounds
+          layers.regions.push(mapNode('rect', {
+            x: box2.x1,
+            y: box2.y1,
+            width: Math.max(1, box2.x2 - box2.x1),
+            height: Math.max(1, box2.y2 - box2.y1),
+            rx: 7 * thin,
+            ry: 7 * thin,
+            fill: palette.ink,
+            fillOpacity: 0.05,
+            stroke: palette.ink,
+            strokeOpacity: 0.24,
+            strokeWidth: 1 * thin,
+            strokeDasharray: (7 * thin) + ' ' + (8 * thin),
+            className: 'ndm-zone',
+          }, null, region.id))
+          layers.regions.push(mapNode('text', {
+            x: region.labelX === undefined ? region.cx : region.labelX,
+            y: region.labelY === undefined ? box2.y1 + 18 : region.labelY,
+            className: 'ndm-zone-label',
+            fontSize: 12 * thin,
+            letterSpacing: (2.6 * thin) + 'px',
+            fill: palette.label,
+            fillOpacity: region.labelFaint ? 0.34 : 0.46,
+            textAnchor: region.labelAnchor || 'middle',
+            dominantBaseline: 'middle',
+            paintOrder: 'stroke',
+            stroke: palette.paper,
+            strokeWidth: 3.2 * thin,
+            strokeOpacity: 0.85,
+          }, region.name, region.id + '-label'))
+        }
+      }
+      if (show.terrain) {
+        for (const river of scene.rivers) {
+          const path = mapSpline(river.points)
+          layers.water.push(mapNode('path', {
+            d: path,
+            fill: 'none',
+            stroke: palette.water,
+            strokeWidth: 6.5 * thin,
+            strokeOpacity: 0.55,
+            strokeLinecap: 'round',
+            className: 'ndm-water',
+          }, null, 'w' + layers.water.length))
+          layers.water.push(mapNode('path', {
+            d: path,
+            fill: 'none',
+            stroke: palette.water,
+            strokeWidth: 1.5 * thin,
+            strokeOpacity: 0.95,
+            strokeLinecap: 'round',
+            strokeDasharray: river.kind === 'canal' ? (3 * thin) + ' ' + (5 * thin) : undefined,
+            className: 'ndm-water-line',
+          }, null, 'wl' + layers.water.length))
+          if (river.name && river.labelX !== undefined) {
+            layers.water.push(mapNode('text', {
+              x: river.labelX,
+              y: river.labelY,
+              className: 'ndm-water-label',
+              fontSize: 10 * thin,
+              letterSpacing: (1.2 * thin) + 'px',
+              fill: palette.label,
+              fillOpacity: 0.62,
+              textAnchor: river.labelAnchor || 'middle',
+              dominantBaseline: 'middle',
+              paintOrder: 'stroke',
+              stroke: palette.paper,
+              strokeWidth: 3 * thin,
+              strokeOpacity: 0.8,
+              fontStyle: 'italic',
+            }, river.name, 'wn' + layers.water.length))
+          }
+        }
+        for (const range of scene.ranges) {
+          const length = mapRangeLength(range.points)
+          const count = Math.max(2, Math.round(length / (range.size * 1.45)))
+          for (let index = 0; index <= count; index += 1) {
+            const point = mapPointAt(range.points, index / count)
+            if (!point) continue
+            const size = range.size * (0.82 + ((index * 37) % 7) / 5.5)
+            const half = size * 0.72
+            layers.ranges.push(mapNode('path', {
+              d: 'M' + mapRound(point.x - half, 1) + ' ' + mapRound(point.y + size * 0.5, 1)
+                + 'L' + mapRound(point.x, 1) + ' ' + mapRound(point.y - size * 0.62, 1)
+                + 'L' + mapRound(point.x + half, 1) + ' ' + mapRound(point.y + size * 0.5, 1),
+              fill: palette.ridge,
+              fillOpacity: 0.42,
+              stroke: palette.ink,
+              strokeOpacity: 0.5,
+              strokeWidth: 1 * thin,
+              strokeLinejoin: 'round',
+              className: 'ndm-hill',
+            }, null, 'h' + layers.ranges.length))
+          }
+        }
+      }
+      if (show.routes) {
+        for (const route of scene.routes) {
+          const rows = route.stops.map((stop) => ({ x: stop.x, y: stop.y }))
+          const path = rows.length > 2 ? mapSpline(rows) : mapSpline(rows)
+          const isTrail = route.kind === 'trail'
+          layers.routes.push(mapNode('path', {
+            d: path,
+            fill: 'none',
+            stroke: isTrail ? palette.ink : route.kind === 'water' ? palette.water : palette.accent,
+            strokeWidth: (isTrail ? 1.2 : 1.5) * thin,
+            strokeOpacity: route.kind === 'water' ? 0.75 : 0.55,
+            strokeDasharray: route.kind === 'water' ? (2 * thin) + ' ' + (5 * thin) : (7 * thin) + ' ' + (5 * thin),
+            strokeLinecap: 'round',
+            className: 'ndm-route',
+          }, null, 'r' + route.id))
+        }
+      }
+      for (const point of scene.points) {
+        const chosen = picked && picked === point.id
+        const size = (point.glyph === 'capital' ? 12 : point.glyph === 'city' || point.glyph === 'pass' ? 10.5 : 8.5) * thin
+        const group = mapNode('g', { transform: 'translate(' + mapRound(point.x, 1) + ',' + mapRound(point.y, 1) + ')', className: 'ndm-pt' }, null, 'p' + point.id)
+        const children = []
+        if (chosen) {
+          children.push(mapNode('circle', { cx: 0, cy: 0, r: 12 * thin, fill: 'none', stroke: palette.accent, strokeWidth: 2 * thin, strokeOpacity: 0.8 }, null, 'ring'))
+        }
+        for (const shape of mapGlyphShapes(point.glyph, size, palette)) {
+          children.push(mapNode(shape.t, shape.a, null, 'g' + children.length))
+        }
+        children.push(mapNode('circle', { cx: 0, cy: 0, r: 7.5 * thin, fill: 'transparent', pointerEvents: 'all' }, null, 'hit'))
+        group.children = children
+        group.pick = point.id
+        group.title = point.fullName
+        layers.points.push(group)
+      }
+      if (show.labels) {
+        for (const label of scene.labels) {
+          if (scale + 0.001 < mapNum(label.zoom, 1) && picked !== label.id) continue
+          if (label.leader) {
+            layers.labels.push(mapNode('line', {
+              x1: label.anchorX,
+              y1: label.anchorY,
+              x2: label.x,
+              y2: label.y,
+              stroke: palette.ink,
+              strokeOpacity: 0.4,
+              strokeWidth: 0.8 * thin,
+              className: 'ndm-leader',
+            }, null, 'll' + label.id))
+          }
+          layers.labels.push(mapNode('text', {
+            x: label.x,
+            y: label.y,
+            className: 'ndm-label',
+            fontSize: 11 * thin,
+            fill: palette.label,
+            textAnchor: 'start',
+            dominantBaseline: 'middle',
+            paintOrder: 'stroke',
+            stroke: palette.paper,
+            strokeWidth: 3 * thin,
+            strokeOpacity: 0.9,
+          }, label.name, 'lt' + label.id))
+        }
+      }
+      return layers
+    }
+    function mapSceneToSvg(scene, view, options) {
+      const layers = mapSceneLayers(scene, view, options)
+      const box = layers.view
+      const head = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="' + box.x + ' ' + box.y + ' ' + box.w + ' ' + box.h + '" preserveAspectRatio="xMidYMid meet">'
+      return head + layers.paper.map((node) => mapNodeMarkup(node)).join('') + layers.regions.map((node) => mapNodeMarkup(node)).join('')
+        + layers.water.map((node) => mapNodeMarkup(node)).join('') + layers.ranges.map((node) => mapNodeMarkup(node)).join('')
+        + layers.routes.map((node) => mapNodeMarkup(node)).join('') + layers.points.map((node) => mapNodeMarkup(node)).join('')
+        + layers.labels.map((node) => mapNodeMarkup(node)).join('') + '</svg>'
+    }
+    function mapAttrName(key) {
+      const map = {
+        className: 'class',
+        strokeWidth: 'stroke-width',
+        strokeOpacity: 'stroke-opacity',
+        strokeDasharray: 'stroke-dasharray',
+        strokeLinecap: 'stroke-linecap',
+        strokeLinejoin: 'stroke-linejoin',
+        fillOpacity: 'fill-opacity',
+        fontSize: 'font-size',
+        textAnchor: 'text-anchor',
+        dominantBaseline: 'dominant-baseline',
+        letterSpacing: 'letter-spacing',
+        paintOrder: 'paint-order',
+        pointerEvents: 'pointer-events',
+      }
+      return map[key] || key
+    }
+    function mapNodeMarkup(node) {
+      const attrs = Object.keys(node.a || {}).map((key) => {
+        const value = node.a[key]
+        if (value === undefined || value === null) return ''
+        return ' ' + mapAttrName(key) + '="' + String(value).replace(/"/g, '&quot;') + '"'
+      }).join('')
+      if (node.children) return '<' + node.t + attrs + '>' + node.children.map((child) => mapNodeMarkup(child)).join('') + '</' + node.t + '>'
+      if (node.c === null || node.c === undefined) return '<' + node.t + attrs + '/>'
+      const text = String(node.c).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      return '<' + node.t + attrs + '>' + text + '</' + node.t + '>'
+    }
+    /* @novel-desk:map-model end */
+    function mapSvgNodes(nodes, onPick) {
+      return (nodes || []).map((node) => {
+        const props = Object.assign({ key: node.k }, node.a)
+        if (node.pick) {
+          props.onClick = (event) => {
+            if (event && event.stopPropagation) event.stopPropagation()
+            if (onPick) onPick(node.pick)
+          }
+          props.style = { cursor: 'pointer' }
+        }
+        if (node.title) props['aria-label'] = node.title
+        if (node.children) return h(node.t, props, mapSvgNodes(node.children, onPick))
+        if (node.c === null || node.c === undefined) return h(node.t, props)
+        return h(node.t, props, node.c)
+      })
+    }
+    function MapCanvas({ scene, view, scale, show, pickedId, onPick, svgRef, onWheel, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, style, className }) {
+      const layers = useMemo(() => mapSceneLayers(scene, view, { scale, show, pickedId }), [scene, view, scale, show, pickedId])
+      const handlers = { onWheel, onPointerDown, onPointerMove, onPointerUp, onPointerLeave }
+      return h('svg', Object.assign({
+        ref: svgRef,
+        className: className || 'nd-map-svg',
+        viewBox: [layers.view.x, layers.view.y, layers.view.w, layers.view.h].join(' '),
+        preserveAspectRatio: 'xMidYMid meet',
+        style,
+      }, handlers),
+        h('g', { className: 'ndm-paper' }, mapSvgNodes(layers.paper, onPick)),
+        h('g', { className: 'ndm-zones' }, mapSvgNodes(layers.regions, onPick)),
+        h('g', { className: 'ndm-water-layer' }, mapSvgNodes(layers.water, onPick)),
+        h('g', { className: 'ndm-hills' }, mapSvgNodes(layers.ranges, onPick)),
+        h('g', { className: 'ndm-routes' }, mapSvgNodes(layers.routes, onPick)),
+        h('g', { className: 'ndm-points' }, mapSvgNodes(layers.points, onPick)),
+        h('g', { className: 'ndm-labels' }, mapSvgNodes(layers.labels, onPick)),
+      )
+    }
+    function MapLegend({ palette, scene }) {
+      return h('div', { className: 'ndm-legend' },
+        h('div', { className: 'ndm-legend-row' }, MAP_LEGEND.map((row) => h('span', { className: 'ndm-legend-item', key: row.glyph },
+          h('svg', { className: 'ndm-legend-glyph', viewBox: '-9 -9 18 18' }, mapSvgNodes(mapGlyphShapes(row.glyph, 11, palette).map((shape, index) => Object.assign({ k: 'g' + index }, shape)))),
+          h('span', null, row.label),
+        ))),
+        h('div', { className: 'ndm-legend-foot' },
+          `区域 ${scene.regions.length} · 山水 ${scene.rivers.length + scene.ranges.length} · 路线 ${scene.routes.length} · 地点 ${scene.points.length}`,
+        ),
+      )
+    }
+    function mapCartouche(scene) {
+      return h('div', { className: 'ndm-cartouche' },
+        h('div', { className: 'ndm-cartouche-title' }, scene.name),
+        scene.era ? h('div', { className: 'ndm-cartouche-era' }, scene.era) : null,
+        h('div', { className: 'ndm-cartouche-note' }, '据地点坐标与方案绘制 · 非实测比例'),
+      )
+    }
+    function MapCartouche({ scene }) {
+      return mapCartouche(scene)
+    }
+    function MapFull({ scene, picked, onPick, onClose, palette, show }) {
+      const [view, setView] = useState(() => ({ x: scene.viewBox.x, y: scene.viewBox.y, w: scene.viewBox.w, h: scene.viewBox.h, scale: 1 }))
+      const [drag, setDrag] = useState(null)
+      const svgRef = useRef(null)
+      const baseView = scene.viewBox
+      const move = (next) => {
+        const width = baseView.w / next.scale
+        const height = baseView.h / next.scale
+        const cx = mapClamp(next.cx, Math.min(baseView.x + width / 2, baseView.x + baseView.w / 2), Math.max(baseView.x + baseView.w - width / 2, baseView.x + baseView.w / 2))
+        const cy = mapClamp(next.cy, Math.min(baseView.y + height / 2, baseView.y + baseView.h / 2), Math.max(baseView.y + baseView.h - height / 2, baseView.y + baseView.h / 2))
+        setView({ scale: next.scale, w: width, h: height, x: cx - width / 2, y: cy - height / 2 })
+      }
+      const currentCenter = () => ({ cx: view.x + view.w / 2, cy: view.y + view.h / 2 })
+      const zoomAt = (factor, sx, sy) => {
+        const nextScale = mapClamp(view.scale * factor, 1, 8)
+        const rect = svgRef.current ? svgRef.current.getBoundingClientRect() : { width: baseView.w, height: baseView.h, left: 0, top: 0 }
+        const px = mapNum(sx, rect.width / 2) / Math.max(1, rect.width)
+        const py = mapNum(sy, rect.height / 2) / Math.max(1, rect.height)
+        const center = currentCenter()
+        const focusX = view.x + view.w * px
+        const focusY = view.y + view.h * py
+        const nextW = baseView.w / nextScale
+        const nextH = baseView.h / nextScale
+        move({ scale: nextScale, cx: focusX + (center.cx - view.x - view.w / 2) - nextW * (px - 0.5), cy: focusY + (center.cy - view.y - view.h / 2) - nextH * (py - 0.5) })
+      }
+      const onWheel = (event) => {
+        if (event.preventDefault) event.preventDefault()
+        const rect = svgRef.current ? svgRef.current.getBoundingClientRect() : null
+        const sx = rect && event.clientX ? event.clientX - rect.left : null
+        const sy = rect && event.clientY ? event.clientY - rect.top : null
+        zoomAt(event.deltaY > 0 ? 0.86 : 1.16, sx, sy)
+      }
+      const onPointerDown = (event) => {
+        setDrag({ x: event.clientX, y: event.clientY, vx: view.x, vy: view.y })
+      }
+      const onPointerMove = (event) => {
+        if (!drag) return
+        const rect = svgRef.current ? svgRef.current.getBoundingClientRect() : { width: 1, height: 1 }
+        const dx = event.clientX - drag.x
+        const dy = event.clientY - drag.y
+        move({ scale: view.scale, cx: drag.vx + view.w / 2 - (dx / Math.max(1, rect.width)) * view.w, cy: drag.vy + view.h / 2 - (dy / Math.max(1, rect.height)) * view.h })
+      }
+      const onPointerUp = () => setDrag(null)
+      useEffect(() => {
+        const onKey = (event) => {
+          if (event.key === 'Escape') onClose()
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [onClose])
+      return h('div', { className: 'nd-mapfull' },
+        h('div', { className: 'nd-mapfull-panel' },
+          h('div', { className: 'nd-mapfull-head' },
+            h('strong', null, scene.name),
+            h('span', { className: 'nd-hint' }, `${scene.era || ''} ${scene.points.length} 个地点`),
+            h('div', { className: 'nd-actions' },
+              h(Btn, { small: true, onClick: () => setView({ x: baseView.x, y: baseView.y, w: baseView.w, h: baseView.h, scale: 1 }) }, '重置'),
+              h(Btn, { small: true, onClick: () => zoomAt(1.35, null, null) }, '放大'),
+              h(Btn, { small: true, onClick: () => zoomAt(0.74, null, null) }, '缩小'),
+              h(Btn, { small: true, onClick: onClose }, '关闭'),
+            ),
+          ),
+          h('div', { className: 'nd-mapfull-canvas' },
+            h(MapCanvas, {
+              scene,
+              view: { x: view.x, y: view.y, w: view.w, h: view.h },
+              scale: view.scale,
+              show,
+              pickedId: picked ? String(picked.id) : '',
+              onPick,
+              svgRef,
+              onWheel,
+              onPointerDown,
+              onPointerMove,
+              onPointerUp,
+              onPointerLeave: onPointerUp,
+              className: 'nd-map-svg',
+            }),
+            h('div', { className: 'nd-mapfull-tip nd-hint' }, '滚轮对准地名放大，拖动平移；点一个点看地点卡。'),
+            picked ? h('div', { className: 'nd-map-detail nd-mapfull-detail' },
+              h('strong', null, picked.name),
+              h('div', { className: 'nd-hint' }, `${picked.type || '地点'}${picked.region ? ` · ${picked.region}` : ''}`),
+              h('div', { className: 'ndm-coord' }, `坐标 ${Math.round(picked.coords ? Number(picked.coords.x) || 0 : 0)} , ${Math.round(picked.coords ? Number(picked.coords.y) || 0 : 0)}`),
+              picked.note ? h('p', { className: 'nd-map-note' }, String(picked.note)) : null,
+            ) : null,
+            h(MapCartouche, { scene }),
+            h(MapLegend, { scene, palette }),
+          ),
+        ),
+      )
+    }
+
+    function MapView({ projectId, data, openChapter, go, pageArg, onRefresh }) {
+      const locations = Array.isArray(data && data.locations) ? data.locations : []
+      const events = Array.isArray(data && data.events) ? data.events : []
+      const world = (data && data.world) || {}
+      const [pickedId, setPickedId] = useState('')
+      const [open, setOpen] = useState(() => (pageArg && String(pageArg.open) === '1') || lsGet('nd.mapOpen', '') === '1')
+      const [showTerrain, setShowTerrain] = useState(() => lsGet('nd.mapTerrain', '1') !== '0')
+      const [showRegions, setShowRegions] = useState(() => lsGet('nd.mapRegions', '1') !== '0')
+      const [showRoutes, setShowRoutes] = useState(() => lsGet('nd.mapRoutes', '1') !== '0')
+      const [showLabels, setShowLabels] = useState(() => lsGet('nd.mapLabels', '1') !== '0')
+      const withCoords = locations.filter(hasCoords)
+      const scene = useMemo(() => buildWorldMapScene({ world, locations, events }), [world, locations, events])
+      const show = useMemo(
+        () => ({ regions: showRegions, terrain: showTerrain, routes: showRoutes, labels: showLabels }),
+        [showRegions, showTerrain, showRoutes, showLabels],
+      )
+      const picked = locations.find((loc) => String(loc.id) === pickedId) || null
+      const pickedInfo = useMemo(() => {
+        if (!picked) return null
+        const name = String(picked.name || '')
+        const hits = events.filter((event) => {
+          const text = String((event && event.location) || '').trim()
+          return text && (text === name || text.indexOf(name) >= 0 || name.indexOf(text) >= 0)
+        })
+        const chapters = hits.map((event) => toNumber(event.chapter, 0)).filter((value) => value > 0)
+        return {
+          count: hits.length,
+          first: chapters.length > 0 ? Math.min.apply(null, chapters) : 0,
+          last: chapters.length > 0 ? Math.max.apply(null, chapters) : 0,
+          routes: scene.routes.filter((route) => route.stops.some((stop) => stop.id === String(picked.id))).map((route) => route.name),
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [picked, events, scene.routes])
+      const toggle = (key, value, setter) => {
+        lsSet(key, value ? '0' : '1')
+        setter(!value)
+      }
+      const sourceHint = [
+        scene.regionSource === 'aiPlan' ? '分区按已存方案' : '分区按地点归属推导',
+        scene.routeSource === 'aiPlan' ? '路线按已存方案' : scene.routeSource === 'events' ? '路线按事件顺序推导' : '还没有路线',
+      ].join(' · ')
+      return h('div', { className: 'nd-mapview' },
+        h('div', { className: 'nd-map-toolbar' },
+          h('span', { className: 'nd-hint' },
+            `${locations.length} 个地点 · ${withCoords.length} 个有坐标 · 区域 ${scene.regions.length} · 路线 ${scene.routes.length}`),
+          h(Btn, { small: true, kind: 'brand', onClick: () => setOpen(true) }, '🗺 打开全屏地图'),
+          h(Btn, { small: true, onClick: () => go('ledger', { tab: 'locations' }) }, '编辑坐标'),
+        ),
+        h('div', { className: 'ndm-toggles' },
+          h(Btn, { small: true, onClick: () => toggle('nd.mapRegions', showRegions, setShowRegions) }, `区域：${showRegions ? '开' : '关'}`),
+          h(Btn, { small: true, onClick: () => toggle('nd.mapTerrain', showTerrain, setShowTerrain) }, `山水：${showTerrain ? '开' : '关'}`),
+          h(Btn, { small: true, onClick: () => toggle('nd.mapRoutes', showRoutes, setShowRoutes) }, `路线：${showRoutes ? '开' : '关'}`),
+          h(Btn, { small: true, onClick: () => toggle('nd.mapLabels', showLabels, setShowLabels) }, `地名：${showLabels ? '开' : '关'}`),
+          h('span', { className: 'nd-hint ndm-source' }, sourceHint),
+        ),
+        withCoords.length === 0
+          ? h('div', { className: 'nd-map-empty' }, '地点都还没有坐标。到「地点」页签编辑 X/Y（0–1000）后，这里会出现地图。')
+          : h('div', { className: `nd-map-layout${picked ? ' nd-map-with-detail' : ''}` },
+            h('button', { type: 'button', className: 'nd-map-preview', onClick: () => setOpen(true), title: '点一下全屏看' },
+              h(MapCanvas, { scene, scale: 1, show, pickedId, onPick: setPickedId }),
+              h('span', { className: 'nd-map-preview-hint' }, '点卡片全屏打开 · 滚轮对准地名缩放'),
+              h(MapCartouche, { scene }),
+            ),
+            picked ? h('div', { className: 'nd-map-detail' },
+              h('strong', null, picked.name),
+              h('div', { className: 'nd-hint' }, `${picked.type || '地点'}${picked.region ? ` · ${picked.region}` : ''}`),
+              h('div', { className: 'ndm-coord' }, `坐标 ${Math.round(toNumber(picked.coords && picked.coords.x, 0))} , ${Math.round(toNumber(picked.coords && picked.coords.y, 0))}`),
+              pickedInfo && pickedInfo.count > 0
+                ? h('div', { className: 'nd-hint' }, `事件 ${pickedInfo.count} 条 · 第 ${pickedInfo.first}–${pickedInfo.last} 章`)
+                : h('div', { className: 'nd-hint' }, '事件里还没点名这里'),
+              pickedInfo && pickedInfo.routes.length > 0
+                ? h('div', { className: 'nd-hint' }, `经过路线：${pickedInfo.routes.slice(0, 3).join(' / ')}`)
+                : null,
+              picked.note ? h('p', { className: 'nd-map-note' }, String(picked.note)) : null,
+              h('div', { className: 'nd-actions' },
+                h(Btn, { small: true, onClick: () => go('ledger', { tab: 'locations', focus: String(picked.id) }) }, '改坐标'),
+                h(Btn, { small: true, onClick: () => setPickedId('') }, '收起'),
+              ),
+            ) : null,
+          ),
+        open
+          ? h(MapFull, {
+              scene,
+              picked,
+              palette: scene.palette,
+              show,
+              onPick: setPickedId,
+              onClose: () => setOpen(false),
+            })
+          : null,
+      )
+    }
+
+
+    // ── 人物卡 ────────────────────────────────────────────────
+    const ROLE_LABEL = { protagonist: '主角', antagonist: '反派', supporting: '配角', minor: '龙套' }
+    const ROLE_ORDER = ['protagonist', 'antagonist', 'supporting', 'minor']
+    function CharacterCards({ rows, onEdit, onNew }) {
+      const [openId, setOpenId] = useState('')
+      const openRow = rows.find((row) => (ledgerRowKey(row) || String(row.name || '')) === openId) || null
+      if (rows.length === 0) {
+        return h(Empty, { action: h(Btn, { small: true, onClick: onNew }, '新增第一张人物卡') }, '人物卡还是空的。人物卡是写作前最常被读取的资料，建议先补主要人物。')
+      }
+      const groups = ROLE_ORDER.map((role) => ({ role, list: rows.filter((row) => (row.role || 'minor') === role) })).filter((group) => group.list.length > 0)
+      const others = rows.filter((row) => !ROLE_ORDER.includes(row.role || 'minor'))
+      if (others.length > 0) groups.push({ role: 'minor', list: others })
+      const card = (row) => {
+        const name = String(row.name || '未命名')
+        const role = row.role || 'minor'
+        const key = ledgerRowKey(row) || name
+        return h('button', { key, type: 'button', className: `nd-char-card nd-char-${role}${openId === key ? ' nd-char-open' : ''}`, onClick: () => setOpenId(key) },
+          h('span', { className: 'nd-char-face' },
+            h('span', { className: 'nd-char-avatar' }, name.slice(0, 1)),
+            h('span', { className: 'nd-char-face-main' },
+              h('strong', { className: 'nd-char-name' }, name),
+              h('span', { className: 'nd-char-role' }, ROLE_LABEL[role] || role),
+            ),
+          ),
+          h('span', { className: 'nd-char-line-clamp' }, String(row.identity || row.goal || row.flaw || row.note || '点开看详情')),
+        )
+      }
+      return h('div', { className: 'nd-char-groups' },
+        groups.map((group) =>
+          h('section', { key: group.role, className: `nd-char-group nd-char-group-${group.role}` },
+            h('div', { className: 'nd-char-group-head' }, h('span', { className: `nd-tag nd-tag-${group.role === 'antagonist' ? 'error' : group.role === 'protagonist' ? 'brand' : 'muted'}` }, ROLE_LABEL[group.role] || group.role), h('span', { className: 'nd-hint' }, `${group.list.length} 人`)),
+            h('div', { className: 'nd-char-grid' }, group.list.map(card)),
+          ),
+        ),
+        openRow
+          ? h(Modal, {
+              title: String(openRow.name || '人物'), wide: true, onClose: () => setOpenId(''),
+              footer: h('div', { className: 'nd-actions' }, h(Btn, { small: true, onClick: () => { setOpenId(''); onEdit(openRow) } }, '编辑')),
+            },
+              h('div', { className: 'nd-char-detail' },
+                h('div', { className: 'nd-char-detail-head' },
+                  h('span', { className: `nd-char-avatar nd-char-avatar-big nd-char-avatar-${openRow.role || 'minor'}` }, String(openRow.name || '人').slice(0, 1)),
+                  h('div', null,
+                    h('strong', { className: 'nd-char-name-lg' }, String(openRow.name || '未命名')),
+                    h('div', { className: 'nd-hint' }, [ROLE_LABEL[openRow.role] || openRow.role, openRow.age, openRow.gender, openRow.identity].filter(Boolean).join(' · ') || '—'),
+                  ),
+                ),
+                h('div', { className: 'nd-kv nd-kv-block' },
+                  h('span', null, '目标'), h('span', null, String(openRow.goal || '—')),
+                  h('span', null, '缺陷'), h('span', null, String(openRow.flaw || '—')),
+                  h('span', null, '弧光'), h('span', null, String(openRow.arc || '—')),
+                  h('span', null, '关系'), h('span', null, tagsText(openRow.relationships) || '—'),
+                  h('span', null, '首次出现'), h('span', null, toNumber(openRow.firstChapter, 0) > 0 ? `第 ${openRow.firstChapter} 章` : '—'),
+                  openRow.note ? h('span', null, '备注') : null, openRow.note ? h('span', null, String(openRow.note)) : null,
+                ),
+              ),
+            )
+          : null,
+      )
+    }
+
+    // ── 时间线 ────────────────────────────────────────────────
+    const CN_DIGIT = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+    const MONTH_LABEL = { 正: 1, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 十一: 11, 十二: 12, 冬: 11, 腊: 12 }
+    function cnInt(text) {
+      if (!text) return 0
+      if (/^\d+$/.test(text)) return Number(text)
+      let total = 0
+      let current = 0
+      for (const ch of String(text)) {
+        if (ch === '十') { current = (current || 1) * 10; total += current; current = 0 }
+        else if (ch === '百') { current = (current || 1) * 100; total += current; current = 0 }
+        else if (CN_DIGIT[ch] !== undefined) current = CN_DIGIT[ch]
+      }
+      return total + current
+    }
+    function timeParts(ev) {
+      const raw = String((ev && ev.storyTime) || '')
+      const era = (raw.match(/([\u4e00-\u9fa5]{2})(?:元|[一二三四五六七八九十\d]+)载/) || [])[1] || ''
+      const numericYear = Number((raw.match(/(\d{3,4})\s*年/) || [])[1] || 0)
+      const eraYear = cnInt((raw.match(/(?:^|[^\d])(元|[一二三四五六七八九十]+)载/) || [])[1] || '')
+      const monthMatch = raw.match(/(正|十二|十一|十|九|八|七|六|五|四|三|二|一|冬|腊)月/)
+      const month = monthMatch ? MONTH_LABEL[monthMatch[1]] : 0
+      const day = cnInt((raw.match(/([一二三四五六七八九十\d]+)[日号]/) || [])[1] || '')
+      return { era, year: numericYear || eraYear, month, day, hasTime: Boolean(era || numericYear || eraYear || month || raw), raw }
+    }
+    function TimelineView({ rows, openChapter, onEdit }) {
+      const ordered = useMemo(() => {
+        const list = rows.map((ev, index) => ({ ev, index, parts: timeParts(ev) }))
+        list.sort((a, b) => toNumber(a.ev.chapter, 99999) - toNumber(b.ev.chapter, 99999) || a.index - b.index)
+        // 以章节顺序为叙事骨架，缺年份的条目沿用上一条的年份；月份回跳则视为跨年
+        let year = 0
+        let month = 0
+        for (const item of list) {
+          const p = item.parts
+          if (p.year > 0) year = p.year
+          if (p.month > 0) {
+            if (month > 0 && p.month < month) year += 1
+            month = p.month
+          }
+          p.sortYear = p.year > 0 ? p.year : year
+          p.sortMonth = p.month > 0 ? p.month : month
+        }
+        list.sort((a, b) => {
+          const pa = a.parts
+          const pb = b.parts
+          if (pa.sortYear !== pb.sortYear) return pa.sortYear - pb.sortYear
+          if (pa.sortMonth !== pb.sortMonth) return pa.sortMonth - pb.sortMonth
+          if (pa.day !== pb.day) return pa.day - pb.day
+          return toNumber(a.ev.chapter, 99999) - toNumber(b.ev.chapter, 99999) || a.index - b.index
+        })
+        return list
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [rows])
+      if (ordered.length === 0) return h(Empty, null, '时间线还是空的。事件账本里新增条目后，这里会按故事时间排出时间轴。')
+      const labelOf = (p) => {
+        if (p.sortYear <= 0 && p.sortMonth <= 0) return '时间未标'
+        const year = p.sortYear > 0 ? `${p.sortYear}年` : ''
+        const month = p.sortMonth > 0 ? `${p.sortMonth}月` : ''
+        return `${year}${month}` || '时间未标'
+      }
+      const groups = []
+      for (const item of ordered) {
+        const p = item.parts
+        const key = `${p.sortYear}-${p.sortMonth}`
+        if (groups.length === 0 || groups[groups.length - 1].key !== key) groups.push({ key, items: [] })
+        groups[groups.length - 1].items.push(item)
+      }
+      const groupLabel = (items) => {
+        for (const item of items) {
+          const raw = String(item.parts.raw || '')
+          const hit = raw.match(/^(.{1,20}?月)/)
+          if (hit) return hit[1]
+        }
+        const p = items[0].parts
+        if (p.sortYear > 0) return `${p.sortYear}年${p.sortMonth > 0 ? `${p.sortMonth}月` : ''}`
+        return '时间未标'
+      }
+      const nodes = []
+      for (const group of groups) {
+        nodes.push(h('div', { key: `g-${group.key}-${nodes.length}`, className: 'nd-tl-group' }, h('span', { className: 'nd-tl-group-label' }, groupLabel(group.items))))
+        for (const item of group.items) {
+          const ev = item.ev
+          nodes.push(h('div', { key: ledgerRowKey(ev) || String(item.index), className: `nd-tl-item${ev.importance === 'climax' ? ' nd-tl-climax' : ev.importance === 'major' ? ' nd-tl-major' : ''}` },
+            h('span', { className: 'nd-tl-dot' }),
+            h('div', { className: 'nd-tl-body' },
+              h('div', { className: 'nd-tl-meta' },
+                item.parts.raw ? h('span', { className: 'nd-tag nd-tag-brand' }, item.parts.raw) : h('span', { className: 'nd-tag nd-tag-muted' }, '时间未标'),
+                chapterNo(ev) > 0 ? h('button', { type: 'button', className: 'nd-linkbtn', onClick: () => openChapter(chapterNo(ev)) }, `第 ${chapterNo(ev)} 章`) : null,
+                ev.location ? h('span', { className: 'nd-tag' }, `📍 ${ev.location}`) : null,
+                ev.importance === 'climax' ? h('span', { className: 'nd-tag nd-tag-error' }, '高潮') : ev.importance === 'major' ? h('span', { className: 'nd-tag nd-tag-warn' }, '关键') : null,
+                h('span', { className: 'nd-tl-title' }, String(ev.title || '未命名事件')),
+                h('span', { className: 'nd-tl-edit' }, h(Btn, { small: true, onClick: () => onEdit(ev) }, '编辑')),
+              ),
+              tagsText(ev.participants) ? h('div', { className: 'nd-hint' }, `参与：${tagsText(ev.participants)}`) : null,
+              ev.summary ? h('p', { className: 'nd-tl-summary' }, String(ev.summary)) : null,
+              ev.consequences ? h('p', { className: 'nd-hint' }, `后果：${String(ev.consequences)}`) : null,
+            ),
+          ))
+        }
+      }
+      return h('div', { className: 'nd-timeline' }, nodes)
+    }
+
+    // ── 页 7：账本（资料库） ─────────────────────────────────
+    const LEDGER_TABS = [
+      { id: 'facts', label: '⚖️ 事实库' },
+      { id: 'characters', label: '👤 人物卡' },
+      { id: 'events', label: '🕰️ 时间线' },
+      { id: 'locations', label: '🏙️ 地点' },
+      { id: 'map', label: '🗺️ 世界地图' },
+      { id: 'highlights', label: '✨ 高光' },
+      { id: 'conflicts', label: '⚔️ 冲突' },
+      { id: 'foreshadow', label: '🧩 伏笔' },
+      { id: 'outlines', label: '🧭 大纲' },
+    ]
+    function LedgerTab({ projectId, go, openChapter, pageArg, onChanged }) {
+      const ledgerRes = useAsync(() => api('ledger.get', scope(projectId)), [projectId])
+      const data = ledgerRes.data && typeof ledgerRes.data === 'object' ? ledgerRes.data : null
+      const [kind, setKind] = useState(() => {
+        const wanted = (pageArg && pageArg.tab) || lsGet('nd.ledgerTab', '')
+        return LEDGER_TABS.some((row) => row.id === wanted) ? wanted : 'facts'
+      })
+      const [form, setForm] = useState(null)
+      const [confirmKey, setConfirmKey] = useState('')
+      const [busy, setBusy] = useState('')
+      const [notice, setNotice] = useState(null)
+      const [syncDialog, setSyncDialog] = useState(null)
+      const syncRes = useAsync(() => (projectId ? api('ledger.sync', scope(projectId)) : Promise.resolve({ pending: [] })), [projectId])
+      const pending = syncRes.data && Array.isArray(syncRes.data.pending) ? syncRes.data.pending : []
+      const full = syncRes.data && syncRes.data.full ? syncRes.data.full : null
+      const chapters = (syncRes.data && syncRes.data.chapters) || 0
+      const [fullDialog, setFullDialog] = useState(false)
+      const [fullPrompt, setFullPrompt] = useState(null)
+      const [fullBatchSize, setFullBatchSize] = useState(6)
+      const [fullReplan, setFullReplan] = useState(false)
+      const [fullSent, setFullSent] = useState(null)
+      const meta = LEDGER_META[kind]
+      const isTable = kind !== 'map' && kind !== 'characters' && kind !== 'events'
+      const rows = useMemo(() => {
+        const value = data && data[kind]
+        return Array.isArray(value) ? value : []
+      }, [data, kind])
+
+      const refresh = () => {
+        ledgerRes.reload()
+        syncRes.reload()
+        if (onChanged) onChanged()
+      }
+      const remove = async (row) => {
+        setBusy('del')
+        try {
+          await api('ledger.delete', scope(projectId, { kind, id: row.id, item: row }))
+          setConfirmKey('')
+          setNotice({ tone: 'ok', text: `已删除：${ledgerRowLabel(kind, row)}` })
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `删除失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const submit = async (draft) => {
+        setBusy('save')
+        try {
+          await api('ledger.upsert', scope(projectId, { kind, item: draft, patch: draft, row: draft }))
+          setForm(null)
+          setNotice({ tone: 'ok', text: '已保存到账本' })
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `保存失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const openSync = async () => {
+        setBusy('sync')
+        setNotice(null)
+        try {
+          const value = await api('ledger.sync', scope(projectId, { action: 'workorder' }))
+          setSyncDialog({ text: String((value && value.prompt) || ''), sending: false, confirming: false, target: '' })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成同步工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const sendSync = async () => {
+        if (!syncDialog) return
+        setSyncDialog((prev) => (prev ? { ...prev, sending: true } : prev))
+        try {
+          await sendToChat(projectId, { prompt: syncDialog.text }, syncDialog.target)
+          setSyncDialog(null)
+          setNotice({ tone: 'ok', text: '已发到宿主对话（在 DSH 侧栏最近的会话里找它）：AI 会核对改动并提 ledger-fix 提案。' })
+        } catch (err) {
+          setSyncDialog((prev) => (prev ? { ...prev, sending: false } : prev))
+          setNotice({ tone: 'error', text: `发不出去：${friendlyError(err)}。可以复制工作单自己粘过去。` })
+        }
+      }
+      const ackSync = async () => {
+        setBusy('ack')
+        try {
+          await api('ledger.sync', scope(projectId, { action: 'ack' }))
+          setNotice({ tone: 'ok', text: '已标记为核对过；下次正文再动到这些名字/数字会重新提醒。' })
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `标记失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const openFullSync = () => {
+        setNotice(null)
+        setFullReplan(false)
+        setFullDialog(true)
+      }
+      const closeFull = () => setFullDialog(false)
+      const planFull = async () => {
+        setBusy('fullPlan')
+        try {
+          await api('ledger.sync', scope(projectId, { action: 'plan', batchSize: fullBatchSize }))
+          setFullReplan(false)
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `制定计划失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const openFullOrder = async () => {
+        setBusy('fullWork')
+        try {
+          const value = await api('ledger.sync', scope(projectId, { action: 'workorder', mode: 'full' }))
+          if (value && value.done) {
+            setFullDialog(false)
+            setNotice({ tone: 'ok', text: '全部批次已同步完成 🎉' })
+            refresh()
+            return
+          }
+          const batch = (value && value.batch) || {}
+          setFullPrompt({ text: String((value && value.prompt) || ''), batchIndex: batch.index || 1, batchLabel: `第 ${batch.from}–${batch.to} 章`, total: (full && full.total) || 0, confirming: false, sending: false, target: '' })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `生成工作单失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const sendFullOrder = async () => {
+        if (!fullPrompt) return
+        setFullPrompt((prev) => (prev ? { ...prev, sending: true } : prev))
+        try {
+          await sendToChat(projectId, { prompt: fullPrompt.text }, fullPrompt.target)
+          setFullPrompt(null)
+          setFullSent(fullPrompt.batchIndex)
+          setNotice({ tone: 'ok', text: `已发给 AI：它会读完${fullPrompt.batchLabel}再提账本提案。批准提案后回来点「本批已同步」。` })
+          refresh()
+        } catch (err) {
+          setFullPrompt((prev) => (prev ? { ...prev, sending: false } : prev))
+          setNotice({ tone: 'error', text: `发不出去：${friendlyError(err)}。可以复制工作单自己粘过去。` })
+        }
+      }
+      const doneFullBatch = async () => {
+        setBusy('fullDone')
+        try {
+          await api('ledger.sync', scope(projectId, { action: 'batch-done', batch: fullSent || undefined }))
+          setFullSent(null)
+          setNotice({ tone: 'ok', text: '已标记本批已同步' })
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `标记失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const resetFull = async () => {
+        setBusy('fullReset')
+        try {
+          await api('ledger.sync', scope(projectId, { action: 'reset' }))
+          closeFull()
+          setNotice({ tone: 'ok', text: '已清除全书同步计划；正文改动提醒不受影响。' })
+          refresh()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `清除失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const tabItems = LEDGER_TABS.map((row) => {
+        const value = row.id === 'map' ? (data && Array.isArray(data.locations) ? data.locations.length : 0) : data && Array.isArray(data[row.id]) ? data[row.id].length : 0
+        return { value: row.id, label: row.label, badge: String(value) }
+      })
+      const addLabel = kind === 'characters' ? '+ 新增人物卡' : kind === 'outlines' ? '+ 新增大纲条目' : `+ 新增${meta ? meta.title : '条目'}`
+
+      let body
+      if (ledgerRes.loading && !ledgerRes.data) body = h(Loading, null, '正在读取账本…')
+      else if (ledgerRes.error) body = h(ErrorBox, { error: ledgerRes.error, onRetry: () => ledgerRes.reload() })
+      else if (kind === 'map') body = h(MapView, { projectId, data, go, openChapter, onRefresh: refresh, pageArg: pageArg && pageArg.tabMap ? pageArg : pageArg })
+      else if (kind === 'characters') body = h(CharacterCards, { rows, onEdit: (row) => setForm({ kind, item: row, editing: true }), onNew: () => setForm({ kind, item: {}, editing: false }) })
+      else if (kind === 'events') body = h(TimelineView, { rows, openChapter, onEdit: (row) => setForm({ kind, item: row, editing: true }) })
+      else if (rows.length === 0) body = h(Empty, null, `${meta.title}账本还是空的`)
+      else body = h('div', { className: 'nd-table-wrap' },
+        h('table', { className: 'nd-table' },
+          h('thead', null, h('tr', null, meta.cols.map((col) => h('th', { key: col.k, style: col.w ? { width: col.w } : undefined }, col.t)), h('th', { style: { width: '160px' } }, '操作'))),
+          h('tbody', null, rows.map((row, index) => {
+            const key = ledgerRowKey(row) || String(index)
+            return h('tr', { key },
+              meta.cols.map((col) => h('td', { key: col.k, className: col.k === 'note' ? 'nd-cell-clip' : undefined }, ledgerCellText(row, col))),
+              h('td', null, h('div', { className: 'nd-row-actions' },
+                h(Btn, { small: true, onClick: () => setForm({ kind, item: row, editing: true }) }, '编辑'),
+                confirmKey === key
+                  ? h(Fragment, null, h(Btn, { small: true, kind: 'danger', onClick: () => remove(row), disabled: busy === 'del' }, '确认删除'), h(Btn, { small: true, onClick: () => setConfirmKey('') }, '取消'))
+                  : h(Btn, { small: true, onClick: () => setConfirmKey(key) }, '删除'),
+              )),
+            )
+          })),
+        ),
+      )
+
+      return h('div', { className: 'nd-page nd-ledger' },
+        h('div', { className: 'nd-page-head' },
+          h('div', null,
+            h('h2', null, '账本 · 资料库'),
+            h('p', { className: 'nd-hint' }, '事实库 / 人物卡 / 时间线 / 地点 / 世界地图 / 高光 / 冲突 / 伏笔 / 大纲。写作前 AI 会读这里；正文改到人名、地点、数字时，顶部会提醒同步。'),
+          ),
+          h('div', { className: 'nd-page-actions' },
+            h(Btn, { small: true, onClick: () => { ledgerRes.reload(); syncRes.reload() }, disabled: ledgerRes.loading }, '刷新'),
+            h(Btn, { small: true, onClick: openFullSync }, '📚 全书同步'),
+            isTable ? h(Btn, { small: true, kind: 'primary', onClick: () => setForm({ kind, item: {}, editing: false }) }, addLabel) : null,
+            kind === 'characters' ? h(Btn, { small: true, kind: 'primary', onClick: () => setForm({ kind, item: {}, editing: false }) }, addLabel) : null,
+          ),
+        ),
+        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        pending.length > 0
+          ? h('div', { className: 'nd-banner nd-banner-warn' },
+              h('span', null, `⚠ 第 ${pending.map((row) => row.chapter).join('、')} 章正文改到了账本里的名字/数字，可能需要同步`),
+              h('span', { className: 'nd-hint' }, pending.map((row) => (row.reasons || []).slice(0, 3).join('、')).filter(Boolean).join(' ｜ ')),
+              h(Btn, { small: true, onClick: openSync, disabled: busy === 'sync' }, busy === 'sync' ? '生成中…' : '让 AI 核对'),
+              h(Btn, { small: true, onClick: ackSync, disabled: busy === 'ack' }, '已核对，忽略'),
+            )
+          : null,
+        full && full.done < full.total
+          ? h('div', { className: 'nd-banner' },
+              h('span', null, `📚 全书账本同步进行中：已完成 ${full.done}/${full.total} 批（共 ${full.from}–${full.to} 章）`),
+              h(Btn, { small: true, onClick: openFullSync }, '继续'),
+            )
+          : !full && chapters >= 5
+            ? h('div', { className: 'nd-banner' },
+                h('span', null, '📄 正文已经写完？全书账本还是旧的，可以让 AI 分批核对一遍'),
+                h(Btn, { small: true, onClick: openFullSync }, '全书同步'),
+              )
+            : null,
+        h(Tabs, { value: kind, onChange: (next) => { setKind(next); setConfirmKey(''); setNotice(null); lsSet('nd.ledgerTab', next) }, items: tabItems }),
+        h('div', { className: 'nd-panel-box' },
+          body,
+        ),
+        form
+          ? h(LedgerForm, {
+              key: `${form.kind}:${(form.item && form.item.id) || 'new'}`,
+              meta: LEDGER_META[form.kind],
+              initial: form.item || {},
+              editing: !!form.editing,
+              busy: busy === 'save',
+              onCancel: () => setForm(null),
+              onSubmit: submit,
+            })
+          : null,
+        syncDialog
+          ? h(Modal, {
+              title: '账本同步工作单',
+              wide: true,
+              onClose: () => setSyncDialog(null),
+              footer: h(Fragment, null,
+                h(Btn, { onClick: async () => {
+                  const ok = await copyText(syncDialog.text)
+                  setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '工作单已复制' : '复制失败：请手动全选复制' })
+                } }, '复制'),
+                syncDialog.confirming ? h(Btn, { onClick: () => setSyncDialog((prev) => (prev ? { ...prev, confirming: false } : prev)) }, '返回改内容') : null,
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: syncDialog.sending,
+                  onClick: () => (syncDialog.confirming ? sendSync() : setSyncDialog((prev) => (prev ? { ...prev, confirming: true } : prev))),
+                }, syncDialog.sending ? '发送中…' : syncDialog.confirming ? '确定发送' : '下一步：确认发送'),
+              ),
+            },
+              h('p', { className: 'nd-hint' }, 'AI 会读改动后的正文和账本，只提有依据的 ledger-fix 提案；核对完不打算改就点「已核对，忽略」。'),
+              h('div', { className: syncDialog.confirming ? 'nd-send-confirm' : '' },
+                syncDialog.confirming ? h('p', { className: 'nd-hint' }, '最后一步：确认发给谁。点「确定发送」才会真的发出去。') : null,
+                h(TargetPicker, { projectId, value: syncDialog.target, onChange: (next) => setSyncDialog((prev) => (prev ? { ...prev, target: next } : prev)) }),
+              ),
+              h('pre', { className: 'nd-pre nd-pre-tall' }, syncDialog.text),
+            )
+          : null,
+        fullDialog
+          ? h(Modal, {
+              title: '全书账本同步',
+              wide: true,
+              onClose: closeFull,
+              footer: !full || fullReplan
+                ? h(Fragment, null,
+                    h(Btn, { onClick: full && fullReplan ? () => setFullReplan(false) : closeFull }, '取消'),
+                    h(Btn, { kind: 'primary', onClick: planFull, disabled: busy === 'fullPlan' }, busy === 'fullPlan' ? '制定中…' : full && fullReplan ? '重建计划' : '制定同步计划'),
+                  )
+                : h(Fragment, null,
+                    h(Btn, { small: true, onClick: resetFull, disabled: busy === 'fullReset' }, '清除计划'),
+                    h(Btn, { small: true, onClick: () => setFullReplan(true), disabled: !!busy }, '重新制定计划'),
+                    h(Btn, { small: true, onClick: doneFullBatch, disabled: busy === 'fullDone' || full.done >= full.total }, fullSent ? `第 ${fullSent} 批已同步` : '本批已同步'),
+                    h(Btn, { onClick: closeFull }, '关闭'),
+                    full.done < full.total ? h(Btn, { kind: 'primary', onClick: openFullOrder, disabled: busy === 'fullWork' }, busy === 'fullWork' ? '生成中…' : '发送下一批工作单') : null,
+                  ),
+            },
+              !full || fullReplan
+                ? h(Fragment, null,
+                    h('p', { className: 'nd-hint' }, '正文写完后，账本里的时间线 / 人物 / 事实 / 伏笔可能没跟上。全书同步会把正文按批切开，每批让 AI 读正文、只提有依据的 ledger-fix 提案；你批准提案后回来点「本批已同步」。'),
+                    h(Field, { label: '每批章数', hint: '批越大，AI 一次读的正文越多：省轮次，但也更容易看漏。' },
+                      h(Select, { value: String(fullBatchSize), onChange: (value) => setFullBatchSize(Number(value) || 6), options: [4, 6, 8, 10].map((n) => ({ value: String(n), label: `每批 ${n} 章` })) }),
+                    ),
+                    full && fullReplan ? h('p', { className: 'nd-hint' }, `现有计划每批 ${full.batchSize} 章、已完成 ${full.done}/${full.total} 批；重建时会保留「章号范围完全相同」的已完成批，改每批章数则进度重来。`) : null,
+                  )
+                : h(Fragment, null,
+                    h('p', { className: 'nd-hint' }, `已完成 ${full.done}/${full.total} 批 · 第 ${full.from}–${full.to} 章 · 每批 ${full.batchSize} 章`),
+                    full.uncovered && full.uncovered.length > 0 ? h('p', { className: 'nd-hint' }, `计划未覆盖第 ${full.uncovered.join('、')} 章，可点「重新制定计划」`) : null,
+                    h('div', { className: 'nd-hint', style: { display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '6px' } },
+                      (full.batches || []).map((b) => h('span', { key: b.index }, `第 ${b.index} 批 · 第 ${b.from}–${b.to} 章 · ${b.count} 章 · 约 ${b.words} 字 · ${b.status === 'done' ? '已同步' : '待同步'}`)),
+                    ),
+                  ),
+            )
+          : null,
+        fullPrompt
+          ? h(Modal, {
+              title: `全书账本同步 · 第 ${fullPrompt.batchIndex}/${fullPrompt.total} 批`,
+              wide: true,
+              onClose: () => setFullPrompt(null),
+              footer: h(Fragment, null,
+                h(Btn, { onClick: async () => { const ok = await copyText(fullPrompt.text); setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '工作单已复制' : '复制失败：请手动全选复制' }) } }, '复制'),
+                fullPrompt.confirming ? h(Btn, { onClick: () => setFullPrompt((prev) => (prev ? { ...prev, confirming: false } : prev)) }, '返回改内容') : null,
+                h(Btn, { kind: 'primary', disabled: fullPrompt.sending, onClick: () => (fullPrompt.confirming ? sendFullOrder() : setFullPrompt((prev) => (prev ? { ...prev, confirming: true } : prev))) },
+                  fullPrompt.sending ? '发送中…' : fullPrompt.confirming ? '确定发送' : '下一步：确认发送'),
+              ),
+            },
+              h('p', { className: 'nd-hint' }, 'AI 只读正文、补账本，不改正文；会提 ledger-fix 提案，你逐条批准。'),
+              h('div', { className: fullPrompt.confirming ? 'nd-send-confirm' : '' },
+                fullPrompt.confirming ? h('p', { className: 'nd-hint' }, '最后一步：确认发给谁。点「确定发送」才会真的发出去。') : null,
+                h(TargetPicker, { projectId, value: fullPrompt.target, onChange: (next) => setFullPrompt((prev) => (prev ? { ...prev, target: next } : prev)) }),
+              ),
+              h('pre', { className: 'nd-pre nd-pre-tall' }, fullPrompt.text),
+            )
+          : null,
+      )
+    }
+
+    // ── 页 7：账本 ────────────────────────────────────────────
+    function ledgerRowKey(row) {
+      if (!row) return ''
+      return String(row.id || row.name || row.title || row.subject || '')
+    }
+    function ledgerRowLabel(kind, row) {
+      if (!row) return '条目'
+      if (kind === 'facts') return `${row.subject || ''}·${row.attribute || ''}`
+      return row.name || row.title || row.id || '条目'
+    }
+    function ledgerCellText(row, col) {
+      const value = getPath(row, col.k)
+      if (typeof col.format === 'function') {
+        try {
+          return col.format(value)
+        } catch {
+          return '—'
+        }
+      }
+      if (col.options) {
+        const pair = col.options.find((opt) => opt[0] === value)
+        if (pair) return pair[1]
+      }
+      if (Array.isArray(value)) return value.filter(Boolean).join('、') || '—'
+      if (value && typeof value === 'object') return JSON.stringify(value).slice(0, 80)
+      return value == null || value === '' ? '—' : String(value)
+    }
+
+    function LedgerForm({ meta, initial, editing, busy, onCancel, onSubmit }) {
+      const [draft, setDraft] = useState(() => JSON.parse(JSON.stringify(initial || {})))
+      const [error, setError] = useState('')
+      const set = (path, value) => setDraft((cur) => setPath(cur, path, value))
+      const submit = () => {
+        for (const field of meta.fields) {
+          if (field.required && !String(getPath(draft, field.k) == null ? '' : getPath(draft, field.k)).trim()) {
+            setError(`请填写「${field.t}」`)
+            return
+          }
+        }
+        setError('')
+        onSubmit(draft)
+      }
+      const fields = meta.fields.map((field) => {
+        const value = getPath(draft, field.k)
+        let control
+        if (field.type === 'select') {
+          const options = [{ value: '', label: '—' }].concat(
+            (field.options || []).map((opt) => (Array.isArray(opt) ? { value: opt[0], label: opt[1] } : opt)),
+          )
+          control = h(Select, { value: value == null ? '' : value, onChange: (v) => set(field.k, v), options })
+        } else if (field.type === 'textarea') {
+          control = h(TextArea, { value: value == null ? '' : value, rows: field.rows || 3, onChange: (v) => set(field.k, v) })
+        } else if (field.type === 'tags') {
+          control = h(TextInput, { value: tagsText(value), placeholder: field.ph || '用「、」分隔', onChange: (v) => set(field.k, parseTags(v)) })
+        } else if (field.type === 'number') {
+          control = h(TextInput, { type: 'number', value: value == null ? '' : value, onChange: (v) => set(field.k, v === '' ? undefined : toNumber(v, 0)) })
+        } else {
+          control = h(TextInput, { value: value == null ? '' : value, placeholder: field.ph || '', onChange: (v) => set(field.k, v) })
+        }
+        return h(Field, { key: field.k, label: `${field.t}${field.required ? ' *' : ''}` }, control)
+      })
+      return h(
+        Modal,
+        {
+          title: `${editing ? '编辑' : '新增'}${meta.title}`,
+          wide: true,
+          onClose: onCancel,
+          footer: h('div', { className: 'nd-modal-actions' },
+            h(Btn, { onClick: onCancel }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submit, disabled: busy }, busy ? '保存中…' : '保存'),
+          ),
+        },
+        error ? h(Msg, { tone: 'error' }, error) : null,
+        h('div', { className: 'nd-form-grid' }, fields),
+      )
+    }
+    // ── 页 8：总览 ────────────────────────────────────────────
+    function fmtScalar(value) {
+      if (value == null || value === '') return '—'
+      if (typeof value === 'number') return Number.isInteger(value) ? fmtInt(value) : String(Math.round(value * 100) / 100)
+      if (typeof value === 'boolean') return value ? '是' : '否'
+      if (typeof value === 'string') return value
+      if (Array.isArray(value)) {
+        const text = value.map((v) => (v && typeof v === 'object' ? JSON.stringify(v) : String(v))).join('、')
+        return text ? text.slice(0, 240) : '—'
+      }
+      return JSON.stringify(value).slice(0, 240)
+    }
+    function KeyValue({ rows, emptyText }) {
+      if (!rows || rows.length === 0) return h('p', { className: 'nd-muted' }, emptyText || '暂无数据')
+      return h('div', { className: 'nd-kv' },
+        rows.map((row) => h('div', { className: 'nd-kv-row', key: row.key }, h('span', { className: 'nd-kv-k' }, row.key), h('span', { className: 'nd-kv-v' }, row.text))),
+      )
+    }
+
+    function OverviewTab({ projectId, project, context, toc, go, onNewBook, onChanged }) {
+      const [baseBusy, setBaseBusy] = useState(false)
+      const [baseNotice, setBaseNotice] = useState(null)
+      const reviewsRes = useAsync(() => api('review.list', scope(projectId)), [projectId])
+      const proposalsRes = useAsync(() => api('proposal.list', scope(projectId, { status: 'pending', filter: { status: 'pending' } })), [projectId])
+      const usageRes = useAsync(() => api('usage.summary', scope(projectId)), [projectId])
+      const alignRes = useAsync(() => api('align.status', scope(projectId)), [projectId])
+
+      const reviews = toList(reviewsRes.data, 'reviews')
+      const proposals = toList(proposalsRes.data, 'proposals')
+      const openReviews = reviews.filter((rv) => !rv.status || rv.status === 'open' || rv.status === 'proposed')
+      const pendingProposals = proposals.filter((p) => PROPOSAL_KINDS.includes(p.kind) && (!p.status || p.status === 'pending'))
+      const attention = context && Array.isArray(context.attention) ? context.attention : []
+      const scored = attention
+        .map((row) => ({ chapter: toNumber(row.chapter, 0), score: attentionScore(row) }))
+        .filter((row) => row.chapter > 0 && row.score != null)
+        .sort((a, b) => a.chapter - b.chapter)
+      const avgScore = scored.length ? Math.round(scored.reduce((sum, row) => sum + row.score, 0) / scored.length) : null
+      const unscoredCount = Math.max(0, toc.length - scored.length)
+      const totalWords = toc.reduce((sum, row) => sum + (toNumber(row.words, 0) || toNumber(row.meta && row.meta.words, 0)), 0)
+      const writtenCount = toc.filter((row) => ['written', 'reviewed', 'revised', 'done', 'final', '定稿'].includes(row.status)).length
+      const ledgerCount = ['characters', 'facts', 'events', 'foreshadow', 'conflicts', 'locations'].reduce((sum, k) => {
+        const arr = context && Array.isArray(context[k]) ? context[k] : []
+        return sum + arr.length
+      }, 0)
+      const routeCounts = ROUTES.map((route) => ({
+        ...route,
+        count: openReviews.filter((rv) => normalRoute(rv) === route.id).length,
+      }))
+      const weakest = scored.slice().sort((a, b) => a.score - b.score).slice(0, 4)
+
+      const curveRows = scored.slice(-40)
+      let curve = null
+      if (curveRows.length >= 2) {
+        const w = 620
+        const hgt = 180
+        const padLeft = 34
+        const padRight = 12
+        const padTop = 12
+        const padBottom = 26
+        const pts = curveRows.map((row, i) => ({
+          x: Math.round(padLeft + (i / (curveRows.length - 1)) * (w - padLeft - padRight)),
+          y: Math.round(padTop + (1 - clamp(row.score / 100, 0, 1)) * (hgt - padTop - padBottom)),
+          chapter: row.chapter,
+          score: row.score,
+        }))
+        curve = { w, h: hgt, pts, padLeft, padRight, padTop, padBottom }
+      }
+
+      const align = alignRes.data && typeof alignRes.data === 'object' ? alignRes.data : null
+      const counts = (align && align.ledgerCounts) || {}
+      const alignRows = align
+        ? [
+            { key: '章节 / 字数', text: `${fmtInt(align.chapters)} 章 · ${fmtInt(align.words)} 字` },
+            { key: '待处理审阅', text: fmtInt(align.openReviews) },
+            { key: '待批准提案', text: fmtInt(align.pendingProposals) },
+            { key: '平均注意力', text: align.attentionAvg == null ? '暂无评分' : `${align.attentionAvg} 分` },
+            { key: '注意力覆盖', text: `${fmtInt(align.attention && align.attention.scored)} / ${fmtInt(align.chapters)} 章` },
+            { key: '账本条目', text: `${LEDGER_KINDS.reduce((sum, kind) => sum + toNumber(counts[kind], 0), 0)} 条` },
+          ]
+        : []
+
+      const usage = usageRes.data && typeof usageRes.data === 'object' ? usageRes.data : null
+      const usageRows = usage && (toNumber(usage.calls, 0) || toNumber(usage.tokens, 0))
+        ? [
+            { key: '调用次数', text: fmtInt(usage.calls) },
+            { key: '总 tokens', text: fmtInt(usage.tokens) },
+            { key: '输入 / 输出', text: `${fmtInt(usage.inputTokens)} / ${fmtInt(usage.outputTokens)}` },
+            { key: '缓存读 / 写', text: `${fmtInt(usage.cacheReadTokens)} / ${fmtInt(usage.cacheWriteTokens)}` },
+            { key: '花费', text: `¥${toNumber(usage.costCNY, 0).toFixed(2)}` },
+            { key: '最近一次', text: usage.lastAt ? fmtAgo(usage.lastAt) : '—' },
+          ]
+        : []
+
+      // 空书底座：老作品 / 旧版本建的书可能还没有工作区，也没有设定与大纲；这里一键补发工作单
+      const presets = context && Array.isArray(context.presets) ? context.presets : []
+      const activePreset = presets.find((row) => String(row.id) === String(project && project.activePresetId)) || null
+      const customPreset = !activePreset || ['preset-custom', 'preset-ai-custom'].includes(String(project && project.activePresetId))
+      const sendBase = async () => {
+        if (baseBusy) return
+        setBaseBusy(true)
+        setBaseNotice(null)
+        try {
+          const sent = await api('chat.send', {
+            projectId,
+            workorder: 'newBookWorkorder',
+            brief: String((project && (project.description || project.logline)) || ''),
+            preset: customPreset ? { id: 'preset-ai-custom', name: '自定义（让 AI 定）', custom: true } : activePreset,
+            newSession: true,
+          })
+          setBaseNotice({ tone: 'ok', text: sent && sent.workspacePath ? `工作单已发到这本书的工作区（${sent.workspacePath}）里新开的对话。` : '工作单已发到这本书工作区里的新对话。' })
+          if (typeof onChanged === 'function') onChanged()
+        } catch (error) {
+          setBaseNotice({ tone: 'warn', text: `工作单没有发出去：${friendlyError(error)}` })
+        } finally {
+          setBaseBusy(false)
+        }
+      }
+
+      const statCard = (label, value, hint) =>
+        h('div', { className: 'nd-stat', key: label }, h('span', { className: 'nd-stat-label' }, label), h('strong', { className: 'nd-stat-value' }, value), hint ? h('span', { className: 'nd-stat-hint' }, hint) : null)
+
+      return h('div', { className: 'nd-page nd-overview' },
+        h('div', { className: 'nd-page-head' },
+          h(
+            'div',
+            null,
+            h('h2', null, (project && project.title) || '总览'),
+            h('p', { className: 'nd-hint' }, `只读统计 · ${project && project.genre ? project.genre + ' · ' : ''}${toc.length} 章 · 写作请到「正文 / 审阅 / 提案」页`),
+          ),
+          h('div', { className: 'nd-page-actions' },
+            onNewBook ? h(Btn, { small: true, kind: 'primary', onClick: onNewBook, title: '选预设、写一段想法，创建新作品并让 AI 生成世界/人物/大纲' }, '＋ 开新书') : null,
+            h(
+              Btn,
+              {
+                small: true,
+                onClick: () => {
+                  reviewsRes.reload()
+                  proposalsRes.reload()
+                  usageRes.reload()
+                  alignRes.reload()
+                },
+                disabled: reviewsRes.loading || proposalsRes.loading,
+              },
+              '刷新',
+            ),
+            h(Btn, { small: true, onClick: () => go('read') }, '去写正文'),
+          ),
+        ),
+        h('section', { className: 'nd-hero' },
+          h('div', { className: 'nd-hero-main' },
+            h('div', { className: 'nd-hero-slogan' }, '⚡ ATTENTION IS ALL YOU NEED'),
+            h('p', { className: 'nd-hero-sub' }, '每章先定注意力（钩子 / 张力 / 回报 / 章末牵引），再写正文；事实自洽是底线，不是目标。'),
+          ),
+          h('div', { className: 'nd-hero-stats' },
+            h('div', { className: 'nd-hero-stat' }, h('span', null, '平均注意力'), h('strong', null, avgScore == null ? '—' : `${avgScore} 分`)),
+            h('div', { className: 'nd-hero-stat' }, h('span', null, '最低三章'), h('strong', null, weakest.length ? weakest.slice(0, 3).map((row) => `第${row.chapter}章`).join(' / ') : '—')),
+            h('div', { className: 'nd-hero-stat' }, h('span', null, '未测章数'), h('strong', null, String(unscoredCount))),
+          ),
+        ),
+        toc.length === 0
+          ? h('div', { className: 'nd-card', style: { marginBottom: 12 } },
+              h('div', { className: 'nd-card-head' }, h('strong', null, '这本新书还没有正文与设定')),
+              h('p', { className: 'nd-hint' }, '点下面的按钮，会在「这本书自己的工作区」里新开一个对话，把开新书底座工作单发过去：AI 提交方案（自定义时）与世界 / 地点 / 人物 / 全书大纲 / 伏笔，全部进提案，你批准后才写进账本。'),
+              h('div', { className: 'nd-form-row', style: { gap: 8 } },
+                h(Btn, { kind: 'primary', onClick: sendBase, disabled: baseBusy }, baseBusy ? '正在发…' : '发工作单：生成设定与大纲'),
+                customPreset ? h('span', { className: 'nd-hint' }, '当前是「自定义」口径：AI 会先出方案提案') : null,
+              ),
+              baseNotice ? h(Msg, { tone: baseNotice.tone, onClose: () => setBaseNotice(null) }, baseNotice.text) : null,
+            )
+          : null,
+        h('div', { className: 'nd-stat-grid' },
+          statCard('章节总数', fmtInt(toc.length), `${writtenCount} 章已成稿`),
+          statCard('全书字数', fmtWords(totalWords), `约 ${fmtInt(totalWords)} 字`),
+          statCard('待处理审阅', fmtInt(openReviews.length), '四路审阅合计'),
+          statCard('待批准提案', fmtInt(pendingProposals.length), '采纳前不会改正文'),
+          statCard('平均注意力', avgScore == null ? '—' : String(avgScore), scored.length ? `${scored.length} 章有评分` : '尚无评分'),
+          statCard('设定条目', fmtInt(ledgerCount), '人物 / 事实 / 事件 / 伏笔 / 冲突 / 地点'),
+        ),
+        h('div', { className: 'nd-two-col' },
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' }, h('h3', null, '📈 注意力曲线'), h('span', { className: 'nd-hint' }, `最近 ${Math.min(scored.length, 40)} 章`), h(Btn, { small: true, onClick: () => go('reviews', { source: 'all', recheck: 1 }) }, '冷读打分')),
+            curve
+              ? h('svg', { className: 'nd-curve', viewBox: `0 0 ${curve.w} ${curve.h}`, preserveAspectRatio: 'xMidYMid meet' },
+                  [0, 25, 50, 75, 100].map((level) => {
+                    const y = Math.round(curve.padTop + (1 - level / 100) * (curve.h - curve.padTop - curve.padBottom))
+                    return h(Fragment, { key: `g${level}` },
+                      h('line', { x1: curve.padLeft, x2: curve.w - curve.padRight, y1: y, y2: y, className: 'nd-curve-grid' }),
+                      h('text', { x: curve.padLeft - 6, y: y + 3, textAnchor: 'end', className: 'nd-curve-axis-label' }, String(level)),
+                    )
+                  }),
+                  h('line', { x1: curve.padLeft, x2: curve.padLeft, y1: curve.padTop, y2: curve.h - curve.padBottom, className: 'nd-curve-axis' }),
+                  h('line', { x1: curve.padLeft, x2: curve.w - curve.padRight, y1: curve.h - curve.padBottom, y2: curve.h - curve.padBottom, className: 'nd-curve-axis' }),
+                  h('text', { x: 10, y: curve.padTop + 4, className: 'nd-curve-axis-label' }, '分'),
+                  h('polyline', { points: curve.pts.map((p) => `${p.x},${p.y}`).join(' '), className: 'nd-curve-line', fill: 'none' }),
+                  curve.pts.map((p) => h('circle', { key: `p${p.chapter}`, cx: p.x, cy: p.y, r: 3, className: 'nd-curve-dot' },
+                    h('title', null, `第 ${p.chapter} 章 · ${p.score} 分`),
+                  )),
+                  (() => {
+                    const step = Math.max(1, Math.ceil(curve.pts.length / 8))
+                    return curve.pts.filter((_, index) => index % step === 0 || index === curve.pts.length - 1).map((p) =>
+                      h('text', { key: `x${p.chapter}`, x: p.x, y: curve.h - 8, textAnchor: 'middle', className: 'nd-curve-axis-label' }, String(p.chapter)),
+                    )
+                  })(),
+                  h('text', { x: curve.w - curve.padRight, y: curve.h - 8, textAnchor: 'end', className: 'nd-curve-axis-label' }, '章'),
+                )
+              : h(Empty, null, '注意力数据不足两章，暂时画不出曲线：点上方「冷读打分」让 AI 零上下文通读打分，或在正文页侧栏手动记实测分。'),
+            weakest.length
+              ? h('div', { className: 'nd-weak-list' },
+                  h('span', { className: 'nd-hint' }, '最弱章节：'),
+                  weakest.map((row) =>
+                    h('button', { key: `w${row.chapter}`, type: 'button', className: 'nd-linkbtn', onClick: () => go('read', { chapter: row.chapter }) },
+                      `第 ${row.chapter} 章 · ${row.score} 分`,
+                    ),
+                  ),
+                )
+              : null,
+          ),
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' }, h('h3', null, '🔎 待办')),
+            h('div', { className: 'nd-todo-group' }, h('span', { className: 'nd-hint' }, `待处理审阅 ${openReviews.length} 条`)),
+            openReviews.length
+              ? openReviews.slice(0, 6).map((rv, i) =>
+                  h(
+                    'button',
+                    {
+                      key: rv.id || `r${i}`,
+                      type: 'button',
+                      className: 'nd-todo-item',
+                      onClick: () => go('reviews', { chapter: chapterNo(rv) || 0 }),
+                    },
+                    h(Tag, { tone: SEV_TONE[rv.severity] || 'muted' }, SEV_LABEL[rv.severity] || rv.severity || '意见'),
+                    h('span', { className: 'nd-todo-text' }, `第 ${chapterNo(rv) || '全书'} 章 · ${String(rv.issue || '').slice(0, 40)}`),
+                  ),
+                )
+              : h('p', { className: 'nd-muted' }, '没有待处理审阅'),
+            h('div', { className: 'nd-todo-group' }, h('span', { className: 'nd-hint' }, `待批准提案 ${pendingProposals.length} 条`)),
+            pendingProposals.length
+              ? pendingProposals.slice(0, 6).map((p) =>
+                  h('button', { key: p.id, type: 'button', className: 'nd-todo-item', onClick: () => go('proposals') },
+                    h(Tag, { tone: 'brand' }, PROPOSAL_KIND[p.kind] || p.kind),
+                    h('span', { className: 'nd-todo-text' }, `第 ${chapterNo(p) || '全书'} 章 · ${p.title || p.summary || '提案'}`),
+                  ),
+                )
+              : h('p', { className: 'nd-muted' }, '没有待批准提案'),
+            h('div', { className: 'nd-route-bars' },
+              routeCounts.map((route) =>
+                h('div', { className: 'nd-route-row', key: route.id },
+                  h('span', { className: 'nd-route-label' }, `${route.icon} ${route.label}`),
+                  h(Bar, { value: route.count, max: Math.max(1, ...routeCounts.map((r) => r.count)) }),
+                  h('span', { className: 'nd-route-count' }, String(route.count)),
+                ),
+              ),
+            ),
+          ),
+        ),
+        h('div', { className: 'nd-two-col' },
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' }, h('h3', null, '💳 用量'), usageRes.loading ? h('span', { className: 'nd-hint' }, '读取中…') : null),
+            usageRes.error ? h(ErrorBox, { error: usageRes.error, onRetry: () => usageRes.reload() }) : h(KeyValue, { rows: usageRows, emptyText: '还没有用量记录' }),
+          ),
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' }, h('h3', null, '🧭 版本对齐'), alignRes.loading ? h('span', { className: 'nd-hint' }, '读取中…') : null),
+            alignRes.error ? h(ErrorBox, { error: alignRes.error, onRetry: () => alignRes.reload() }) : h(KeyValue, { rows: alignRows, emptyText: '还没有对齐记录' }),
+          ),
+        ),
+      )
+    }
+    // ── 页 9：设置 ────────────────────────────────────────────
+    // 预设 = 写作约定（改预设不改正文）。这里是「绝对模板」：照着填就能自定义。
+    const PRESET_TEMPLATE = `{
+  // ── 身份 ─────────────────────────────────────────
+  "id": "preset-my-own",          // 唯一 id：小写英文/数字/-，不要重复
+  "name": "我的预设",              // 界面上显示的名字
+  "desc": "一句话说明这个预设适合什么题材", // 显示在预设卡片上
+
+  // ── 规模 ─────────────────────────────────────────
+  "genre": "悬疑",                // 题材标签（可空）
+  "plannedChapters": 60,          // 计划章数（写作工作单会参考）
+  "chapterWords": 3000,           // 每章目标字数
+  "totalWords": 180000,           // 全书目标字数（plannedChapters × chapterWords）
+
+  // ── 叙事视角与节奏 ───────────────────────────────
+  "pov": "第三人称限知",           // 第一人称限知 / 第三人称限知 / 第三人称全知
+  "tense": "过去时",
+  "pacing": {
+    "openingChapters": 4,          // 开头几章完成入场
+    "escalationEvery": 6,          // 每几章升一次压力
+    "midpointRatio": 0.5,          // 中点转折在全书的位置（0–1）
+    "climaxRatio": 0.9             // 高潮位置（0–1）
+  },
+
+  // ── 风格规则（会被拼进 AI 工作单） ────────────────
+  "styleRules": [
+    "短句为主，少形容词；不解释情绪，只写动作与物件",
+    "每章至少一个具体钩子，章末留牵引"
+  ],
+
+  // ── 禁忌（AI 写了就要被判 AI 味 / 退回） ──────────
+  "taboo": ["套话式总结", "现代网络用语", "Markdown 强调与标题"],
+
+  // ── 审阅重点（四路审阅时优先看什么） ──────────────
+  "reviewFocus": ["事实与连续性", "注意力四拍", "去 AI 味", "读者体验"],
+
+  // ── 人物功能（不是人物卡，是「这类角色必须承担什么」） ──
+  "characters": {
+    "protagonist": "目标明确但有一个致命缺陷；前十章要看见缺陷的代价",
+    "antagonist": "压力持续升级，不能只出现一次",
+    "supporting": "每人一个功能：给信息 / 制造阻力 / 情感锚点"
+  },
+
+  // ── 备注 ─────────────────────────────────────────
+  "notes": "自定义预设的验收口径写在这里"
+}`
+    function PresetDialog({ title, initial, busy, onCancel, onSubmit }) {
+      const [draft, setDraft] = useState(() => ({
+        id: String((initial && initial.id) || `preset-custom-${Date.now().toString(36)}`),
+        name: String((initial && initial.name) || ''),
+        desc: String((initial && initial.desc) || ''),
+        genre: String((initial && initial.genre) || ''),
+        plannedChapters: toNumber(initial && initial.plannedChapters, 0),
+        chapterWords: toNumber(initial && initial.chapterWords, 0),
+        pov: String((initial && initial.pov) || '第三人称限知'),
+        tense: String((initial && initial.tense) || '过去时'),
+        styleRules: (Array.isArray(initial && initial.styleRules) ? initial.styleRules : []).join('\n'),
+        taboo: (Array.isArray(initial && initial.taboo) ? initial.taboo : []).join('\n'),
+        reviewFocus: (Array.isArray(initial && initial.reviewFocus) ? initial.reviewFocus : []).join('\n'),
+        protagonist: String((initial && initial.characters && initial.characters.protagonist) || ''),
+        antagonist: String((initial && initial.characters && initial.characters.antagonist) || ''),
+        supporting: String((initial && initial.characters && initial.characters.supporting) || ''),
+        notes: String((initial && initial.notes) || ''),
+      }))
+      const set = (key, value) => setDraft((cur) => ({ ...cur, [key]: value }))
+      const lines = (value) => String(value || '').split('\n').map((line) => line.trim()).filter(Boolean)
+      const submit = () => {
+        if (!String(draft.name).trim()) return
+        onSubmit({
+          ...draft,
+          name: String(draft.name).trim(),
+          totalWords: toNumber(draft.plannedChapters, 0) * toNumber(draft.chapterWords, 0),
+          styleRules: lines(draft.styleRules),
+          taboo: lines(draft.taboo),
+          reviewFocus: lines(draft.reviewFocus),
+          characters: { protagonist: draft.protagonist, antagonist: draft.antagonist, supporting: draft.supporting },
+        })
+      }
+      return h(Modal, {
+        title,
+        wide: true,
+        onClose: onCancel,
+        footer: h(Fragment, null,
+          h(Btn, { onClick: onCancel }, '取消'),
+          h(Btn, { kind: 'primary', onClick: submit, disabled: busy || !String(draft.name).trim() }, busy ? '保存中…' : '保存预设'),
+        ),
+      },
+        h('div', { className: 'nd-form-grid' },
+          h(Field, { label: '预设名称（必填）' }, h(TextInput, { value: draft.name, onChange: (v) => set('name', v), placeholder: '例：冷峻悬疑' })),
+          h(Field, { label: '题材标签' }, h(TextInput, { value: draft.genre, onChange: (v) => set('genre', v), placeholder: '悬疑 / 武侠 / 现实' })),
+          h(Field, { label: '计划章数' }, h(TextInput, { type: 'number', value: draft.plannedChapters, onChange: (v) => set('plannedChapters', toNumber(v, 0)) })),
+          h(Field, { label: '每章目标字数' }, h(TextInput, { type: 'number', value: draft.chapterWords, onChange: (v) => set('chapterWords', toNumber(v, 0)) })),
+          h(Field, { label: '视角' }, h(TextInput, { value: draft.pov, onChange: (v) => set('pov', v) })),
+          h(Field, { label: '时态' }, h(TextInput, { value: draft.tense, onChange: (v) => set('tense', v) })),
+        ),
+        h(Field, { label: '一句话说明' }, h(TextInput, { value: draft.desc, onChange: (v) => set('desc', v), placeholder: '这个预设适合什么题材、解决什么写作问题' })),
+        h(Field, { label: '风格规则（每行一条）', hint: '会被拼进 AI 工作单' }, h(TextArea, { value: draft.styleRules, rows: 4, onChange: (v) => set('styleRules', v) })),
+        h(Field, { label: '禁忌（每行一条）', hint: 'AI 写了就要退回重写' }, h(TextArea, { value: draft.taboo, rows: 3, onChange: (v) => set('taboo', v) })),
+        h(Field, { label: '审阅重点（每行一条）' }, h(TextArea, { value: draft.reviewFocus, rows: 2, onChange: (v) => set('reviewFocus', v) })),
+        h(Field, { label: '主角必须承担什么' }, h(TextInput, { value: draft.protagonist, onChange: (v) => set('protagonist', v) })),
+        h(Field, { label: '反派/压力必须怎么升级' }, h(TextInput, { value: draft.antagonist, onChange: (v) => set('antagonist', v) })),
+        h(Field, { label: '配角各自的功能' }, h(TextInput, { value: draft.supporting, onChange: (v) => set('supporting', v) })),
+        h(Field, { label: '验收口径 / 备注' }, h(TextArea, { value: draft.notes, rows: 2, onChange: (v) => set('notes', v) })),
+      )
+    }
+
+    function SettingsTab({ projectId, project, context, toc, refreshContext, openProject }) {
+      const settingsRes = useAsync(() => api('settings.get', scope(projectId)), [projectId])
+      const [form, setForm] = useState(null)
+      const [saving, setSaving] = useState(false)
+      const [notice, setNotice] = useState(null)
+      const [importPath, setImportPath] = useState('')
+      const [importing, setImporting] = useState(false)
+      const [importInfo, setImportInfo] = useState('')
+      const [importedId, setImportedId] = useState('')
+      const [presetDialog, setPresetDialog] = useState(null) // { initial, title }
+      const [presetBusy, setPresetBusy] = useState(false)
+
+      // 导入旧稿：只读扫描 → 明确点「导入」才写（新建一部作品，原目录不动）
+      const runImport = async (apply) => {
+        const rootPath = importPath.trim()
+        if (!rootPath) return setImportInfo('先填一个目录：它下面要有 chapters/0001.md（或 .txt）')
+        setImporting(true)
+        setImportInfo('')
+        try {
+          if (!apply) {
+            const scan = await api('import.scan', { rootPath })
+            setImportInfo(`扫描到 ${scan.files.length} 章、${scan.totalWords} 字${scan.project && scan.project.title ? `，作品名《${scan.project.title}》` : ''}`)
+            return
+          }
+          const done = await api('import.run', { rootPath })
+          setImportInfo(`已导入《${done.title}》：${done.chapters} 章 / ${done.words} 字`)
+          setImportedId(done.projectId)
+        } catch (err) {
+          setImportInfo(`导入失败：${friendlyError(err)}`)
+        } finally {
+          setImporting(false)
+        }
+      }
+
+      const presetList = useMemo(() => {
+        const fromSettings = settingsRes.data && Array.isArray(settingsRes.data.presets) ? settingsRes.data.presets : null
+        const fromContext = context && Array.isArray(context.presets) ? context.presets : null
+        return (fromSettings || fromContext || []).filter((row) => row && typeof row === 'object')
+      }, [settingsRes.data, context])
+      const activePresetId = (settingsRes.data && settingsRes.data.project && settingsRes.data.project.activePresetId) || (project && project.activePresetId) || ''
+      const savePresets = async (list) => {
+        await api('settings.save', { projectId, presets: list })
+        settingsRes.reload()
+        return true
+      }
+      const applyPreset = async (preset) => {
+        setPresetBusy(true)
+        setNotice(null)
+        try {
+          await api('settings.save', {
+            projectId,
+            presets: presetList,
+            project: {
+              activePresetId: preset.id,
+              plannedChapters: toNumber(preset.plannedChapters, 0),
+              chapterWords: toNumber(preset.chapterWords, 0),
+              pov: preset.pov ? String(preset.pov) : undefined,
+              tense: preset.tense ? String(preset.tense) : undefined,
+              style: Array.isArray(preset.styleRules) ? preset.styleRules.join('；') : undefined,
+            },
+          })
+          settingsRes.reload()
+          setForm(null)
+          if (refreshContext) refreshContext()
+          setNotice({ tone: 'ok', text: `已应用预设：${preset.name || preset.id}（不动正文，只改写作约定）` })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `应用预设失败：${friendlyError(err)}` })
+        } finally {
+          setPresetBusy(false)
+        }
+      }
+      const savePresetDraft = async (draft) => {
+        setPresetBusy(true)
+        setNotice(null)
+        try {
+          const existing = presetList.findIndex((row) => String(row.id) === String(draft.id))
+          const now = new Date().toISOString()
+          const next = presetList.slice()
+          if (existing >= 0) next[existing] = { ...next[existing], ...draft, updatedAt: now }
+          else next.push({ ...draft, createdAt: now, updatedAt: now })
+          await savePresets(next)
+          setPresetDialog(null)
+          setNotice({ tone: 'ok', text: `预设已保存：${draft.name}` })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `保存预设失败：${friendlyError(err)}` })
+        } finally {
+          setPresetBusy(false)
+        }
+      }
+
+      useEffect(() => {
+        if (form) return
+        const value = settingsRes.data
+        if (!value && !context && !project) return
+        const src = value && typeof value === 'object' ? value : {}
+        const proj = (src.project && typeof src.project === 'object' ? src.project : null) || (context && context.project) || project || {}
+        const presetList =
+          (Array.isArray(src.presets) ? src.presets : null) ||
+          (context && Array.isArray(context.presets) ? context.presets : null) ||
+          []
+        const preset = presetList[0] && typeof presetList[0] === 'object' ? presetList[0] : {}
+        const budget = (src.budget && typeof src.budget === 'object' ? src.budget : null) || (proj.budget && typeof proj.budget === 'object' ? proj.budget : {})
+        const styleText =
+          typeof proj.style === 'string'
+            ? proj.style
+            : Array.isArray(preset.styleRules)
+              ? preset.styleRules.join('；')
+              : ''
+        setForm({
+          title: String(proj.title != null ? proj.title : proj.name != null ? proj.name : ''),
+          genre: String(proj.genre || ''),
+          style: styleText,
+          chapterWords: toNumber(preset.chapterWords != null ? preset.chapterWords : proj.chapterWords, 0),
+          plannedChapters: toNumber(preset.plannedChapters != null ? preset.plannedChapters : proj.plannedChapters, 0),
+          budget: { maxTokens: toNumber(budget.maxTokens, 0), maxCostCNY: toNumber(budget.maxCostCNY, 0) },
+        })
+      }, [form, settingsRes.data, context, project])
+
+      const set = (path, value) => setForm((cur) => (cur ? setPath(cur, path, value) : cur))
+      const save = async () => {
+        if (!form) return
+        setSaving(true)
+        setNotice(null)
+        try {
+          const data = settingsRes.data && typeof settingsRes.data === 'object' ? settingsRes.data : {}
+          const presetList =
+            (Array.isArray(data.presets) ? data.presets : null) ||
+            (context && Array.isArray(context.presets) ? context.presets : null) ||
+            []
+          const base = presetList[0] && typeof presetList[0] === 'object' ? presetList[0] : null
+          const presets = base ? [{ ...base, plannedChapters: form.plannedChapters, chapterWords: form.chapterWords }] : null
+          const payload = {
+            project: { title: form.title, genre: form.genre, style: form.style },
+            budget: form.budget,
+          }
+          if (presets) payload.presets = presets
+          await api('settings.save', scope(projectId, payload))
+          settingsRes.reload()
+          if (refreshContext) refreshContext()
+          setNotice({ tone: 'ok', text: '设置已保存' })
+        } catch (err) {
+          setNotice({ tone: 'error', text: `保存失败：${friendlyError(err)}` })
+        } finally {
+          setSaving(false)
+        }
+      }
+
+      const rootValue =
+        (settingsRes.data && (settingsRes.data.dataRoot || settingsRes.data.root || settingsRes.data.dataDir)) ||
+        (project && (project.root || project.dataDir)) ||
+        '~/StoryDesk'
+      const realProject = (settingsRes.data && settingsRes.data.project) || project || null
+      const projectRows = realProject
+        ? [
+            { key: '作品 id', text: String(realProject.id || projectId) },
+            { key: '数据目录', text: String(rootValue) },
+            { key: '章节数', text: `${toc.length} 章` },
+            { key: '创建时间', text: realProject.createdAt ? String(realProject.createdAt) : '—' },
+          ]
+        : []
+
+      return h('div', { className: 'nd-page nd-settings' },
+        h('div', { className: 'nd-page-head' },
+          h('div', null, h('h2', null, '设置'), h('p', { className: 'nd-hint' }, '作品级写作参数；预算只约束 AI 动作的上限。')),
+          h('div', { className: 'nd-page-actions' }, h(Btn, { small: true, kind: 'primary', onClick: save, disabled: saving || !form }, saving ? '保存中…' : '保存设置')),
+        ),
+        notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
+        settingsRes.error ? h(ErrorBox, { error: settingsRes.error, onRetry: () => settingsRes.reload() }) : null,
+        !form && settingsRes.loading ? h(Loading, null, '正在读取设置…') : null,
+        form
+          ? h('div', { className: 'nd-two-col' },
+              h('section', { className: 'nd-card' },
+                h('div', { className: 'nd-card-head' }, h('h3', null, '✍️ 作品参数')),
+                h(Field, { label: '作品标题' }, h(TextInput, { value: form.title, onChange: (v) => set('title', v), placeholder: '作品标题' })),
+                h(Field, { label: '类型' }, h(TextInput, { value: form.genre, onChange: (v) => set('genre', v), placeholder: '如 古代言情 / 都市悬疑' })),
+                h(Field, { label: '风格要求', hint: '会作为写作预设的一部分传给 AI' }, h(TextArea, { value: form.style, rows: 4, onChange: (v) => set('style', v) })),
+                h(Field, { label: '计划章数' }, h(TextInput, { type: 'number', value: form.plannedChapters, onChange: (v) => set('plannedChapters', toNumber(v, 0)) })),
+                h(Field, { label: '每章目标字数' }, h(TextInput, { type: 'number', value: form.chapterWords, onChange: (v) => set('chapterWords', toNumber(v, 0)) })),
+              ),
+              h(
+                'div',
+                null,
+                h('section', { className: 'nd-card' },
+                  h('div', { className: 'nd-card-head' }, h('h3', null, '📤 导出正文')),
+                  h('p', { className: 'nd-hint' }, '把全部章节导出成成品：TXT / Markdown / EPUB / DOCX。正文纯文本，成品不会漏出写作期的 Markdown 标记。'),
+                  h(ExportQuick, { projectId }),
+                ),
+                h('section', { className: 'nd-card' },
+                  h('div', { className: 'nd-card-head' }, h('h3', null, '📥 导入旧稿')),
+                  h('p', { className: 'nd-hint' }, '任何作品都能导入：给一个目录或单个 .md / .txt 文件即可，不要求 0001.md 这种命名。目录会按自然顺序每个文件当一章；单文件可以按「第X章」标题自动拆章。扫描只读，导入会新建一部作品，原目录不动。'),
+                  h('div', { className: 'nd-form-row' },
+                    h(TextInput, { value: importPath, onChange: setImportPath, placeholder: '/path/to/旧稿目录 或 一本书.md' }),
+                    h(Btn, { small: true, onClick: () => runImport(false), disabled: importing }, '扫描'),
+                    h(Btn, { small: true, kind: 'primary', onClick: () => runImport(true), disabled: importing }, importing ? '导入中…' : '导入'),
+                  ),
+                  importInfo ? h('p', { className: 'nd-hint' }, importInfo) : null,
+                  importedId && openProject ? h(Btn, { small: true, onClick: () => openProject(importedId) }, '打开新作品') : null,
+                ),
+                h('section', { className: 'nd-card' },
+                  h('div', { className: 'nd-card-head' }, h('h3', null, '💰 预算上限')),
+                  h('p', { className: 'nd-hint' },
+                    '预算只用于全文动作（从头写 / 扩写 / 改写）；正文页的动作按单章预算走。',
+                  ),
+                  h(Field, { label: '最大 tokens' }, h(TextInput, { type: 'number', value: form.budget && form.budget.maxTokens, onChange: (v) => set('budget.maxTokens', toNumber(v, 0)) })),
+                  h(Field, { label: '最大花费（元）' }, h(TextInput, { type: 'number', value: form.budget && form.budget.maxCostCNY, onChange: (v) => set('budget.maxCostCNY', toNumber(v, 0)) })),
+                ),
+                h('section', { className: 'nd-card' },
+                  h('div', { className: 'nd-card-head' },
+                    h('h3', null, '📚 写作预设'),
+                    h('div', { className: 'nd-row-actions' },
+                      h(Btn, { small: true, onClick: () => setPresetDialog({ initial: null, title: '新建预设' }) }, '＋ 新建'),
+                      h(Btn, { small: true, onClick: async () => {
+                        const ok = await copyText(PRESET_TEMPLATE)
+                        setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '绝对模板已复制：照字段填好，再点「＋ 新建」粘贴成预设。' : '复制失败：可以打开 docs/PRESET-TEMPLATE.md 手抄。' })
+                      } }, '复制绝对模板'),
+                    ),
+                  ),
+                  h('p', { className: 'nd-hint' }, '预设是写作约定（视角/节奏/风格/禁忌/审阅重点）；换预设不会改正文。应用后新建的 AI 工作单会带上它。'),
+                  h('div', { className: 'nd-preset-list' },
+                    presetList.map((preset) => {
+                      const active = String(preset.id) === String(activePresetId)
+                      return h('div', { key: String(preset.id), className: `nd-preset${active ? ' nd-preset-active' : ''}` },
+                        h('div', { className: 'nd-preset-main' },
+                          h('div', { className: 'nd-preset-title' }, h('strong', null, String(preset.name || preset.id)), active ? h(Tag, { tone: 'brand' }, '当前') : null),
+                          preset.desc ? h('p', { className: 'nd-hint' }, String(preset.desc)) : null,
+                          h('div', { className: 'nd-preset-meta' },
+                            h(Tag, null, `${toNumber(preset.plannedChapters, 0)} 章`),
+                            h(Tag, null, `每章 ${toNumber(preset.chapterWords, 0)} 字`),
+                            preset.pov ? h(Tag, null, String(preset.pov)) : null,
+                            Array.isArray(preset.taboo) && preset.taboo.length ? h(Tag, null, `禁忌 ${preset.taboo.length} 条`) : null,
+                            Array.isArray(preset.reviewFocus) && preset.reviewFocus.length ? h(Tag, null, `审阅重点 ${preset.reviewFocus.length} 条`) : null,
+                          ),
+                        ),
+                        h('div', { className: 'nd-preset-actions' },
+                          h(Btn, { small: true, kind: active ? 'default' : 'primary', onClick: () => applyPreset(preset), disabled: presetBusy }, active ? '重新应用' : '应用'),
+                          h(Btn, { small: true, onClick: () => setPresetDialog({ initial: preset, title: `编辑预设：${preset.name || preset.id}` }) }, '编辑'),
+                          preset.id !== 'preset-custom' && preset.id !== 'preset-classic-long' && preset.id !== 'preset-suspense-cold' && preset.id !== 'preset-wuxia-historical' && preset.id !== 'preset-literary-real'
+                            ? h(Btn, { small: true, onClick: async () => {
+                                try {
+                                  await savePresets(presetList.filter((row) => String(row.id) !== String(preset.id)))
+                                  setNotice({ tone: 'ok', text: `已删除预设：${preset.name || preset.id}` })
+                                } catch (err) {
+                                  setNotice({ tone: 'error', text: `删除失败：${friendlyError(err)}` })
+                                }
+                              } }, '删除')
+                            : null,
+                        ),
+                      )
+                    }),
+                  ),
+                ),
+                h('section', { className: 'nd-card' },
+                  h('div', { className: 'nd-card-head' }, h('h3', null, '📁 数据位置（只读）')),
+                  h(KeyValue, { rows: projectRows, emptyText: '还没有读取到作品信息' }),
+                  h('p', { className: 'nd-hint' }, '数据是 ~/StoryDesk 下的普通 Markdown / JSON 文件，可直接用其他编辑器查看。'),
+                ),
+              ),
+            )
+          : null,
+        presetDialog
+          ? h(PresetDialog, {
+              title: presetDialog.title,
+              initial: presetDialog.initial,
+              busy: presetBusy,
+              onCancel: () => setPresetDialog(null),
+              onSubmit: savePresetDraft,
+            })
+          : null,
+      )
+    }
     // ── 样式 ──────────────────────────────────────────────────
     const CSS = `
-.sd-entry{display:flex;align-items:center;gap:8px;width:100%;padding:6px 8px;border:0;background:transparent;color:var(--dsw-alias-label-secondary,#555);border-radius:8px;cursor:pointer;font:inherit;font-size:12px}
-.sd-entry:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#111)}
-.sd-entry-icon{font-size:16px;line-height:1}
-.sd-entry-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-backdrop{position:fixed;inset:0;z-index:9000;display:flex;align-items:center;justify-content:center;background:rgba(15,20,30,.45);pointer-events:auto}
-.sd-panel{width:min(1280px,96vw);height:min(900px,92vh);display:flex;flex-direction:column;overflow:hidden;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:14px;box-shadow:0 24px 80px rgba(0,0,0,.4);font-size:13px}
-.sd-head{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);flex:0 0 auto}
-.sd-brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;white-space:nowrap}
-.sd-brand-icon{font-size:18px}
-.sd-project-select{width:auto;min-width:160px;max-width:260px}
-.sd-head-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
-.sd-body{display:flex;flex:1;min-height:0}
-.sd-nav{width:168px;flex:0 0 auto;display:flex;flex-direction:column;gap:2px;padding:10px 8px;border-right:1px solid var(--dsw-alias-border-l2,#e5e5e5);background:var(--dsw-alias-bg-layer-1,#fafafa);overflow-y:auto}
-.sd-nav-item{display:flex;align-items:center;gap:8px;padding:7px 10px;border:0;background:transparent;color:var(--dsw-alias-label-secondary,#555);border-radius:8px;cursor:pointer;font:inherit;font-size:12.5px;text-align:left}
-.sd-nav-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));color:var(--dsw-alias-label-primary,#111)}
-.sd-nav-active{background:var(--dsw-alias-interactive-bg-selected,rgba(36,123,191,.12));color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600}
-.sd-nav-icon{font-size:14px;line-height:1}
-.sd-main{flex:1;min-width:0;overflow-y:auto;padding:20px 24px 40px}
-.sd-page{display:flex;flex-direction:column;gap:14px}
-.sd-pagehead{display:flex;align-items:flex-start;gap:16px}
-.sd-pagehead > div{flex:1;min-width:0}
-.sd-h2{margin:0 0 4px;font-size:18px;font-weight:600}
-.sd-h3{margin:4px 0 8px;font-size:13.5px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
-.sd-mt{margin-top:18px}
-.sd-desc{margin:0;color:var(--dsw-alias-label-secondary,#666);font-size:12px;line-height:1.6}
-.sd-hint{color:var(--dsw-alias-label-tertiary,#888);font-size:11px;font-weight:400}
-.sd-btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:5px 12px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1,#d8d8d8);background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
-.sd-btn:hover{border-color:var(--dsw-alias-brand-primary,#247bbf);color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-btn:disabled{opacity:.5;cursor:default}
-.sd-btn-primary{background:var(--dsw-alias-button-primary-fill,#247bbf);border-color:transparent;color:#fff}
-.sd-btn-primary:hover{color:#fff;opacity:.9}
-.sd-btn-danger{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 35%,transparent)}
-.sd-btn-sm{padding:3px 8px;font-size:11px;border-radius:6px}
-.sd-iconbtn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--dsw-alias-label-secondary,#666);border-radius:6px;cursor:pointer;font-size:14px}
-.sd-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#111)}
-.sd-input{width:100%;box-sizing:border-box;padding:6px 9px;border:1px solid var(--dsw-alias-border-l2,#d5d5d5);border-radius:7px;background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#222);font:inherit;font-size:12.5px;outline:none}
-.sd-input:focus{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-textarea{resize:vertical;line-height:1.7;font-family:inherit}
-.sd-field{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
-.sd-label{font-size:12px;color:var(--dsw-alias-label-secondary,#555);font-weight:500}
-.sd-form-2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
-.sd-form-actions{display:flex;gap:8px;margin-top:8px}
-.sd-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:10px}
-.sd-card{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-card-icon{font-size:14px;opacity:.8}
-.sd-card-value{font-size:20px;font-weight:600;line-height:1.3;margin-top:2px;font-variant-numeric:tabular-nums}
-.sd-card-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-two-col{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:18px;align-items:start}
-.sd-section{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:14px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);min-width:0}
-.sd-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden}
-.sd-row{display:grid;gap:10px;align-items:center;padding:8px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-row:last-child{border-bottom:0}
-.sd-row-done{opacity:.6}
-.sd-row-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
-.sd-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-row-actions{display:flex;gap:6px;justify-content:flex-end}
-.sd-actions-col{text-align:right}
-.sd-empty{padding:26px;text-align:center;color:var(--dsw-alias-label-tertiary,#888);font-size:12px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:10px}
-.sd-modal-mask{position:fixed;inset:0;z-index:9200;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.35);pointer-events:auto}
-.sd-modal{width:min(620px,92vw);max-height:86vh;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base,#fff);border-radius:12px;border:1px solid var(--dsw-alias-border-l2,#ddd);box-shadow:0 20px 60px rgba(0,0,0,.35);overflow:hidden}
-.sd-modal-wide{width:min(980px,94vw)}
-.sd-modal-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee)}
-.sd-modal-head strong{flex:1;font-size:13.5px}
-.sd-modal-body{padding:14px 16px;overflow-y:auto}
-.sd-modal-foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--dsw-alias-border-l2,#eee)}
-.sd-timeline{display:flex;flex-direction:column;gap:0;border-left:2px solid var(--dsw-alias-border-l2,#e2e2e2);margin-left:8px;padding-left:16px}
-.sd-tl-item{position:relative;padding:0 0 12px 0}
-.sd-tl-item:before{content:"";position:absolute;left:-22px;top:12px;width:9px;height:9px;border-radius:50%;background:var(--dsw-alias-brand-primary,#247bbf);border:2px solid var(--dsw-alias-bg-base,#fff)}
-.sd-tl-badge{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);margin-bottom:3px}
-.sd-tl-card{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:9px 12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);cursor:pointer}
-.sd-tl-card:hover{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-tl-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-tl-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:3px}
-.sd-tl-text{font-size:12px;line-height:1.6;margin-top:4px;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap}
-.sd-tag{display:inline-block;padding:0 6px;border-radius:999px;font-size:10.5px;line-height:18px;border:1px solid var(--dsw-alias-border-l2,#ddd);color:var(--dsw-alias-label-secondary,#666);margin-right:4px}
-.sd-tag-brand{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent)}
-.sd-tag-muted{color:var(--dsw-alias-label-tertiary,#888)}
-.sd-checks{display:flex;flex-direction:column;gap:8px}
-.sd-check{padding:8px 10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);background:var(--dsw-alias-bg-layer-2,#fff);font-size:12px}
-.sd-check-error{border-left:3px solid var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-check-warn{border-left:3px solid var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-check-info{border-left:3px solid var(--dsw-alias-border-l2,#bbb)}
-.sd-check-title{font-weight:600;margin-bottom:2px}
-.sd-check-detail{color:var(--dsw-alias-label-secondary,#666);line-height:1.55}
-.sd-mini-list{display:flex;flex-direction:column;gap:6px}
-.sd-mini-row{display:flex;align-items:center;gap:8px;font-size:12px}
-.sd-mini-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-mini-meta{color:var(--dsw-alias-label-tertiary,#888);font-size:11px}
-.sd-chapter-list{display:flex;flex-direction:column;gap:6px}
-.sd-chapter{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-chapter-id{font-size:11px;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums;width:40px;flex:0 0 auto}
-.sd-chapter-main{flex:1;min-width:0;cursor:pointer}
-.sd-chapter-title{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-chapter-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-chapter-actions{display:flex;gap:6px}
-.sd-welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;padding:40px}
-.sd-welcome h2{margin:0;font-size:20px}
-.sd-welcome p{margin:0;max-width:460px;color:var(--dsw-alias-label-secondary,#666);line-height:1.7}
-.sd-code{padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f2f2f2);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;word-break:break-all;color:var(--dsw-alias-label-secondary,#555)}
-.sd-error{margin:10px 16px 0;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b);font-size:12px}
-
-.sd-proposal{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:8px}
-.sd-proposal-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-proposal-title{font-size:13.5px}
-.sd-proposal-summary{font-size:12.5px;color:var(--dsw-alias-label-secondary,#555);line-height:1.6}
-.sd-proposal-body{display:flex;flex-direction:column;gap:6px;font-size:12px;line-height:1.6;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-proposal-item{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;background:var(--dsw-alias-bg-layer-2,#f4f4f4);border-radius:6px;padding:5px 8px;word-break:break-all}
-.sd-proposal-text{white-space:pre-wrap;font-size:12px;line-height:1.7;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-proposal-actions{display:flex;gap:8px;justify-content:flex-end}
-.sd-ul{margin:4px 0 0;padding-left:20px}
-.sd-ul li{margin:2px 0}
-.sd-diff{max-height:360px;overflow:auto;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#fff);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.55;padding:6px 0}
-.sd-diff > div{padding:0 10px;white-space:pre-wrap;word-break:break-all}
-.sd-diff-same{color:var(--dsw-alias-label-tertiary,#999)}
-.sd-diff-add{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 12%,transparent);color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-diff-del{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-align-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
-.sd-align-card{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-align-label{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-align-value{font-size:18px;font-weight:600;margin:4px 0 8px;font-variant-numeric:tabular-nums}
-.sd-progress{height:6px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
-.sd-progress-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
-.sd-ai-result{white-space:pre-wrap;margin:10px 0 0;padding:10px 12px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f4f4f4);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);font-size:12px;line-height:1.6;max-height:240px;overflow:auto}
-.sd-ai-busy{margin-top:10px;font-size:12px;color:var(--dsw-alias-brand-primary,#247bbf)}
-
-.sd-feedback-list{margin-top:6px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px;display:flex;flex-direction:column;gap:4px}
-.sd-feedback-item{padding:6px 9px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#f4f4f4);font-size:12px;line-height:1.6;white-space:pre-wrap}
-.sd-feedback-editor{margin-top:6px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-preset-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
-.sd-preset-card{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;padding:12px 14px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:6px;min-width:0}
-.sd-preset-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-preset-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-preset-desc{font-size:12px;color:var(--dsw-alias-label-secondary,#555);line-height:1.6}
-.sd-preset-block{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:6px}
-/* v0.4：视图切换 / 批量操作 / 导出导入 */
-.sd-pagehead > .sd-pagehead-actions{flex:0 0 auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.sd-toggle{display:inline-flex;padding:2px;gap:2px;border:1px solid var(--dsw-alias-border-l2,#ddd);border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f6f6f6)}
-.sd-toggle-btn{border:0;background:transparent;color:var(--dsw-alias-label-secondary,#666);font:inherit;font-size:11.5px;line-height:1.6;padding:3px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
-.sd-toggle-btn:hover{color:var(--dsw-alias-label-primary,#111)}
-.sd-toggle-active{background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08)}
-.sd-bulkbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-bulkbar-actions{display:flex;gap:8px;margin-left:auto}
-.sd-notice{margin:8px 0;padding:7px 12px;border-radius:8px;font-size:12px;color:var(--dsw-alias-state-success-primary,#1e8449);border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 8%,transparent)}
-.sd-cb{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;white-space:nowrap}
-.sd-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
-.sd-cb-only{padding:0}
-.sd-row-cb{display:flex;align-items:center;justify-content:center}
-.sd-row-cb input{width:13px;height:13px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer;margin:0}
-.sd-select-inline{width:auto;min-width:110px}
-.sd-target-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}
-.sd-target-select{min-width:260px;max-width:420px}
-@media (max-width:760px){.sd-target-select{width:100%;max-width:none}}
-.sd-export-select{width:auto;min-width:96px;padding:4px 6px;font-size:11px}
-.sd-inline-row{display:flex;gap:8px;align-items:center}
-.sd-inline-row .sd-input{flex:1}
-.sd-error-inline{margin:8px 0;padding:8px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b);font-size:12px}
-.sd-notice{padding:7px 10px;border-radius:8px;margin-bottom:10px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent);color:var(--dsw-alias-state-success-primary,#1e8449);font-size:11.5px}
-.sd-autosave{color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-preset-current{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-align-value-sm{font-size:14px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* v0.4：人物关系图 */
-.sd-graph{display:flex;flex-direction:column;gap:8px}
-.sd-graph-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);padding:2px 2px 0}
-.sd-graph-legend-title{font-weight:600;color:var(--dsw-alias-label-primary,#333)}
-.sd-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:4px;vertical-align:middle}
-.sd-dot-protagonist{background:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-dot-antagonist{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-dot-supporting{background:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-dot-minor{background:#8a8a8a}
-.sd-dot-ghost{background:transparent;border:1px dashed var(--dsw-alias-label-tertiary,#999);box-sizing:border-box}
-.sd-graph-wrap{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);padding:4px;overflow:auto}
-.sd-graph-svg{display:block;width:100%;height:auto;min-height:420px;user-select:none;touch-action:none}
-.sd-graph-edge{stroke:var(--dsw-alias-border-l1,#c9c9c9);stroke-width:1.4;fill:none}
-.sd-graph-edge-hot{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.4}
-.sd-graph-edge-label{font-size:10px;fill:var(--dsw-alias-label-tertiary,#888);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;stroke-linejoin:round;text-anchor:middle}
-.sd-graph-node{cursor:grab}
-.sd-graph-node:active{cursor:grabbing}
-.sd-graph-node circle{stroke:var(--dsw-alias-bg-base,#fff);stroke-width:2}
-.sd-graph-node text{font-size:11px;fill:var(--dsw-alias-label-primary,#222);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;text-anchor:middle;pointer-events:none}
-.sd-graph-node-hot circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.5}
-.sd-graph-role-protagonist circle{fill:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-graph-role-antagonist circle{fill:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-graph-role-supporting circle{fill:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-graph-role-minor circle{fill:#8a8a8a}
-.sd-graph-role-ghost circle{fill:transparent;stroke:var(--dsw-alias-label-tertiary,#999);stroke-width:1.6;stroke-dasharray:4 3}
-.sd-graph-node-ghost text{fill:var(--dsw-alias-label-tertiary,#888)}
-.sd-graph-ghost-tip{font-size:9px !important;fill:var(--dsw-alias-label-tertiary,#aaa) !important}
-
-/* v0.4：时间线泳道图 */
-.sd-lane{display:flex;flex-direction:column;gap:8px}
-.sd-lane-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-zoom{width:180px;accent-color:var(--dsw-alias-brand-primary,#247bbf);cursor:pointer}
-.sd-zoom-value{min-width:34px;font-variant-numeric:tabular-nums}
-.sd-lane-legend{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-lane-swatch{display:inline-block;width:9px;height:9px;border-radius:2px}
-.sd-lane-swatch.sd-lane-ev-normal{background:#8fa8bd}
-.sd-lane-swatch.sd-lane-ev-major{background:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-lane-swatch.sd-lane-ev-climax{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-lane-scroll{overflow:auto;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);max-height:min(64vh,620px)}
-.sd-lane-svg{display:block}
-.sd-lane-band{fill:var(--dsw-alias-bg-layer-2,#f7f7f7)}
-.sd-lane-band-alt{fill:var(--dsw-alias-bg-base,#fff)}
-.sd-lane-label{font-size:11px;font-weight:600;fill:var(--dsw-alias-label-secondary,#555)}
-.sd-lane-tick{stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1;stroke-dasharray:2 4}
-.sd-lane-tick-label{font-size:9px;fill:var(--dsw-alias-label-tertiary,#999)}
-.sd-lane-ev{stroke:var(--dsw-alias-bg-base,#fff);stroke-width:1.5;cursor:pointer}
-.sd-lane-ev:hover{stroke:var(--dsw-alias-label-primary,#333)}
-.sd-lane-ev-normal{fill:#8fa8bd}
-.sd-lane-ev-major{fill:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-lane-ev-climax{fill:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-lane-ev-text{font-size:10px;fill:#fff;pointer-events:none}
-.sd-lane-arc{fill:none;stroke:#b08968;stroke-width:1.4;opacity:.8}
-.sd-lane-arc-paid{stroke:#9a9a9a;stroke-dasharray:5 4;opacity:.6}
-
-/* v0.4：章节历史版本 */
-.sd-history{display:grid;grid-template-columns:200px minmax(0,1fr);gap:12px;min-height:240px}
-.sd-history-list{display:flex;flex-direction:column;gap:4px;max-height:360px;overflow:auto;border-right:1px solid var(--dsw-alias-border-l2,#eee);padding-right:8px}
-.sd-history-item{text-align:left;border:1px solid transparent;background:transparent;border-radius:7px;padding:6px 8px;font:inherit;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;line-height:1.5}
-.sd-history-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05))}
-.sd-history-item-active{border-color:var(--dsw-alias-brand-primary,#247bbf);background:var(--dsw-alias-interactive-bg-selected,rgba(36,123,191,.1));color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600}
-.sd-history-diff{min-width:0}
-.sd-history-diff .sd-diff{max-height:330px}
-
-/* v0.4：导入 Markdown */
-.sd-import-preview{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);font-size:12px;display:flex;flex-direction:column;gap:5px;max-height:260px;overflow:auto;margin:4px 0 12px}
-.sd-import-chapter{font-size:11.5px;color:var(--dsw-alias-label-secondary,#555);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-
-
-.sd-import-report{display:flex;flex-direction:column;gap:12px}
-.sd-import-counts{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
-.sd-import-count{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:8px 10px;text-align:center;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-import-count strong{display:block;font-size:19px;line-height:1.3;font-variant-numeric:tabular-nums}
-.sd-import-count span{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-import-review{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px;display:flex;flex-direction:column;gap:8px}
-
-.sd-segmented{display:inline-flex;border:1px solid var(--dsw-alias-border-l1,#d8d8d8);border-radius:8px;overflow:hidden}
-.sd-segmented button{border:0;background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;padding:5px 12px;cursor:pointer}
-.sd-segmented button.sd-seg-active{background:var(--dsw-alias-brand-primary,#247bbf);color:#fff}
-
-.sd-decision-issue{font-size:12.5px;line-height:1.7;background:var(--dsw-alias-bg-layer-2,#f4f4f4);border-radius:7px;padding:8px 10px}
-.sd-decision-options{display:flex;flex-direction:column;gap:6px;margin-top:2px}
-.sd-decision-option{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;cursor:pointer;font-size:12px}
-.sd-decision-option:hover{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-
-.sd-dash-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.sd-dash-note{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;padding:10px 12px;font-size:12px;line-height:1.8;background:var(--dsw-alias-bg-layer-1,#fafafa);display:flex;flex-direction:column;gap:2px}
-
-.sd-cart-list{display:flex;flex-direction:column;gap:6px;max-height:320px;overflow:auto}
-.sd-cart-item{display:flex;align-items:center;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:7px;padding:7px 9px;font-size:12px}
-.sd-cart-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-check-main{display:flex;flex-direction:column;gap:2px}
-
-.sd-cart-row{display:flex;flex-direction:column;gap:4px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:8px;padding:7px 9px}
-.sd-cart-row .sd-cart-item{border:0;padding:0}
-
-.sd-writer-cards{grid-template-columns:repeat(auto-fill,minmax(108px,1fr))}
-.sd-activity{margin-top:10px}
-.sd-activity-bars{display:flex;align-items:flex-end;gap:6px;height:64px;margin-top:6px}
-.sd-activity-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;font-size:10px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-activity-bar{width:100%;max-width:22px;background:var(--dsw-alias-brand-primary,#247bbf);border-radius:3px 3px 0 0;min-height:4px}
-
-.sd-decision-ai{font-size:12.5px;line-height:1.7;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);padding:4px 0 4px 10px;background:var(--dsw-alias-bg-layer-1,#fafafa);border-radius:0 6px 6px 0}
-
-.sd-send-options{display:flex;flex-direction:column;gap:6px;margin-top:10px;font-size:12px}
-
-
-.sd-cart-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fafafa);margin-top:10px}
-.sd-cart-banner>div{display:flex;flex-direction:column;gap:2px;font-size:12px}
-
-.sd-picker-list{display:flex;flex-direction:column;gap:2px;max-height:360px;overflow:auto;margin-top:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:8px;padding:4px}
-.sd-picker-row{display:flex;align-items:center;gap:8px;width:100%;border:0;background:transparent;padding:6px 8px;border-radius:6px;font:inherit;font-size:12px;text-align:left;cursor:pointer}
-.sd-picker-row:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
-.sd-picker-icon{width:16px;flex:0 0 16px}
-.sd-picker-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 零上下文首读：第 10 个角色「独立审稿人」高亮卡 */
-.sd-fresh{position:relative;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);border-left:4px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:12px;padding:14px 16px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent),transparent 68%),var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:9px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
-.sd-fresh-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-fresh-badge{display:inline-flex;align-items:center;gap:4px;padding:1px 9px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap;color:var(--dsw-alias-brand-primary,#247bbf);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 13%,transparent)}
-.sd-fresh-title{font-size:14px;letter-spacing:.2px}
-.sd-fresh-rank{margin-left:auto;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-fresh-desc{margin:0;font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary,#555);max-width:860px}
-.sd-fresh-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-fresh-pick{display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%}
-.sd-fresh-pick-label{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-fresh-select{width:auto;min-width:220px;max-width:360px}
-.sd-fresh-compact{flex-direction:row;align-items:center;gap:10px 12px;flex-wrap:wrap;padding:9px 14px;border-left-width:3px}
-.sd-fresh-compact-text{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;flex:1;min-width:0;font-size:12px}
-.sd-fresh-compact .sd-btn{margin-left:0}
-.sd-fresh-compact .sd-btn:first-of-type{margin-left:auto}
-/* v0.6：侧边栏分组 */
-.sd-nav-group{padding:12px 10px 3px;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--dsw-alias-label-tertiary,#999);line-height:1.4;user-select:none;cursor:default}
-.sd-nav > .sd-nav-group:first-of-type{padding-top:4px}
-.sd-nav-item + .sd-nav-group{margin-top:2px;border-top:1px solid var(--dsw-alias-border-l2,#ececec)}
-.sd-row-hi{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 6%,transparent)}
-.sd-weight{display:inline-block;min-width:20px;padding:0 5px;border-radius:999px;font-size:11px;line-height:17px;text-align:center;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#666)}
-.sd-weight-hi{color:var(--dsw-alias-brand-primary,#247bbf);font-weight:700;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 15%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent)}
-.sd-tag-success{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent)}
-.sd-tag-warn{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent)}
-.sd-tag-error{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
-/* 事实账本：按主体合并视图 */
-.sd-facts-wrap{display:flex;flex-direction:column;gap:10px}
-.sd-facts-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-facts-search{max-width:320px}
-.sd-facts-toolbar-actions{margin-left:auto;display:flex;gap:8px}
-.sd-facts-group{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-facts-group-conflict{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
-.sd-facts-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12.5px;text-align:left;color:var(--dsw-alias-label-primary,#111)}
-.sd-facts-head:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
-.sd-facts-caret{width:12px;flex:0 0 12px;opacity:.7}
-.sd-facts-subject{font-weight:600}
-.sd-facts-head-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap}
-.sd-facts-body{padding:6px 12px 10px;border-top:1px solid var(--dsw-alias-border-l2,#eee)}
-.sd-facts-attr{margin-top:8px}
-.sd-facts-attr-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
-.sd-facts-attr-name{font-weight:600}
-.sd-facts-rows{margin-top:2px;display:flex;flex-direction:column}
-.sd-facts-row{display:grid;grid-template-columns:1.3fr 80px 100px 1.5fr 110px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-facts-row:last-child{border-bottom:0}
-.sd-facts-value{font-weight:500;overflow-wrap:anywhere}
-.sd-facts-chapter,.sd-facts-range{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px;white-space:nowrap}
-.sd-facts-note{color:var(--dsw-alias-label-tertiary,#888);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-facts-actions{display:flex;gap:6px;justify-content:flex-end}
-.sd-facts-group-actions{margin-top:8px}
-@media (max-width:900px){.sd-facts-row{grid-template-columns:1fr 70px 80px;}.sd-facts-note,.sd-facts-actions{grid-column:1 / -1;}.sd-facts-actions{justify-content:flex-start}}
-
-/* v0.6：⚡ 注意力页 */
-.sd-att-guide{margin:6px 0 0;padding:6px 10px;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:0 6px 6px 0;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:11.5px;line-height:1.65}
-.sd-att-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.sd-att-stat{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);min-width:0}
-.sd-att-stat-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-att-stat-big{margin-top:2px;font-size:26px;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums}
-.sd-att-stat-list{display:flex;flex-direction:column;gap:2px;margin-top:4px;font-size:12px}
-.sd-att-lowrow{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.sd-att-lowscore{font-variant-numeric:tabular-nums;font-weight:600}
-.sd-att-warns{display:flex;flex-direction:column;gap:4px}
-.sd-att-warn{padding:6px 10px;border-radius:8px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent);color:var(--dsw-alias-label-primary,#333);font-size:11.5px;line-height:1.55}
-.sd-att-tone-low{color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-att-tone-mid{color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-att-tone-ok{color:var(--dsw-alias-label-primary,#222)}
-.sd-att-tone-top{color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-att-tone-missing{color:var(--dsw-alias-label-tertiary,#888);font-size:13px;font-weight:400}
-.sd-att-chart{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);padding:10px 12px}
-.sd-att-chart-scroll{overflow-x:auto;overflow-y:hidden;padding-bottom:2px}
-.sd-att-chart-svg{display:block;max-width:none}
-.sd-att-legend{display:flex;align-items:center;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-att-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.sd-att-swatch{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--att-color,#8a8a8a);flex:0 0 auto}
-.sd-att-legend-dash{display:inline-block;width:18px;border-top:2px dashed var(--dsw-alias-label-secondary,#888)}
-.sd-att-legend-risk{display:inline-block;width:10px;height:10px;border-radius:50%;border:2px solid var(--dsw-alias-state-error-primary,#c0392b);box-sizing:border-box}
-.sd-att-grid{stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1;stroke-dasharray:2 4}
-.sd-att-axis-label{font-size:9.5px;fill:var(--dsw-alias-label-tertiary,#999);font-variant-numeric:tabular-nums}
-.sd-att-score-line{fill:none;stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:1.8;stroke-linejoin:round;stroke-linecap:round;opacity:.85}
-.sd-att-design-line{fill:none;stroke:var(--dsw-alias-label-secondary,#888);stroke-width:1.3;stroke-dasharray:5 4;opacity:.75}
-.sd-att-dot{fill:var(--att-color,#247bbf);stroke:var(--dsw-alias-bg-base,#fff);stroke-width:1.2;cursor:pointer}
-.sd-att-dot:hover{stroke:var(--dsw-alias-label-primary,#222);stroke-width:2}
-.sd-att-dot-risk{stroke:var(--dsw-alias-state-error-primary,#c0392b);stroke-width:2.2}
-.sd-att-design-dot{fill:var(--dsw-alias-bg-base,#fff);stroke:var(--dsw-alias-label-secondary,#888);stroke-width:1;opacity:.8}
-.sd-att-c-event{--att-color:#247bbf}
-.sd-att-c-emotion{--att-color:#e0567b}
-.sd-att-c-language{--att-color:#8a6fd1}
-.sd-att-c-mystery{--att-color:#d68910}
-.sd-att-c-relationship{--att-color:#1e8449}
-.sd-att-type{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--att-color,#888) 45%,transparent);background:color-mix(in srgb,var(--att-color,#888) 12%,transparent);color:var(--dsw-alias-label-primary,#333);font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap}
-.sd-att-cards{display:flex;flex-direction:column;gap:10px}
-.sd-att-card{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:9px;scroll-margin-top:12px}
-.sd-att-card:target{border-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-att-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-att-chapter{font-size:13.5px;font-weight:700;display:inline-flex;align-items:baseline;gap:8px}
-.sd-att-chapter-title{font-weight:400;font-size:12px;color:var(--dsw-alias-label-secondary,#666);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-att-score{font-size:20px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
-.sd-att-score-unit{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#999);margin-left:1px}
-.sd-att-design,.sd-att-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-att-gap{font-size:11px;font-weight:600;padding:0 6px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);color:var(--dsw-alias-state-warn-primary,#d68910);font-variant-numeric:tabular-nums}
-.sd-att-gap-bad{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 40%,transparent);color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-att-card-actions{margin-left:auto;display:flex;gap:6px}
-.sd-att-drop{font-size:12px;line-height:1.6;padding:6px 10px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 9%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 28%,transparent);display:flex;gap:8px;align-items:baseline}
-.sd-att-drop strong{color:var(--dsw-alias-state-error-primary,#c0392b);font-size:11px;white-space:nowrap}
-.sd-att-beats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px}
-.sd-att-beat{padding:8px 10px;border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l2,#eee);min-width:0}
-.sd-att-beat-label{font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:3px}
-.sd-att-beat-text{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
-.sd-att-beat-empty{color:var(--dsw-alias-label-tertiary,#999)}
-.sd-att-emotion,.sd-att-question{display:flex;gap:8px;align-items:baseline;font-size:12px;line-height:1.65}
-.sd-att-emotion strong,.sd-att-question strong{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-att-detail{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-att-detail summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
-.sd-att-detail-body{margin-top:6px;white-space:pre-wrap;font-size:12px;line-height:1.75;color:var(--dsw-alias-label-primary,#333);background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-radius:8px;padding:8px 10px;max-height:320px;overflow:auto}
-.sd-att-aggs{display:flex;flex-direction:column;gap:2px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-att-agg>summary{cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,#555);padding:3px 0;list-style:none;display:flex;align-items:center;gap:6px}
-.sd-att-agg>summary::-webkit-details-marker{display:none}
-.sd-att-agg>summary:before{content:"▸";font-size:10px;color:var(--dsw-alias-label-tertiary,#999)}
-.sd-att-agg[open]>summary:before{content:"▾"}
-.sd-att-agg-body{padding:4px 0 6px 18px;display:flex;flex-direction:column;gap:4px}
-.sd-att-agg-row{display:flex;gap:10px;align-items:baseline;font-size:12px;line-height:1.55}
-.sd-att-agg-title{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:70%}
-.sd-att-agg-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-att-agg-actions{margin-top:2px}
-.sd-att-unmarked-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:8px}
-.sd-att-unmarked{display:flex;align-items:center;gap:8px;padding:7px 10px;border:1px dashed var(--dsw-alias-border-l2,#ddd);border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fafafa);scroll-margin-top:12px}
-.sd-att-unmarked-main{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.sd-att-unmarked-ch{font-size:11px;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
-.sd-att-unmarked-title{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-att-unmarked-tag{font-size:10.5px;color:var(--dsw-alias-state-warn-primary,#d68910)}
-/* 设计 / 实测闭环状态徽章（任务 6） */
-.sd-att-state{display:inline-flex;align-items:center;gap:4px;padding:0 7px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;white-space:nowrap;border:1px solid transparent}
-.sd-att-state:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
-.sd-att-state-closed{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-att-state-waiting{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
-.sd-att-state-nodesign{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
-.sd-att-state-blank{color:var(--dsw-alias-label-tertiary,#888);border-color:var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4)}
-.sd-att-design-hint{font-size:10.5px;line-height:1.45;color:var(--dsw-alias-label-tertiary,#888);max-width:100%}
-.sd-att-ov-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.sd-att-ov-head{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
-.sd-att-ov-title{margin:0}
-.sd-att-ov{display:grid;grid-template-columns:auto repeat(3,minmax(0,1fr));gap:16px;align-items:start;margin-top:6px}
-.sd-att-ov-bigwrap{display:flex;flex-direction:column;gap:2px;padding-right:16px;border-right:1px solid var(--dsw-alias-border-l2,#eee)}
-.sd-att-ov-big{font-size:38px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
-.sd-att-ov-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-att-ov-mini{display:flex;flex-direction:column;gap:3px;min-width:0;font-size:12px}
-.sd-att-ov-mini-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-att-ov-num{font-size:20px;font-weight:600;line-height:1.2;font-variant-numeric:tabular-nums}
-.sd-att-ov-row{display:flex;justify-content:space-between;gap:8px}
-/* v0.6：人物详情弹窗 */
-.sd-modal-head .sd-char-name{flex:0 0 auto;font-size:14px}
-.sd-char-actions{display:flex;align-items:center;gap:6px;margin-left:auto}
-.sd-char-body{display:flex;flex-direction:column;gap:12px}
-.sd-char-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
-.sd-char-section:first-child{border-top:0;padding-top:0}
-.sd-char-section-title{margin:0 0 8px;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
-.sd-char-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 14px}
-.sd-char-field{display:flex;flex-direction:column;gap:2px;min-width:0}
-.sd-char-field-wide{margin-top:8px}
-.sd-char-field-label{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-char-field-value{font-size:12.5px;line-height:1.65;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
-.sd-char-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
-.sd-char-chips{display:flex;flex-wrap:wrap;gap:6px}
-.sd-char-chip{font-size:11px;line-height:20px;padding:0 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#555);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
-.sd-char-row{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-char-row:last-child{border-bottom:0}
-.sd-char-row-main{flex:1;min-width:0;color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-char-row-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-char-fact-group{margin-top:6px}
-.sd-char-fact-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary,#555)}
-.sd-char-fact-row{display:flex;align-items:baseline;gap:10px;padding:3px 0 3px 12px;font-size:12px;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee)}
-.sd-char-fact-row:last-child{border-bottom:0}
-.sd-char-fact-value{flex:1;min-width:0;overflow-wrap:anywhere}
-.sd-char-fact-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-
-/* v0.6：人物重要性配色 / 卡片视图 / 人物详情卡 */
-.sd-char-role-protagonist{--char-role-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-char-role-antagonist{--char-role-color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-char-role-supporting{--char-role-color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-char-role-minor{--char-role-color:var(--dsw-alias-label-secondary,#666)}
-.sd-char-role-other{--char-role-color:var(--dsw-alias-label-tertiary,#999)}
-.sd-charcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
-.sd-char-card{position:relative;display:flex;flex-direction:column;gap:8px;align-items:stretch;text-align:left;padding:14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-top:3px solid var(--char-role-color,#8a8a8a);border-radius:13px;background:linear-gradient(160deg,color-mix(in srgb,var(--char-role-color,#8a8a8a) 13%,transparent),transparent 58%),var(--dsw-alias-bg-layer-1,#fcfcfc);box-shadow:0 1px 2px rgba(0,0,0,.05);color:var(--dsw-alias-label-primary,#111);font:inherit;cursor:pointer;transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease;min-width:0}
-.sd-char-card:hover{transform:translateY(-2px);box-shadow:0 10px 24px rgba(0,0,0,.16);border-color:color-mix(in srgb,var(--char-role-color,#8a8a8a) 55%,var(--dsw-alias-border-l2,#e2e2e2))}
-.sd-char-card:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#247bbf);outline-offset:2px}
-.sd-char-card-head{display:flex;align-items:center;gap:10px;min-width:0}
-.sd-char-card-avatar{width:44px;height:44px;flex:0 0 auto;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:var(--char-role-color,#8a8a8a);background:radial-gradient(circle at 30% 25%,color-mix(in srgb,var(--char-role-color,#8a8a8a) 34%,transparent),color-mix(in srgb,var(--char-role-color,#8a8a8a) 10%,transparent));border:1.5px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 60%,transparent)}
-.sd-char-card-ident{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
-.sd-char-card-name{font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-char-card-role{font-size:11px;color:var(--char-role-color,#8a8a8a);font-weight:600}
-.sd-char-card-att{font-size:12px;font-weight:700;color:var(--dsw-alias-brand-primary,#247bbf);white-space:nowrap}
-.sd-char-card-att-empty{color:var(--dsw-alias-label-tertiary,#999);font-weight:400}
-.sd-char-card-tags{display:flex;flex-wrap:wrap;gap:4px}
-.sd-char-card-stats{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-secondary,#666);border-top:1px dashed var(--dsw-alias-border-l2,#eee);padding-top:7px}
-.sd-char-card-rel{display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:11px;min-width:0}
-.sd-char-card-rel-label{color:var(--dsw-alias-label-tertiary,#888);font-size:10.5px;margin-right:2px}
-.sd-char-detail{overflow:hidden}
-.sd-char-detail-head{display:flex;align-items:center;gap:14px;padding:16px 18px 14px;flex-wrap:wrap;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);box-shadow:inset 0 1px 0 rgba(255,255,255,.05);background:linear-gradient(150deg,color-mix(in srgb,var(--char-role-color,#8a8a8a) 16%,transparent),transparent 62%),var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-char-avatar-lg{width:72px;height:72px;flex:0 0 auto;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:700;color:var(--char-role-color,#8a8a8a);background:radial-gradient(circle at 30% 25%,color-mix(in srgb,var(--char-role-color,#8a8a8a) 38%,transparent),color-mix(in srgb,var(--char-role-color,#8a8a8a) 10%,transparent));border:2px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 65%,transparent);box-shadow:0 0 22px color-mix(in srgb,var(--char-role-color,#8a8a8a) 20%,transparent)}
-.sd-char-detail-ident{flex:1;min-width:180px;display:flex;flex-direction:column;gap:6px}
-.sd-char-detail-name{font-size:20px;font-weight:700;letter-spacing:.02em}
-.sd-char-detail-badges{display:flex;flex-wrap:wrap;gap:4px}
-.sd-char-detail-meta{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-char-detail-meta-item{white-space:nowrap}
-.sd-char-role-badge{display:inline-block;padding:0 8px;border-radius:999px;font-size:10.5px;line-height:18px;font-weight:600;color:var(--char-role-color,#8a8a8a);border:1px solid color-mix(in srgb,var(--char-role-color,#8a8a8a) 50%,transparent);background:color-mix(in srgb,var(--char-role-color,#8a8a8a) 12%,transparent)}
-.sd-char-detail-actions{display:flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}
-.sd-char-numbers{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--dsw-alias-border-l2,#e8e8e8);border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5)}
-.sd-char-number{padding:10px 8px;text-align:center;background:var(--dsw-alias-bg-base,#fff);min-width:0}
-.sd-char-number-value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111);line-height:1.2}
-.sd-char-number-unit{font-size:10.5px;font-weight:400;color:var(--dsw-alias-label-tertiary,#999);margin-left:1px}
-.sd-char-number-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-char-detail-cols{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:16px;align-items:start}
-.sd-char-col{display:flex;flex-direction:column;gap:10px;min-width:0}
-.sd-char-basic-field{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f6f6)}
-@media (max-width:760px){.sd-char-numbers{grid-template-columns:repeat(2,minmax(0,1fr))}.sd-char-detail-cols{grid-template-columns:1fr}.sd-char-detail-name{font-size:17px}.sd-char-detail-actions{margin-left:0}}
-
-/* v0.6：冲突按参与方 / 伏笔按回收段（与事实账本同一套合并视图样式） */
-.sd-conf-wrap,.sd-fore-wrap{display:flex;flex-direction:column;gap:10px}
-.sd-conf-toolbar,.sd-fore-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-conf-search,.sd-fore-search{max-width:340px}
-.sd-conf-toolbar-actions,.sd-fore-toolbar-actions{margin-left:auto;display:flex;gap:8px}
-.sd-conf-group,.sd-fore-group{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-conf-head,.sd-fore-head{display:flex;align-items:center;gap:8px;width:100%;padding:9px 12px;border:0;background:transparent;cursor:pointer;font:inherit;font-size:12.5px;text-align:left;color:var(--dsw-alias-label-primary,#111)}
-.sd-conf-head:hover,.sd-fore-head:hover{background:var(--dsw-alias-bg-layer-2,#f2f2f2)}
-.sd-conf-caret,.sd-fore-caret{width:12px;flex:0 0 12px;opacity:.7}
-.sd-conf-parties,.sd-fore-arc{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-conf-head-hint,.sd-fore-head-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap}
-.sd-conf-body,.sd-fore-body{padding:6px 12px 10px;border-top:1px solid var(--dsw-alias-border-l2,#eee);display:flex;flex-direction:column;gap:6px}
-.sd-conf-row,.sd-fore-row{padding:7px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee)}
-.sd-conf-row:last-child,.sd-fore-row:last-child{border-bottom:0}
-.sd-conf-row-head,.sd-fore-row-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-conf-title,.sd-fore-title{font-size:12.5px}
-.sd-conf-actions,.sd-fore-actions{margin-left:auto;display:flex;gap:6px}
-.sd-conf-line{display:flex;gap:8px;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555);margin-top:3px}
-.sd-conf-line>span:first-child{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-conf-line-note{color:var(--dsw-alias-label-tertiary,#888)}
-.sd-fore-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-fore-text{font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-fore-note{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-tertiary,#888);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-/* v0.6：时间线全景 */
-.sd-pano-wrap{display:flex;flex-direction:column;gap:10px}
-.sd-pano-toolbar{display:flex;align-items:center;gap:12px 16px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-pano-count{margin-left:auto;white-space:nowrap}
-.sd-pano-cards{display:flex;flex-direction:column;gap:10px}
-.sd-pano-card{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;padding:10px 12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);display:flex;flex-direction:column;gap:8px}
-.sd-pano-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-pano-title{border:0;background:transparent;padding:0;font:inherit;font-size:13px;font-weight:700;color:var(--dsw-alias-label-primary,#111);cursor:pointer;text-align:left}
-.sd-pano-title:hover{color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-pano-att{margin-left:auto;font-size:10.5px;line-height:18px;padding:0 8px;border-radius:999px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent);color:var(--dsw-alias-brand-primary,#247bbf);white-space:nowrap}
-.sd-pano-att-empty{border-color:var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-tertiary,#888)}
-.sd-pano-sec{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:6px}
-.sd-pano-sec-label{font-size:10.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);margin-bottom:2px}
-.sd-pano-row{display:flex;align-items:baseline;gap:10px;padding:2px 0;font-size:12px;line-height:1.55}
-.sd-pano-row-main{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
-.sd-pano-row-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-
-/* v0.6：章节地图 🗺️ */
-.sd-map-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
-.sd-map-stat{padding:10px 12px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);min-width:0}
-.sd-map-stat-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-map-stat-big{margin-top:2px;font-size:24px;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums}
-.sd-map-stat-hint{margin-top:2px;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-map-stat-cover{grid-column:span 2}
-.sd-map-cover{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 12px;margin-top:4px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-map-legend{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fafafa);font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-map-legend-title{font-weight:600;color:var(--dsw-alias-label-primary,#333)}
-.sd-map-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.sd-map-legend-sep{color:var(--dsw-alias-border-l1,#ccc)}
-.sd-map-swatch{display:inline-block;width:9px;height:9px;border-radius:3px;flex:0 0 auto;border:1px solid transparent}
-.sd-map-swatch-draft{background:color-mix(in srgb,var(--dsw-alias-label-tertiary,#999) 55%,transparent)}
-.sd-map-swatch-revised{background:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-map-swatch-final{background:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-map-swatch-planned{background:transparent;border:1px dashed var(--dsw-alias-label-secondary,#777)}
-.sd-map-swatch-att-low{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-map-swatch-att-mid{background:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-map-swatch-att-high{background:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-map-swatch-att-untested{background:var(--dsw-alias-label-secondary,#888)}
-.sd-map-swatch-att-none{background:transparent;border:1px solid var(--dsw-alias-border-l1,#ccc)}
-.sd-map-board{display:flex;flex-direction:column;gap:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;padding:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);overflow-x:auto}
-.sd-map-row{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:8px;min-width:640px}
-.sd-map-row-rev{direction:rtl}
-.sd-mapnode{position:relative;direction:ltr;display:flex;flex-direction:column;gap:3px;text-align:left;padding:8px 9px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-left:3px solid var(--dsw-alias-label-tertiary,#999);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#111);font:inherit;cursor:pointer;min-width:0;transition:transform .14s ease,box-shadow .14s ease,border-color .14s ease}
-.sd-mapnode:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.14);border-color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-mapnode:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#247bbf);outline-offset:2px}
-.sd-mapnode-status-draft{border-left-color:var(--dsw-alias-label-tertiary,#999)}
-.sd-mapnode-status-revised{border-left-color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-mapnode-status-final{border-left-color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-mapnode-status-planned{border-style:dashed;border-left-style:dashed;background:color-mix(in srgb,var(--dsw-alias-bg-layer-2,#f4f4f4) 55%,transparent)}
-.sd-mapnode-top{display:flex;align-items:center;justify-content:space-between;gap:4px;min-width:0}
-.sd-mapnode-chapter{font-size:18px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
-.sd-mapnode-att{font-size:10px;font-weight:700;line-height:16px;padding:0 5px;border-radius:999px;border:1px solid transparent;white-space:nowrap}
-.sd-mapnode-att-low{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent)}
-.sd-mapnode-att-mid{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
-.sd-mapnode-att-high{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-mapnode-att-untested{color:var(--dsw-alias-label-secondary,#666);border-color:var(--dsw-alias-border-l2,#ddd)}
-.sd-mapnode-att-none{color:var(--dsw-alias-label-tertiary,#aaa);border-color:var(--dsw-alias-border-l2,#e2e2e2);background:transparent}
-.sd-mapnode-title{font-size:11.5px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.sd-mapnode-meta{display:flex;align-items:center;justify-content:space-between;gap:4px;font-size:9.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-mapnode-words{font-variant-numeric:tabular-nums}
-.sd-mapnode-badges{display:flex;flex-wrap:wrap;gap:3px}
-.sd-mapnode-badge{font-size:9px;line-height:14px;padding:0 4px;border-radius:4px;background:var(--dsw-alias-bg-layer-2,#f0f0f0);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-mapnode-badge-event{color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-mapnode-badge-conflict{color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-mapnode-badge-foreshadow{color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-mapnode-badge-highlight{color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-map-detail{overflow:hidden}
-.sd-modal-head .sd-map-detail-title{flex:0 1 auto;font-size:14px}
-.sd-map-detail-head{flex-wrap:wrap;gap:8px}
-.sd-map-detail-actions{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
-.sd-map-detail-body{display:flex;flex-direction:column;gap:10px}
-.sd-map-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-map-section:first-child{border-top:0;padding-top:0}
-.sd-map-section-title{margin:0 0 5px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
-.sd-map-text{font-size:12px;line-height:1.7;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
-.sd-map-detail-meta{font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-map-att{display:flex;flex-direction:column;gap:3px}
-.sd-map-att-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.sd-map-att-score{font-size:20px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums}
-.sd-map-att-score-low{color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-map-att-score-mid{color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-map-att-score-high{color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-map-att-meta{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-map-rowline{display:flex;align-items:baseline;gap:10px;padding:3px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-map-rowline:last-child{border-bottom:0}
-.sd-map-rowline-main{flex:1;min-width:0;color:var(--dsw-alias-label-primary,#333);white-space:pre-wrap;word-break:break-word}
-.sd-map-rowline-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-map-empty{font-size:12px;color:var(--dsw-alias-label-tertiary,#999)}
-
-/* v0.6：🌍 世界 / 地点 / 只读 HTML */
-.sd-world-guide{display:flex;align-items:center;gap:14px;justify-content:space-between;flex-wrap:wrap;padding:12px 14px;border:1px dashed color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 40%,transparent);border-radius:11px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fafafa)}
-.sd-world-guide strong{font-size:13px}
-.sd-world-guide p{margin:2px 0 0;max-width:720px}
-.sd-world-guide-actions{display:flex;gap:8px;flex-wrap:wrap}
-.sd-world-settings-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap}
-.sd-world-settings-head .sd-h3{margin:0}
-.sd-world-settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:0 14px;margin-top:8px}
-.sd-world-settings-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:4px}
-.sd-world-map-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap}
-.sd-world-map-head .sd-h3{margin:0}
-.sd-world-focus-banner{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;margin-top:8px;padding:7px 11px;border-radius:9px;font-size:11.5px;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 9%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 30%,transparent);color:var(--dsw-alias-label-primary,#333)}
-.sd-world-focus-banner-warn{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 35%,transparent)}
-.sd-world-map-scroll{margin-top:8px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc);overflow:hidden}
-.sd-world-svg{display:block;width:100%;height:min(70vh,640px);background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-world-map-bg{fill:color-mix(in srgb,var(--dsw-alias-bg-layer-2,#f5f5f5) 55%,transparent);stroke:var(--dsw-alias-border-l2,#e6e6e6);stroke-width:1}
-.sd-world-map-empty{display:flex;align-items:center;justify-content:center;min-height:280px;padding:24px;text-align:center;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
-.sd-world-edge-line{stroke:var(--dsw-alias-border-l1,#c9c9c9);stroke-width:1.6;fill:none}
-.sd-world-edge-hot .sd-world-edge-line{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:2.6}
-.sd-world-edge-dim .sd-world-edge-line{opacity:.28}
-.sd-world-edge-label{font-size:11px;fill:var(--dsw-alias-label-tertiary,#888);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;stroke-linejoin:round;text-anchor:middle;pointer-events:none}
-.sd-world-node{cursor:grab}
-.sd-world-node:active{cursor:grabbing}
-.sd-world-node circle{fill:var(--loc-color,#8fa8bd);stroke:var(--dsw-alias-bg-base,#fff);stroke-width:2;transition:stroke-width .12s ease,stroke .12s ease}
-.sd-world-node:hover circle{stroke:var(--dsw-alias-label-primary,#333)}
-.sd-world-node-label{font-size:12px;fill:var(--dsw-alias-label-primary,#222);paint-order:stroke;stroke:var(--dsw-alias-bg-layer-1,#fcfcfc);stroke-width:3px;text-anchor:middle;pointer-events:none}
-.sd-world-node-hot circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:3}
-.sd-world-node-adj circle{stroke:var(--dsw-alias-state-warn-primary,#d68910);stroke-width:2.4}
-.sd-world-node-focus circle{stroke:var(--dsw-alias-brand-primary,#247bbf);stroke-width:3.4}
-.sd-world-node-drag circle{stroke:var(--dsw-alias-state-error-primary,#c0392b);stroke-width:3}
-.sd-world-legend{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:8px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-world-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.sd-world-legend-swatch{width:9px;height:9px;border-radius:50%;background:var(--loc-color,#8fa8bd);display:inline-block;flex:0 0 auto}
-.sd-loc-type-capital{--loc-color:#c9a227}
-.sd-loc-type-city{--loc-color:#4a8fd4}
-.sd-loc-type-town{--loc-color:#3f9e9a}
-.sd-loc-type-village{--loc-color:#5aa469}
-.sd-loc-type-pass{--loc-color:#c9772f}
-.sd-loc-type-temple{--loc-color:#8a6fd1}
-.sd-loc-type-mountain{--loc-color:#8a7f6d}
-.sd-loc-type-river{--loc-color:#3a9fb8}
-.sd-loc-type-sea{--loc-color:#2f6f9e}
-.sd-loc-type-other{--loc-color:#8a8a8a}
-.sd-world-locations-head{display:flex;align-items:baseline;gap:10px;justify-content:space-between;flex-wrap:wrap;margin-bottom:8px}
-.sd-world-locations-head .sd-h3{margin:0}
-.sd-loc-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;overflow:hidden}
-.sd-loc-row{display:grid;grid-template-columns:minmax(120px,1.4fr) 100px 96px 60px 90px 120px;gap:8px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-loc-row:last-child{border-bottom:0}
-.sd-loc-row-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
-.sd-loc-row-focus{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent)}
-.sd-loc-name{border:0;background:transparent;padding:0;font:inherit;font-weight:600;color:var(--dsw-alias-label-primary,#111);cursor:pointer;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-loc-name:hover{color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-loc-type,.sd-loc-coords,.sd-loc-connections,.sd-loc-first{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-loc-type{display:flex;align-items:center;gap:5px}
-.sd-loc-dot{width:9px;height:9px;border-radius:50%;background:var(--loc-color,#8fa8bd);display:inline-block;flex:0 0 auto}
-.sd-loc-actions{display:flex;gap:6px;justify-content:flex-end}
-.sd-loc-editor-body{display:flex;flex-direction:column;gap:10px}
-.sd-loc-form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 14px}
-.sd-loc-conn-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
-.sd-loc-conn-head .sd-h3{margin:0}
-.sd-loc-conn-list{display:flex;flex-direction:column;gap:6px}
-.sd-loc-conn-row{display:grid;grid-template-columns:minmax(120px,1fr) 100px 84px 92px minmax(90px,1fr) 32px;gap:8px;align-items:center}
-.sd-loc-conn-row .sd-input{padding:5px 7px;font-size:11.5px;min-width:0}
-.sd-htmlview{display:flex;flex-direction:column;max-height:92vh}
-.sd-htmlview-body{flex:1;min-height:0;padding:10px 12px;display:flex}
-.sd-htmlview-frame{flex:1;width:100%;min-height:min(72vh,720px);border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
-.sd-htmlview-foot{display:flex;align-items:center;justify-content:space-between;gap:10px}
-.sd-create-world{margin-top:14px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:12px}
-.sd-create-world .sd-h3{margin:0 0 8px}
-.sd-create-world-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px}
-.sd-create-world-toggle{margin-top:4px}
-.sd-create-world-hint{margin:6px 0 0}
-.sd-pano-loc{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-pano-location{display:inline-flex;align-items:center;gap:6px}
-.sd-pano-location-select{width:auto;min-width:130px}
-
-/* v0.6：一号原则 ⚡ ATTENTION IS ALL YOU NEED */
-.sd-principle-bar{display:flex;align-items:center;gap:14px;padding:5px 16px;min-height:34px;box-sizing:border-box;border-bottom:1px solid var(--dsw-alias-border-l2,#e5e5e5);background:linear-gradient(90deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 9%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fafafa);font-size:11.5px;line-height:1.4;flex:0 0 auto;overflow:hidden}
-.sd-principle-main{display:flex;align-items:baseline;gap:10px;min-width:0;flex:0 1 auto;overflow:hidden}
-.sd-principle-slogan{font-weight:700;color:var(--dsw-alias-brand-primary,#247bbf);letter-spacing:.02em;white-space:nowrap}
-.sd-principle-sub{color:var(--dsw-alias-label-secondary,#666);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-principle-hint{margin-left:auto;color:var(--dsw-alias-label-tertiary,#888);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-principle-hero{display:grid;grid-template-columns:minmax(220px,1.1fr) minmax(320px,1.4fr);gap:14px 20px;align-items:center;padding:16px 18px;border:1px solid color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);border-left:4px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:14px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 14%,transparent),transparent 62%),var(--dsw-alias-bg-layer-1,#fcfcfc);box-shadow:0 1px 3px rgba(0,0,0,.05)}
-.sd-principle-hero-main{display:flex;flex-direction:column;gap:4px;min-width:0}
-.sd-principle-hero-slogan{margin:0;font-size:22px;line-height:1.2;font-weight:800;letter-spacing:.02em;color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-principle-hero-sub{margin:0;font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#333)}
-.sd-principle-hero-hint{margin:2px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666)}
-.sd-principle-hero-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
-.sd-principle-hero-stat{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:10px;background:var(--dsw-alias-bg-base,#fff);min-width:0}
-.sd-principle-hero-label{font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-principle-hero-value{margin-top:2px;font-size:22px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
-.sd-principle-hero-value-empty{color:var(--dsw-alias-label-tertiary,#999)}
-.sd-principle-hero-unit{font-size:11px;font-weight:400;color:var(--dsw-alias-label-tertiary,#888);margin-left:1px}
-.sd-principle-hero-list{display:flex;flex-direction:column;gap:1px;margin-top:2px;font-size:11.5px;font-variant-numeric:tabular-nums}
-.sd-principle-hero-list-item{color:var(--dsw-alias-label-primary,#333);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-principle-hero-stat-hint{margin-top:3px;font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-principle-hero-actions{grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap}
-.sd-principle-inline{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:6px 0 0;padding:6px 10px;border-left:3px solid var(--dsw-alias-brand-primary,#247bbf);border-radius:0 7px 7px 0;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent);font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555)}
-.sd-principle-inline strong{color:var(--dsw-alias-brand-primary,#247bbf);font-size:12px;letter-spacing:.02em;white-space:nowrap}
-.sd-principle-inline span{min-width:0}
-
-/* v0.6：📚 整本书流水线 */
-.sd-pipe-status-card{display:flex;flex-direction:column;gap:10px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 7%,transparent),transparent 60%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-pipe-status-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-pipe-status-chip{display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;font-size:10.5px;line-height:19px;font-weight:600;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-pipe-status-preparing,.sd-pipe-status-ready{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
-.sd-pipe-status-running,.sd-pipe-status-done{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-pipe-status-paused,.sd-pipe-status-stuck{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
-.sd-pipe-status-aborted{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 10%,transparent)}
-.sd-pipe-status-mode{font-size:12.5px;font-weight:600;color:var(--dsw-alias-label-primary,#222)}
-.sd-pipe-status-target,.sd-pipe-status-session{font-size:11px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
-.sd-pipe-status-session{margin-left:auto}
-.sd-pipe-status-meta{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-pipe-actions{display:flex;gap:8px;flex-wrap:wrap}
-.sd-pipe-progress{display:flex;flex-direction:column;gap:4px}
-.sd-pipe-progress-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-pipe-progress-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
-.sd-pipe-progress-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
-.sd-pipe-progress-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-pipe-banner{padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.6;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);background:var(--dsw-alias-bg-layer-1,#fafafa);color:var(--dsw-alias-label-primary,#333)}
-.sd-pipe-banner-done{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-pipe-banner-warn{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent)}
-.sd-pipe-banner-danger{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 9%,transparent)}
-.sd-pipe-budget,.sd-pipe-stages,.sd-pipe-notes{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-pipe-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.sd-pipe-section-head .sd-h3{margin:0 0 6px}
-.sd-pipe-budget-row{display:grid;grid-template-columns:52px minmax(120px,190px) minmax(0,1fr);gap:10px;align-items:center;font-size:11.5px;margin-top:6px}
-.sd-pipe-budget-label{color:var(--dsw-alias-label-secondary,#666)}
-.sd-pipe-budget-value{color:var(--dsw-alias-label-primary,#333);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-pipe-budget-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
-.sd-pipe-budget-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
-.sd-pipe-budget-fill.sd-pipe-budget-warn,.sd-pipe-budget-summary.sd-pipe-budget-warn{background:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-pipe-budget-fill.sd-pipe-budget-danger,.sd-pipe-budget-summary.sd-pipe-budget-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-pipe-budget-summary{margin-top:8px;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666);padding:4px 8px;border-radius:7px;background:var(--dsw-alias-bg-layer-2,#f4f4f4)}
-.sd-pipe-budget-summary.sd-pipe-budget-warn{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 14%,transparent)}
-.sd-pipe-budget-summary.sd-pipe-budget-danger{color:var(--dsw-alias-label-primary,#222);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 12%,transparent)}
-/* 收尾清理 */
-.sd-pipe-banner-info{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
-.sd-pipe-cleanup-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.sd-pipe-cleanup{padding:12px 14px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 35%,transparent);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 8%,transparent),transparent 65%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-pipe-cleanup-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-top:6px}
-.sd-pipe-cleanup-stat{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
-.sd-pipe-cleanup-value{font-size:20px;font-weight:700;line-height:1.2;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
-.sd-pipe-cleanup-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666);margin-top:2px}
-.sd-pipe-cleanup-hint{margin:8px 0 0;font-size:11.5px;color:var(--dsw-alias-label-secondary,#555)}
-.sd-pipe-cleanup-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-.sd-pipe-cleanup-failed{margin-top:6px;font-size:11.5px}
-.sd-pipe-cleanup-failed summary{cursor:pointer;color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-pipe-cleanup-failed-list{display:flex;flex-direction:column;gap:2px;margin-top:4px;max-height:160px;overflow:auto;color:var(--dsw-alias-label-secondary,#666)}
-.sd-pipe-cleanup-failed-item{line-height:1.6;word-break:break-word}
-@media (max-width:760px){.sd-pipe-cleanup-grid{grid-template-columns:1fr 1fr}.sd-pipe-cleanup-banner{align-items:flex-start}}
-.sd-pipe-stage-list{display:flex;flex-direction:column;gap:2px}
-.sd-pipe-stage{display:grid;grid-template-columns:22px minmax(120px,1fr) auto auto;gap:8px;align-items:center;padding:5px 8px;border-radius:7px;font-size:12px}
-.sd-pipe-stage-current{background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
-.sd-pipe-stage-icon{width:20px;text-align:center;color:var(--dsw-alias-label-tertiary,#999)}
-.sd-pipe-stage-done .sd-pipe-stage-icon{color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-pipe-stage-running .sd-pipe-stage-icon{color:var(--dsw-alias-brand-primary,#247bbf)}
-.sd-pipe-stage-failed .sd-pipe-stage-icon{color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-pipe-stage-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#333)}
-.sd-pipe-stage-range{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#888);white-space:nowrap}
-.sd-pipe-empty{margin:4px 0 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-pipe-note-list{display:flex;flex-direction:column;gap:2px;max-height:240px;overflow:auto}
-.sd-pipe-note{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:11.5px;line-height:1.55}
-.sd-pipe-note:last-child{border-bottom:0}
-.sd-pipe-note-time{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
-.sd-pipe-note-text{min-width:0;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
-.sd-pipe-prepared-hint{margin:0;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-pipe-wizard-body{display:flex;flex-direction:column;gap:14px}
-.sd-pipe-wizard-section{border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:10px}
-.sd-pipe-wizard-section:first-child{border-top:0;padding-top:0}
-.sd-pipe-wizard-section .sd-h3{margin:0 0 8px}
-.sd-pipe-wizard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 14px}
-.sd-pipe-wizard-hint{margin:6px 0 0}
-.sd-pipe-wizard-total{display:flex;gap:8px 14px;flex-wrap:wrap;margin-top:4px;font-size:12px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-pipe-wizard-warn{margin:8px 0 0;padding:6px 10px;border-radius:8px;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-primary,#333);border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
-.sd-pipe-wizard-state{display:flex;flex-direction:column;gap:2px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2);padding-top:8px}
-.sd-pipe-wizard-actions{flex-wrap:wrap;gap:8px}
-.sd-pipe-overview{display:flex;flex-direction:column;gap:6px}
-.sd-pipe-overview-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-pipe-overview-head .sd-h3{margin:0}
-.sd-pipe-overview-head .sd-btn{margin-left:auto}
-.sd-pipe-overview-metrics{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:11.5px;color:var(--dsw-alias-label-secondary,#666)}
-/* 整本书子导航 + ✍️ 扩写面板 */
-.sd-pipe-subnav{display:flex;align-items:center;gap:2px;border-bottom:1px solid var(--dsw-alias-border-l2,#e2e2e2);padding-bottom:2px}
-.sd-pipe-subtab{border:0;background:transparent;padding:6px 14px;border-radius:8px 8px 0 0;font:inherit;font-size:12.5px;color:var(--dsw-alias-label-secondary,#666);cursor:pointer;white-space:nowrap}
-.sd-pipe-subtab:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.05));color:var(--dsw-alias-label-primary,#111)}
-.sd-pipe-subtab-active{color:var(--dsw-alias-brand-primary,#247bbf);font-weight:600;background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
-.sd-exp-panel{display:flex;flex-direction:column;gap:12px}
-.sd-exp-head{display:flex;align-items:flex-start;gap:12px;justify-content:space-between;flex-wrap:wrap}
-.sd-exp-head .sd-h3{margin:0 0 4px}
-.sd-exp-status{display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;font-size:10.5px;line-height:20px;font-weight:600;white-space:nowrap;border:1px solid var(--dsw-alias-border-l2,#ddd);background:var(--dsw-alias-bg-layer-2,#f4f4f4);color:var(--dsw-alias-label-secondary,#666)}
-.sd-exp-status-planning,.sd-exp-status-plan-ready,.sd-exp-status-structuring{color:var(--dsw-alias-brand-primary,#247bbf);border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 10%,transparent)}
-.sd-exp-status-running,.sd-exp-status-done{color:var(--dsw-alias-state-success-primary,#1e8449);border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-exp-status-waiting-outline,.sd-exp-status-paused,.sd-exp-status-stuck{color:var(--dsw-alias-state-warn-primary,#d68910);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent)}
-.sd-exp-config,.sd-exp-section,.sd-exp-budget{padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:12px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-exp-config{display:flex;flex-direction:column;gap:2px}
-.sd-exp-section + .sd-exp-section{margin-top:8px}
-.sd-exp-section-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.sd-exp-section-head .sd-h3{margin:0 0 6px}
-.sd-exp-mode{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.sd-exp-chapter-pick{display:inline-flex;align-items:center;gap:6px}
-.sd-exp-chapter-pick .sd-input{min-width:180px}
-.sd-exp-target-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.sd-exp-target-row .sd-input{max-width:220px}
-.sd-exp-required{margin:6px 0 0;font-size:11.5px;color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-exp-additions{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap}
-.sd-exp-additions-limit{display:inline-flex;align-items:center;gap:6px}
-.sd-exp-additions-limit .sd-input{width:86px}
-.sd-exp-outline-toggle{flex:1 1 100%}
-.sd-exp-config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 14px}
-.sd-exp-budget-row{display:grid;grid-template-columns:52px minmax(120px,190px) minmax(0,1fr);gap:10px;align-items:center;font-size:11.5px;margin-top:6px}
-.sd-exp-budget-label{color:var(--dsw-alias-label-secondary,#666)}
-.sd-exp-budget-value{color:var(--dsw-alias-label-primary,#333);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sd-exp-budget-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
-.sd-exp-budget-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
-.sd-exp-budget-fill.sd-exp-budget-warn{background:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-exp-budget-fill.sd-exp-budget-danger{background:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-exp-budget-hint{margin:8px 0 0;font-size:11px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-exp-budget-hint.sd-exp-budget-warn{color:var(--dsw-alias-state-warn-primary,#d68910)}
-.sd-exp-budget-hint.sd-exp-budget-danger{color:var(--dsw-alias-state-error-primary,#c0392b)}
-.sd-exp-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.sd-exp-banner{padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.6;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);background:var(--dsw-alias-bg-layer-1,#fafafa);color:var(--dsw-alias-label-primary,#333)}
-.sd-exp-banner-info{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-brand-primary,#247bbf) 8%,transparent)}
-.sd-exp-banner-warn{border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 9%,transparent)}
-.sd-exp-banner-done{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 40%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 10%,transparent)}
-.sd-exp-progress{display:flex;flex-direction:column;gap:4px;padding:10px 14px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:11px;background:var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-exp-progress-head{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-exp-progress-bar{height:7px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-secondary,#888) 16%,transparent);overflow:hidden}
-.sd-exp-progress-fill{height:100%;border-radius:4px;background:var(--dsw-alias-brand-primary,#247bbf);transition:width .2s ease}
-.sd-exp-table{border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;overflow:hidden}
-.sd-exp-tr{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);font-size:12px}
-.sd-exp-tr:last-child{border-bottom:0}
-.sd-exp-tr-head{background:var(--dsw-alias-bg-layer-1,#f6f6f6);color:var(--dsw-alias-label-secondary,#666);font-size:11px;font-weight:600}
-.sd-exp-tr span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sd-exp-target-input{width:100%;padding:4px 6px;font-size:11.5px;box-sizing:border-box}
-.sd-exp-meta-row{display:flex;align-items:center;gap:8px 14px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-exp-list{display:flex;flex-direction:column;gap:3px}
-.sd-exp-li{font-size:12px;line-height:1.65;color:var(--dsw-alias-label-secondary,#555);padding-left:14px;position:relative}
-.sd-exp-li:before{content:"·";position:absolute;left:4px;color:var(--dsw-alias-label-tertiary,#999)}
-.sd-exp-note-list{display:flex;flex-direction:column;gap:2px;max-height:220px;overflow:auto}
-.sd-exp-note{display:flex;gap:10px;padding:4px 0;border-bottom:1px dashed var(--dsw-alias-border-l2,#eee);font-size:11.5px;line-height:1.55}
-.sd-exp-note:last-child{border-bottom:0}
-.sd-exp-note-time{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#888);font-variant-numeric:tabular-nums}
-.sd-exp-note-text{min-width:0;color:var(--dsw-alias-label-secondary,#555);white-space:pre-wrap;word-break:break-word}
-.sd-exp-report{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
-.sd-exp-report-stat{display:flex;flex-direction:column;gap:2px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
-.sd-exp-report-label{font-size:10.5px;color:var(--dsw-alias-label-secondary,#666)}
-.sd-exp-report-value{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#111)}
-.sd-exp-empty{margin:4px 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
-/* 待确认区块 + 大纲变更勾选 + 子导航徽标 */
-.sd-exp-confirm{padding:12px 14px;border:1px solid color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 45%,transparent);border-radius:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d68910) 10%,transparent),transparent 70%),var(--dsw-alias-bg-layer-1,#fcfcfc)}
-.sd-exp-confirm-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.sd-exp-confirm-head .sd-h3{margin:0 0 6px}
-.sd-exp-confirm-list{display:flex;flex-direction:column;gap:6px}
-.sd-exp-confirm-item{padding:8px 10px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff)}
-.sd-exp-confirm-question{font-size:12.5px;line-height:1.6;font-weight:600;color:var(--dsw-alias-label-primary,#222);word-break:break-word}
-.sd-exp-confirm-impact{margin-top:2px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-word}
-.sd-exp-confirm-options{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
-.sd-exp-confirm-fallback{border-style:dashed}
-.sd-exp-confirm-empty{margin:4px 0;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}
-.sd-exp-confirm-footer{margin:8px 0 0;font-size:11.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#555)}
-.sd-exp-outline-confirm{margin-top:10px;padding-top:10px;border-top:1px dashed var(--dsw-alias-border-l2,#e2e2e2)}
-.sd-exp-outline-confirm-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.sd-exp-outline-confirm-head .sd-h3{margin:0 0 6px}
-.sd-exp-outline-bulk{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
-.sd-exp-outline-list{display:flex;flex-direction:column;gap:4px}
-.sd-exp-outline-row{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:8px;align-items:flex-start;padding:7px 9px;border:1px solid var(--dsw-alias-border-l2,#e2e2e2);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);cursor:pointer}
-.sd-exp-outline-row-readonly{cursor:default}
-.sd-exp-outline-row-approved{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 35%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1e8449) 6%,var(--dsw-alias-bg-base,#fff))}
-.sd-exp-outline-row input[type="checkbox"]{margin-top:3px}
-.sd-exp-outline-checkmark{margin-top:2px;text-align:center;color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
-.sd-exp-outline-row-approved .sd-exp-outline-checkmark{color:var(--dsw-alias-state-success-primary,#1e8449)}
-.sd-exp-outline-main{min-width:0}
-.sd-exp-outline-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;font-weight:600;line-height:1.6;color:var(--dsw-alias-label-primary,#222);word-break:break-word}
-.sd-exp-outline-meta{margin-top:2px;font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#666);word-break:break-word}
-.sd-exp-badge{display:inline-flex;align-items:center;margin-left:6px;padding:0 6px;border-radius:999px;font-size:10px;line-height:17px;font-weight:700;color:var(--dsw-alias-state-error-primary,#c0392b);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 12%,transparent);border:1px solid color-mix(in srgb,var(--dsw-alias-state-error-primary,#c0392b) 45%,transparent)}
-@media (max-width:760px){.sd-pipe-subnav{overflow-x:auto}.sd-exp-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-exp-budget-bar{grid-column:1/-1}.sd-exp-config-grid{grid-template-columns:1fr 1fr}.sd-exp-table{overflow-x:auto}.sd-exp-tr{min-width:420px}.sd-exp-actions .sd-btn{flex:1 1 auto}.sd-exp-status{margin-left:0}.sd-exp-outline-row{grid-template-columns:18px minmax(0,1fr)}.sd-exp-outline-row>.sd-tag{grid-column:2;justify-self:start}}
-@media (max-width:760px){.sd-pipe-budget-row{grid-template-columns:48px minmax(90px,1fr)}.sd-pipe-budget-bar{grid-column:1/-1}.sd-pipe-stage{grid-template-columns:20px minmax(80px,1fr) auto}.sd-pipe-stage-range{display:none}.sd-pipe-actions .sd-btn{flex:1 1 auto}.sd-pipe-overview-head .sd-btn{margin-left:0}.sd-pipe-status-session{margin-left:0}}
-@media (max-width:900px){.sd-principle-bar .sd-principle-hint{display:none}.sd-principle-hero{grid-template-columns:1fr}.sd-principle-hero-actions{grid-column:auto}}
-@media (max-width:760px){.sd-principle-bar .sd-principle-sub{display:none}.sd-principle-hero{padding:12px 14px}.sd-principle-hero-slogan{font-size:18px}.sd-principle-hero-stats{grid-template-columns:1fr 1fr}.sd-principle-inline{gap:4px}}
-@media (max-width:900px){.sd-loc-row{grid-template-columns:minmax(100px,1.2fr) 90px 60px 120px}.sd-loc-row>:nth-child(3),.sd-loc-row>:nth-child(5){display:none}.sd-loc-conn-row{grid-template-columns:minmax(100px,1fr) 88px 70px 84px}.sd-loc-conn-row>:nth-child(5){display:none}.sd-world-svg{height:min(62vh,520px)}}
-@media (max-width:760px){.sd-loc-row{grid-template-columns:minmax(80px,1fr) 84px 110px}.sd-loc-row>:nth-child(3),.sd-loc-row>:nth-child(4),.sd-loc-row>:nth-child(5){display:none}.sd-loc-conn-row{grid-template-columns:1fr 1fr}.sd-loc-conn-row>:nth-child(5){display:block}.sd-world-settings-grid{grid-template-columns:1fr 1fr}.sd-world-svg{height:min(58vh,440px)}}
-@media (max-width:900px){.sd-map-row{grid-template-columns:repeat(6,minmax(0,1fr));min-width:0}.sd-map-stat-cover{grid-column:span 1}.sd-map-cover{grid-template-columns:1fr}}
-@media (max-width:760px){.sd-mapnode-chapter{font-size:16px}.sd-map-board{padding:8px}.sd-map-row{gap:6px}.sd-map-legend{gap:6px 10px}}
-@media (max-width:760px){.sd-char-row,.sd-char-fact-row,.sd-pano-row{flex-direction:column;gap:2px;align-items:flex-start}.sd-conf-actions,.sd-fore-actions{margin-left:0;width:100%;justify-content:flex-start}.sd-pano-att{margin-left:0}}
-@media (max-width: 900px){.sd-att-ov{grid-template-columns:1fr 1fr}.sd-att-ov-bigwrap{grid-column:1/-1;border-right:0;padding-right:0;border-bottom:1px solid var(--dsw-alias-border-l2,#eee);padding-bottom:8px}}
-@media (max-width: 760px){.sd-att-ov{grid-template-columns:1fr}.sd-att-card-actions{margin-left:0}}
-@media (max-width: 760px){.sd-fresh-actions{flex-direction:column;align-items:stretch}.sd-fresh-pick{flex-direction:column;align-items:flex-start}.sd-fresh-select{width:100%;max-width:none}.sd-fresh-compact .sd-btn{margin-left:0;width:100%}}
-@media (max-width: 900px){.sd-two-col{grid-template-columns:1fr}.sd-form-2{grid-template-columns:1fr}.sd-dash-grid{grid-template-columns:1fr}.sd-nav{width:120px}}
+.nd-overlay{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--dsw-alias-scrim,rgba(0,0,0,.45))}.nd-panel{width:100%;height:calc(100vh - 40px);max-width:1680px;display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:14px;background:var(--dsw-alias-bg,#fff);color:var(--dsw-alias-fg,#111827);box-shadow:0 24px 64px rgba(0,0,0,.28)}.nd-top{display:flex;align-items:center;gap:14px;padding:9px 16px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-bg-elevated,#fafafa);flex:none}.nd-brand{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}.nd-brand-icon{font-size:18px}.nd-top-meta{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-top-right{margin-left:auto;display:flex;align-items:center;gap:10px}.nd-proj{display:flex;align-items:center;gap:6px}.nd-proj-label{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-body{flex:1;display:flex;min-height:0}.nd-nav{width:176px;flex:none;display:flex;flex-direction:column;gap:2px;padding:10px 8px;border-right:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-bg-elevated,#fafafa);overflow-y:auto}.nd-nav-group{padding:10px 8px 4px;font-size:11px;letter-spacing:.06em;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-nav-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font-size:13px;text-align:left;cursor:pointer}.nd-nav-item:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.05))}.nd-nav-item.nd-nav-active{background:var(--dsw-alias-brand-weak,rgba(59,130,246,.14));color:var(--dsw-alias-brand,#2563eb);font-weight:600}.nd-nav-icon{width:16px;text-align:center}.nd-nav-title{flex:1}.nd-main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}.nd-page{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;padding:16px 18px;overflow-y:auto}.nd-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.nd-page-head h2{margin:0;font-size:18px}.nd-page-actions{display:flex;align-items:center;gap:8px;flex:none}.nd-hint{margin:0;font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-muted{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:8px;background:var(--dsw-alias-bg,#fff);color:inherit;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}.nd-btn:hover:not(:disabled){border-color:var(--dsw-alias-brand,#2563eb)}.nd-btn:disabled{opacity:.5;cursor:not-allowed}.nd-btn-sm{padding:3px 9px;font-size:12px}.nd-btn-primary{background:var(--dsw-alias-brand,#2563eb);border-color:var(--dsw-alias-brand,#2563eb);color:var(--dsw-alias-brand-fg,#fff)}.nd-btn-danger{color:var(--dsw-alias-error,#dc2626);border-color:var(--dsw-alias-error,#dc2626)}.nd-linkbtn{border:0;background:transparent;color:var(--dsw-alias-brand,#2563eb);font-size:12px;cursor:pointer;padding:2px 4px;border-radius:6px}.nd-linkbtn:hover{text-decoration:underline}.nd-iconbtn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer}.nd-iconbtn:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.06))}.nd-input{width:100%;box-sizing:border-box;padding:6px 9px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:8px;background:var(--dsw-alias-bg,#fff);color:inherit;font:inherit;font-size:13px}.nd-input:focus{outline:2px solid var(--dsw-alias-brand-weak,rgba(59,130,246,.35));outline-offset:0;border-color:var(--dsw-alias-brand,#2563eb)}.nd-textarea{resize:vertical;line-height:1.7}.nd-field{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}.nd-label{font-size:12px;font-weight:600}.nd-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}.nd-form-grid .nd-field:last-child{grid-column:1/-1}.nd-form-row{display:flex;gap:10px;align-items:center}.nd-check{width:14px;height:14px;accent-color:var(--dsw-alias-brand,#2563eb);cursor:pointer}.nd-tag{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border-radius:999px;font-size:11px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563);white-space:nowrap}.nd-tag-brand{background:var(--dsw-alias-brand-weak,rgba(59,130,246,.14));color:var(--dsw-alias-brand,#2563eb)}.nd-tag-ok{background:rgba(22,163,74,.14);color:#15803d}.nd-tag-warn{background:rgba(217,119,6,.16);color:#b45309}.nd-tag-error{background:rgba(220,38,38,.14);color:#b91c1c}.nd-tag-muted{background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#6b7280)}.nd-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-fg-muted,#9ca3af)}.nd-dot-brand{background:var(--dsw-alias-brand,#2563eb)}.nd-dot-ok{background:#16a34a}.nd-dot-warn{background:#d97706}.nd-dot-error{background:#dc2626}.nd-tabs{display:flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:10px;background:var(--dsw-alias-bg-elevated,#f3f4f6);width:fit-content;flex:none}.nd-tab{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}.nd-tab.nd-tab-active{background:var(--dsw-alias-bg,#fff);color:var(--dsw-alias-brand,#2563eb);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.12)}.nd-tab-badge{font-size:10px;padding:0 5px;border-radius:999px;background:var(--dsw-alias-brand-weak,rgba(59,130,246,.16));color:var(--dsw-alias-brand,#2563eb)}.nd-seg{display:flex;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:8px;overflow:hidden;flex:none}.nd-seg-item{padding:4px 10px;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}.nd-seg-item+.nd-seg-item{border-left:1px solid var(--dsw-alias-border,#e5e7eb)}.nd-seg-item.nd-seg-active{background:var(--dsw-alias-brand,#2563eb);color:var(--dsw-alias-brand-fg,#fff)}.nd-msg{display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:8px;font-size:12px;flex:none}.nd-msg-info{background:var(--dsw-alias-brand-weak,rgba(59,130,246,.12));color:var(--dsw-alias-brand,#1d4ed8)}.nd-msg-ok{background:rgba(22,163,74,.12);color:#15803d}.nd-msg-error{background:rgba(220,38,38,.12);color:#b91c1c}.nd-msg-text{flex:1}.nd-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:44px 16px;border:1px dashed var(--dsw-alias-border,#e5e7eb);border-radius:12px;font-size:13px;color:var(--dsw-alias-fg-muted,#6b7280);text-align:center}.nd-loading{display:flex;align-items:center;gap:8px;padding:20px;font-size:13px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-spinner{width:14px;height:14px;border:2px solid var(--dsw-alias-border,#e5e7eb);border-top-color:var(--dsw-alias-brand,#2563eb);border-radius:50%;animation:nd-spin .8s linear infinite}@keyframes nd-spin{to{transform:rotate(360deg)}}.nd-errorbox{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:rgba(220,38,38,.1);color:#b91c1c;font-size:12px}.nd-errorbox-icon{font-size:14px}.nd-errorbox-text{flex:1}.nd-mask{position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.45)}.nd-modal{width:520px;max-width:100%;max-height:82vh;display:flex;flex-direction:column;border-radius:14px;background:var(--dsw-alias-bg,#fff);color:var(--dsw-alias-fg,#111827);box-shadow:0 24px 64px rgba(0,0,0,.3)}.nd-modal-wide{width:760px}.nd-modal-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.nd-modal-title{font-size:14px}.nd-modal-body{padding:14px 16px;overflow-y:auto}.nd-modal-foot{display:flex;justify-content:flex-end;padding:12px 16px;border-top:1px solid var(--dsw-alias-border,#e5e7eb)}.nd-modal-actions{display:flex;gap:8px}
+.nd-bar{position:relative;height:6px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#eef0f3);overflow:hidden;flex:1;min-width:40px}.nd-bar-fill{height:100%;border-radius:999px;background:var(--dsw-alias-brand,#2563eb);transition:width .2s}.nd-bar-ok{background:#16a34a}.nd-bar-warn{background:#d97706}.nd-bar-error{background:#dc2626}.nd-table-wrap{overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px}.nd-table{width:100%;border-collapse:collapse;font-size:12px}.nd-table th,.nd-table td{padding:7px 10px;border-bottom:1px solid var(--dsw-alias-border,#f0f1f3);text-align:left;vertical-align:top}.nd-table th{background:var(--dsw-alias-bg-elevated,#fafafa);font-weight:600;position:sticky;top:0}.nd-table tr:last-child td{border-bottom:0}.nd-cell-clip{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nd-row-actions{display:flex;gap:6px;flex-wrap:wrap}.nd-panel-box{display:flex;flex-direction:column;gap:10px;flex:1;min-height:0}.nd-ledger-note{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.nd-stat{display:flex;flex-direction:column;gap:3px;padding:12px 14px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-stat-label{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-stat-value{font-size:20px}.nd-stat-hint{font-size:11px;color:var(--dsw-alias-fg-muted,#9ca3af)}.nd-two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.nd-card{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff)}.nd-card-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.nd-card-head h3{margin:0;font-size:14px}.nd-kv{display:flex;flex-direction:column;gap:4px;font-size:12px}.nd-kv-row{display:flex;gap:10px}.nd-kv-k{flex:none;min-width:96px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-kv-v{flex:1;word-break:break-word}.nd-todo-group{margin-top:6px;font-size:12px}.nd-todo-item{display:flex;align-items:center;gap:8px;width:100%;padding:5px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}.nd-todo-item:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.05))}.nd-todo-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nd-route-bars{display:flex;flex-direction:column;gap:6px;margin-top:8px}.nd-route-row{display:grid;grid-template-columns:76px 1fr 26px;align-items:center;gap:8px;font-size:12px}.nd-route-label{white-space:nowrap}.nd-route-count{text-align:right;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-route-name{flex:1}.nd-route-hot{color:var(--dsw-alias-error,#dc2626);font-weight:600}.nd-curve{width:100%;height:170px}.nd-curve-grid{stroke:var(--dsw-alias-border,#e5e7eb);stroke-width:1;stroke-dasharray:3 4}.nd-curve-line{stroke:var(--dsw-alias-brand,#2563eb);stroke-width:2;stroke-linejoin:round}.nd-curve-dot{fill:var(--dsw-alias-brand,#2563eb)}.nd-weak-list{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px}.nd-welcome{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;height:100%;padding:40px;text-align:center}.nd-welcome-icon{font-size:40px}.nd-welcome h2{margin:0}.nd-code-hint{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-pre-note{margin:6px 0 0}.nd-read{flex:1;min-height:0;display:grid;grid-template-columns:260px minmax(0,1fr) 320px;gap:0}.nd-toc{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-toc-head{padding:10px 12px 6px;display:flex;flex-direction:column;gap:6px;border-bottom:1px solid var(--dsw-alias-border,#f0f1f3)}.nd-toc-headline{display:flex;align-items:center;gap:8px}.nd-toc-headline .nd-hint{margin-right:auto}.nd-toc-list{flex:1;overflow-y:auto;padding:6px}.nd-toc-item{display:block;width:100%;padding:7px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}.nd-toc-item:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.05))}.nd-toc-item.nd-toc-active{background:var(--dsw-alias-brand-weak,rgba(59,130,246,.14))}.nd-toc-main{display:flex;align-items:center;gap:6px}.nd-toc-no{font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-toc-title{flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nd-toc-sub{display:flex;align-items:center;gap:6px;margin-top:3px}.nd-toc-right{display:flex;align-items:center;gap:6px}.nd-toc-foot{padding:8px 12px;border-top:1px solid var(--dsw-alias-border,#f0f1f3);font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-read-main{display:flex;flex-direction:column;min-width:0;min-height:0}.nd-read-head{display:flex;flex-direction:column;gap:8px;padding:10px 16px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-bg,#fff);position:relative;z-index:2}.nd-read-row{display:flex;align-items:center;gap:10px}.nd-read-pos{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto}.nd-read-prefs{display:flex;gap:4px;align-items:center}.nd-read-prefs .nd-btn{padding:2px 7px;font-size:11px}
+.nd-reader-scroll{flex:1;min-height:0;overflow-y:auto;scroll-behavior:smooth}.nd-reader-body{max-width:720px;margin:0 auto;padding:26px 30px 80px;line-height:1.95;font-size:15px}.nd-chapter{padding-bottom:30px;margin-bottom:26px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.nd-chapter:last-child{border-bottom:0}.nd-chapter-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:16px}.nd-ch-num{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-ch-title{margin:0;font-size:19px}.nd-ch-words{font-size:11px;color:var(--dsw-alias-fg-muted,#9ca3af);margin-left:auto}.nd-para{margin:0 0 1.05em;text-indent:2em}.nd-hl{background:rgba(250,204,21,.45);border-radius:3px;color:inherit}.nd-plain p{margin:0 0 .9em}.nd-loading-more{padding:16px;text-align:center;font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-search{display:flex;align-items:center;gap:8px;position:relative}.nd-search-input{flex:1}.nd-results{position:absolute;top:34px;left:0;right:0;z-index:5;max-height:300px;overflow-y:auto;padding:6px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff);box-shadow:0 12px 32px rgba(0,0,0,.18)}.nd-result{display:flex;gap:8px;width:100%;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}.nd-result:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.05))}.nd-result-ch{flex:none;color:var(--dsw-alias-brand,#2563eb)}.nd-result-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.nd-side{display:flex;flex-direction:column;gap:0;min-height:0;overflow-y:auto;border-left:1px solid var(--dsw-alias-border,#e5e7eb);background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-side-sec{padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border,#f0f1f3);font-size:12px}.nd-side-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}.nd-side-title{font-size:12px;font-weight:600}.nd-side-sub{display:flex;justify-content:space-between;padding:3px 0;font-size:12px}.nd-side-titleline{display:flex;align-items:center;gap:6px}.nd-actions{display:flex;gap:8px;flex-wrap:wrap}.nd-att{display:flex;flex-direction:column;gap:6px}.nd-att-score{display:flex;align-items:baseline;gap:6px;font-size:12px}.nd-att-score strong{font-size:20px}.nd-att-row{display:grid;grid-template-columns:60px 1fr 48px;align-items:center;gap:8px}.nd-att-label{font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-att-val{text-align:right;font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-att-empty{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-edit{display:flex;flex-direction:column;gap:8px;height:100%;padding:12px 18px;box-sizing:border-box}.nd-edit-bar{display:flex;align-items:center;gap:10px;font-size:12px}.nd-edit-title{font-size:13px}.nd-edit-state{color:var(--dsw-alias-fg-muted,#6b7280)}.nd-edit-words{color:var(--dsw-alias-fg-muted,#6b7280)}.nd-editor{flex:1;min-height:420px;width:100%;box-sizing:border-box;padding:16px 18px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff);color:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:14px;line-height:1.9;resize:none}.nd-editor:focus{outline:2px solid var(--dsw-alias-brand-weak,rgba(59,130,246,.35))}.nd-banner{display:flex;align-items:center;gap:10px;padding:7px 12px;border-radius:8px;font-size:12px}.nd-banner-warn{background:rgba(217,119,6,.14);color:#92400e}.nd-note-pop{position:fixed;z-index:90;width:320px;display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff);box-shadow:0 18px 48px rgba(0,0,0,.28)}.nd-note-pop-head{font-size:12px;font-weight:600}.nd-note-quote{max-height:64px;overflow-y:auto;padding:6px 8px;border-left:3px solid var(--dsw-alias-brand,#2563eb);background:var(--dsw-alias-bg-elevated,#fafafa);font-size:11px;color:var(--dsw-alias-fg-muted,#4b5563);white-space:pre-wrap}.nd-note-actions{display:flex;justify-content:flex-end;gap:8px}.nd-notes-list{display:flex;flex-direction:column;gap:6px}.nd-note{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg,#fff);border:1px solid var(--dsw-alias-border,#f0f1f3)}.nd-routes{display:flex;gap:10px;flex-wrap:wrap}.nd-review-list{display:flex;flex-direction:column;gap:10px}.nd-review-row{display:flex;gap:10px;padding:11px 13px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff);flex:0 0 auto}.nd-review-main{flex:1;display:flex;flex-direction:column;gap:5px;min-width:0}.nd-review-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-review-issue{font-size:13px}.nd-review-advice{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-quote{padding:6px 10px;border-left:3px solid var(--dsw-alias-border,#d1d5db);background:var(--dsw-alias-bg-elevated,#fafafa);font-size:12px;color:var(--dsw-alias-fg-muted,#4b5563);white-space:pre-wrap;max-height:120px;overflow-y:auto}.nd-review-actions{display:flex;flex-direction:column;gap:6px;flex:none;align-items:flex-end;position:sticky;top:8px}.nd-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-proposals{display:flex;flex-direction:column;gap:10px}.nd-proposal{flex:0 0 auto;min-width:0}.nd-proposal{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff);overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04)}.nd-proposal-open{border-color:var(--dsw-alias-brand,#2563eb)}.nd-proposal-head{display:flex;align-items:flex-start;gap:8px;padding:11px 14px;cursor:pointer;flex-wrap:wrap}.nd-proposal-title{flex:1 1 220px;min-width:0;font-size:13px;font-weight:600;line-height:1.5;overflow-wrap:anywhere}.nd-proposal-summary{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280);flex:1;min-width:180px}.nd-proposal-when{font-size:11px;color:var(--dsw-alias-fg-muted,#9ca3af)}.nd-proposal-arrow{color:var(--dsw-alias-fg-muted,#9ca3af)}.nd-proposal-body{display:flex;flex-direction:column;gap:10px;padding:12px 14px 14px;border-top:1px solid var(--dsw-alias-border,#f0f1f3);min-height:0}.nd-proposal-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.nd-diffs{display:flex;flex-direction:column;gap:10px;max-height:min(62vh,680px);overflow-y:auto;padding-right:6px;overscroll-behavior:contain}.nd-diff{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px;padding:10px;border-radius:10px;background:var(--dsw-alias-bg-elevated,#fafafa);flex:0 0 auto;border:1px solid var(--dsw-alias-border,#f0f1f3)}.nd-diff-col{display:flex;flex-direction:column;gap:4px;min-width:0}.nd-diff-head{font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-diff-why{grid-column:1/-1;font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-pre{margin:0;padding:9px 11px;max-height:260px;overflow:auto;border-radius:6px;background:var(--dsw-alias-bg,#fff);border:1px solid var(--dsw-alias-border,#f0f1f3);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word}.nd-gates{display:flex;flex-direction:column;gap:4px}.nd-gate-row{display:flex;align-items:center;gap:8px;font-size:12px}.nd-fixes{display:flex;flex-direction:column;gap:6px}.nd-fix{font-size:12px;padding:6px 8px;border-radius:6px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-reject{display:flex;gap:6px;align-items:center}.nd-result{padding:8px 10px;border-radius:8px;font-size:12px}.nd-result-ok{background:rgba(22,163,74,.12);color:#15803d}.nd-result-bad{background:rgba(220,38,38,.12);color:#b91c1c}.nd-run-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.nd-run-title{font-size:15px;font-weight:600}.nd-run-meta{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280);display:flex;gap:10px;flex-wrap:wrap}.nd-run-actions{display:flex;gap:8px;flex-wrap:wrap}.nd-run-grid{display:grid;grid-template-columns:1fr 320px;gap:12px;align-items:start}.nd-budget{display:flex;flex-direction:column;gap:8px;font-size:12px}.nd-budget-row{display:flex;flex-direction:column;gap:4px}.nd-stages{display:flex;flex-direction:column;gap:2px}.nd-stage{display:flex;align-items:center;gap:10px;padding:8px 6px;border-bottom:1px solid var(--dsw-alias-border,#f0f1f3);font-size:12px}.nd-stage:last-child{border-bottom:0}.nd-stage-dot{width:9px;height:9px;border-radius:50%;background:var(--dsw-alias-fg-muted,#d1d5db);flex:none}.nd-stage-done .nd-stage-dot{background:#16a34a}.nd-stage-running .nd-stage-dot{background:var(--dsw-alias-brand,#2563eb);box-shadow:0 0 0 3px var(--dsw-alias-brand-weak,rgba(59,130,246,.25))}.nd-stage-failed .nd-stage-dot{background:#dc2626}.nd-stage-title{flex:1}.nd-entry{display:flex;gap:10px;padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px}.nd-entry-icon{font-size:18px}.nd-entry-label{font-size:13px;font-weight:600}.nd-entry-meta{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-map-wrap{display:grid;grid-template-columns:1fr;gap:12px;min-height:0}.nd-map-wrap.nd-map-with-detail{grid-template-columns:minmax(0,1fr) 320px}.nd-map-canvas{position:relative;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg-elevated,#fafafa);overflow:hidden}.nd-map-svg{width:100%;height:auto;display:block}.nd-map-bg{fill:var(--dsw-alias-bg,#fff)}.nd-map-line{stroke:var(--dsw-alias-border,#cbd5e1);stroke-width:1.5;stroke-dasharray:5 5}.nd-map-point{fill:var(--dsw-alias-brand,#2563eb);stroke:#fff;stroke-width:2;cursor:pointer}.nd-map-active{fill:#f59e0b}.nd-map-label{font-size:11px;fill:var(--dsw-alias-fg,#111827);pointer-events:none}.nd-map-detail{padding:12px 14px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff);display:flex;flex-direction:column;gap:8px;font-size:12px;max-height:640px;overflow-y:auto}.nd-map-detail-head{display:flex;align-items:center;gap:8px}.nd-map-note{color:var(--dsw-alias-fg-muted,#6b7280);line-height:1.7}.nd-map-event{display:flex;gap:6px;align-items:center}.nd-map-empty{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280)}.nd-map-group{display:flex;flex-direction:column;gap:6px}.nd-loc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}.nd-loc-card{display:flex;flex-direction:column;gap:4px;padding:9px 11px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff);cursor:pointer;text-align:left;color:inherit;font:inherit}.nd-loc-card:hover{border-color:var(--dsw-alias-brand,#2563eb)}.nd-loc-card.nd-loc-active{border-color:var(--dsw-alias-brand,#2563eb);background:var(--dsw-alias-brand-weak,rgba(59,130,246,.1))}.nd-loc-name{font-size:13px;font-weight:600}.nd-score{font-size:11px;padding:1px 6px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-score-ok{background:rgba(22,163,74,.14);color:#15803d}.nd-score-warn{background:rgba(217,119,6,.16);color:#b45309}.nd-errorline{padding:8px 10px;border-radius:8px;background:rgba(220,38,38,.1);color:#b91c1c;font-size:12px}.nd-run-grid .nd-card{min-width:0}
+`
+    // 独立网页模式：占满整个浏览器视口（不要浮层的留白 / 圆角 / 阴影）。
+    const MAP_CSS = `
+.nd-mapview .nd-map-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.ndm-toggles{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.ndm-source{margin-left:auto;opacity:.66}
+.nd-map-svg{display:block;width:100%;height:auto;max-height:74vh;touch-action:none}
+.nd-map-svg text{user-select:none;-webkit-user-select:none}
+.nd-map-preview{position:relative;display:block;width:100%;padding:0;border:1px solid rgba(0,0,0,.10);border-radius:10px;background:transparent;overflow:hidden;cursor:zoom-in}
+.ndm-zones .ndm-zone{pointer-events:none}
+.ndm-pt{cursor:pointer}
+.ndm-pt:hover .ndm-pt-hit{opacity:.16}
+.ndm-route{pointer-events:none}
+.ndm-label,.ndm-zone-label,.ndm-water-label{pointer-events:none}
+.ndm-cartouche{position:absolute;left:18px;bottom:16px;max-width:44%;padding:6px 10px;border-radius:6px;background:rgba(255,255,255,.62);box-shadow:0 1px 6px rgba(0,0,0,.06);pointer-events:none}
+.ndm-cartouche-title{font-size:15px;font-weight:600;letter-spacing:.04em;line-height:1.25}
+.ndm-cartouche-era{font-size:11px;opacity:.72;margin-top:2px;letter-spacing:.02em}
+.ndm-cartouche-note{font-size:10px;opacity:.5;margin-top:3px;letter-spacing:.02em}
+.ndm-legend{position:absolute;right:18px;bottom:16px;padding:7px 10px;border-radius:6px;background:rgba(255,255,255,.62);box-shadow:0 1px 6px rgba(0,0,0,.06);pointer-events:none;max-width:38%}
+.ndm-legend-row{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.ndm-legend-item{display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:.82}
+.ndm-legend-glyph{width:13px;height:13px;flex:0 0 auto}
+.ndm-legend-foot{font-size:10px;opacity:.55;margin-top:4px;letter-spacing:.02em}
+.ndm-coord{font-variant-numeric:tabular-nums;font-size:12px;opacity:.8}
+.nd-mapfull-canvas{position:relative}
+.nd-mapfull-canvas .nd-map-svg{max-height:none;height:calc(100vh - 190px);cursor:grab}
+.nd-mapfull-canvas .nd-map-svg:active{cursor:grabbing}
+.nd-mapfull-detail{position:absolute;right:14px;top:14px;max-width:270px}
+@media (max-width:900px){.ndm-cartouche,.ndm-legend{position:static;max-width:none;margin-top:8px}}
 `
 
-    // ── 插件挂载 ──────────────────────────────────────────────
+const CSS_EXTRA = `
+.nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
+.nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
+.nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}
+.nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
+.nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
+.nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
+.nd-hero-stats{display:flex;gap:18px;flex-wrap:wrap;align-items:center}
+.nd-hero-stat{display:flex;flex-direction:column;gap:2px;min-width:76px}
+.nd-hero-stat span{font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}
+.nd-hero-stat strong{font-size:15px}
+.nd-attention-note{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid rgba(180,83,9,.28);border-radius:10px;background:rgba(251,191,36,.1);font-size:12px;color:#92400e;flex:none}
+.nd-attention-note strong{white-space:nowrap}
+.nd-entry-wrap{display:flex;align-items:center;gap:4px}.nd-overlay.nd-standalone{padding:0;background:var(--dsw-alias-bg,#fff)}.nd-overlay.nd-standalone .nd-panel{max-width:none;height:100vh;border:0;border-radius:0;box-shadow:none}.nd-history{display:flex;flex-direction:column;gap:4px;max-height:240px;overflow-y:auto;margin-bottom:10px}
+.nd-history-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}.nd-history-row:hover{border-color:var(--dsw-alias-brand,#2563eb)}.nd-history-active{border-color:var(--dsw-alias-brand,#2563eb);background:var(--dsw-alias-brand-weak,rgba(59,130,246,.1))}.nd-history-time{font-weight:600;min-width:64px}.nd-history-meta{color:var(--dsw-alias-fg-muted,#6b7280);flex:1}.nd-att .nd-input{max-width:120px}.nd-target{background:rgba(250,204,21,.2);box-shadow:0 0 0 6px rgba(250,204,21,.12);border-radius:6px;transition:background .5s,box-shadow .5s}
+.nd-mode-legend{font-size:11px}
+.nd-pre-tall{max-height:56vh}
+.nd-review-launchers{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.nd-launch-card{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff);color:inherit;font:inherit;text-align:left;cursor:pointer}.nd-launch-card:hover{border-color:var(--dsw-alias-brand,#2563eb);box-shadow:0 4px 14px rgba(37,99,235,.12)}.nd-launch-card:disabled{opacity:.55;cursor:not-allowed}.nd-launch-icon{font-size:20px}.nd-launch-main{display:flex;flex-direction:column;gap:2px;flex:1;min-width:0}.nd-launch-main strong{font-size:13px}.nd-launch-go{font-size:12px;color:var(--dsw-alias-brand,#2563eb);white-space:nowrap}
+
+.nd-map-gridline{fill:none;stroke:var(--dsw-alias-border,#e5e7eb);stroke-width:1;opacity:.7}
+.nd-map-point{fill:#b91c1c;stroke:#fff;stroke-width:2;cursor:pointer}
+.nd-map-point.nd-map-active{fill:#f59e0b}
+.nd-map-label{font-size:11px;fill:var(--dsw-alias-fg,#111827);paint-order:stroke;stroke:#fff;stroke-width:3px;stroke-linejoin:round;pointer-events:none}
+.nd-map-label.nd-map-label-active{fill:#b45309;font-weight:600}
+.nd-map-detail.nd-map-detail-empty{color:var(--dsw-alias-fg-muted,#6b7280)}
+.nd-char-groups{display:flex;flex-direction:column;gap:18px}
+.nd-char-group-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.nd-field-row{display:flex;align-items:center;gap:8px;margin:8px 0}
+.nd-field-row .nd-field-label{font-size:12px;color:var(--dsw-alias-fg-muted,#6b7280);white-space:nowrap}.nd-field-row .nd-input{flex:1;min-width:0}.nd-char-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.nd-char-card{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-left-width:4px;border-radius:10px;background:var(--dsw-alias-bg,#fff);cursor:pointer;text-align:left;color:inherit;font:inherit}
+.nd-char-card:hover{border-color:var(--dsw-alias-brand,#2563eb)}
+.nd-char-protagonist{border-left-color:#2563eb;background:linear-gradient(180deg,rgba(37,99,235,.07),transparent 60%)}
+.nd-char-antagonist{border-left-color:#dc2626;background:linear-gradient(180deg,rgba(220,38,38,.07),transparent 60%)}
+.nd-char-supporting{border-left-color:#16a34a;background:linear-gradient(180deg,rgba(22,163,74,.07),transparent 60%)}
+.nd-char-minor{border-left-color:#9ca3af}
+.nd-char-face{display:flex;align-items:center;gap:8px;min-width:0}
+.nd-char-face-main{display:flex;flex-direction:column;gap:1px;min-width:0}
+.nd-char-name{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-char-role{font-size:11px;color:var(--dsw-alias-fg-muted,#6b7280)}
+.nd-char-avatar{width:32px;height:32px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:50%;background:rgba(37,99,235,.14);color:#1d4ed8;font-size:15px;font-weight:600}
+.nd-char-avatar-big{width:48px;height:48px;font-size:20px}
+.nd-char-avatar-antagonist{background:rgba(220,38,38,.14);color:#b91c1c}
+.nd-char-avatar-supporting{background:rgba(22,163,74,.14);color:#15803d}
+.nd-char-avatar-minor{background:rgba(107,114,128,.16);color:#4b5563}
+.nd-char-line-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-size:12px;color:var(--dsw-alias-fg-muted,#4b5563);line-height:1.6}
+.nd-char-detail{display:flex;flex-direction:column;gap:12px}
+.nd-char-detail-head{display:flex;align-items:center;gap:10px}
+.nd-char-name-lg{font-size:16px}
+.nd-kv-block{display:grid;grid-template-columns:64px 1fr;gap:6px 10px;font-size:13px;line-height:1.7}
+.nd-tl-group{display:flex;align-items:center;gap:8px;margin:14px 0 2px;padding-left:2px}
+.nd-tl-group:first-child{margin-top:0}
+.nd-tl-group-label{font-size:12px;font-weight:600;color:var(--dsw-alias-fg-muted,#4b5563);letter-spacing:.04em}
+.nd-tl-group::after{content:'';flex:1;height:1px;background:var(--dsw-alias-border,#f0f1f3)}
+.nd-mapview{display:flex;flex-direction:column;gap:10px}.nd-map-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.nd-map-zoom{margin-left:auto;display:flex;align-items:center;gap:6px}.nd-map-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}.nd-map-layout.nd-map-with-detail{grid-template-columns:minmax(0,1fr) 300px}.nd-map-scroll{flex:1;min-height:0;height:70vh;overflow:auto;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-map-scroll .nd-map-svg{display:block;max-width:none}.nd-map-foot{display:flex;justify-content:flex-end}.nd-map-region{filter:blur(5px)}.nd-map-region-label{font-size:10px;fill:#b3aa9b;letter-spacing:.24em;opacity:.55;pointer-events:none}.nd-map-path{fill:none;stroke:#b45309;stroke-width:1.6;stroke-dasharray:7 6;opacity:.62}.nd-map-waypoint{fill:#b45309;opacity:.95}.nd-map-scroll{background:linear-gradient(180deg,#fbfaf7,#f4f1ea)}.nd-map-detail{max-height:none}.nd-mapfull{position:fixed;inset:0;z-index:120;display:flex;align-items:center;justify-content:center;padding:2vh 2vw;background:rgba(15,23,42,.55);backdrop-filter:blur(2px)}.nd-mapfull-panel{display:flex;flex-direction:column;width:min(96vw,1500px);height:94vh;background:var(--dsw-alias-bg,#fff);border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.4);overflow:hidden}.nd-mapfull-head{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}.nd-mapfull-head .nd-actions{margin-left:auto}.nd-mapfull-canvas{position:relative;flex:1;min-height:0;overflow:hidden;background:linear-gradient(180deg,#fbfaf7,#f2eee5)}.nd-mapfull-canvas .nd-map-svg{width:100%;height:100%;display:block}.nd-mapfull-grab{position:absolute;inset:0;cursor:grab}.nd-mapfull-grab:active{cursor:grabbing}.nd-mapfull-detail{position:absolute;right:14px;top:14px;width:300px;max-height:70%;box-shadow:0 12px 40px rgba(0,0,0,.22)}.nd-mapfull-tip{position:absolute;left:14px;bottom:12px}.nd-map-preview{position:relative;display:block;width:100%;padding:0;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:linear-gradient(180deg,#fbfaf7,#f2eee5);cursor:zoom-in;overflow:hidden}.nd-map-preview .nd-map-svg{width:100%;height:auto;display:block}.nd-send-confirm{border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;padding:8px 10px;margin:6px 0;background:var(--dsw-alias-bg-elevated,#fafafa)}
+.nd-map-preview{display:block;position:relative;width:100%;padding:0;border:0;background:none;cursor:zoom-in}
+.nd-map-preview .nd-map-svg{display:block;width:100%;height:70vh;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg-elevated,#fafafa)}
+.nd-map-preview-hint{position:absolute;right:12px;bottom:10px;padding:3px 8px;border-radius:999px;background:rgba(255,255,255,.85);color:#6b7280;font-size:11px}
+.nd-char-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}.nd-char-card{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:12px;background:var(--dsw-alias-bg,#fff)}.nd-char-card:hover{border-color:var(--dsw-alias-brand,#2563eb)}.nd-char-head{display:flex;align-items:center;gap:10px}.nd-char-avatar{width:38px;height:38px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:50%;background:var(--dsw-alias-brand-weak,rgba(59,130,246,.14));color:var(--dsw-alias-brand,#2563eb);font-size:16px;font-weight:600}.nd-char-namebox{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0}.nd-char-line{display:flex;gap:8px;font-size:12px}.nd-char-arc{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.nd-preset-list{display:flex;flex-direction:column;gap:8px}.nd-preset{display:flex;gap:10px;padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-preset-active{border-color:var(--dsw-alias-brand,#2563eb);background:var(--dsw-alias-brand-weak,rgba(59,130,246,.07))}.nd-preset-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}.nd-preset-title{display:flex;align-items:center;gap:8px;font-size:13px}.nd-preset-meta{display:flex;gap:6px;flex-wrap:wrap}.nd-preset-actions{display:flex;flex-direction:column;gap:6px;flex:none}.nd-curve-axis{stroke:var(--dsw-alias-border,#d1d5db);stroke-width:1}.nd-curve-axis-label{fill:var(--dsw-alias-fg-muted,#6b7280);font-size:10px}
+.nd-timeline{position:relative;display:flex;flex-direction:column;gap:2px;padding-left:6px}.nd-tl-item{display:flex;gap:12px;padding:10px 4px 10px 0}.nd-tl-dot{position:relative;flex:none;width:11px;height:11px;margin-top:5px;border-radius:50%;background:var(--dsw-alias-border,#cbd5e1);box-shadow:0 0 0 3px var(--dsw-alias-bg,#fff)}.nd-tl-item:not(:last-child) .nd-tl-dot::after{content:'';position:absolute;left:50%;top:14px;width:2px;height:calc(100% + 14px);transform:translateX(-50%);background:var(--dsw-alias-border,#e5e7eb)}.nd-tl-major .nd-tl-dot{background:#d97706}.nd-tl-climax .nd-tl-dot{background:#dc2626}.nd-tl-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}.nd-tl-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-tl-title{font-weight:600;font-size:13px}.nd-tl-edit{margin-left:auto}.nd-tl-summary{margin:0;font-size:13px;line-height:1.7}
+.nd-toc-row{display:flex;align-items:stretch;gap:2px;border-radius:8px}
+.nd-toc-row:hover{background:var(--dsw-alias-bg-hover,rgba(0,0,0,.05))}
+.nd-toc-row .nd-toc-item{flex:1;min-width:0}
+.nd-toc-row:hover .nd-toc-item{background:transparent}
+.nd-toc-del{flex:none;padding:0 6px;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-fg-muted,#9ca3af);font-size:11px;cursor:pointer;opacity:0;transition:opacity .12s}
+.nd-toc-row:hover .nd-toc-del{opacity:1}
+.nd-toc-del:hover{color:#dc2626;background:rgba(220,38,38,.12)}
+.nd-toc-active-row{background:var(--dsw-alias-brand-weak,rgba(59,130,246,.14))}
+.nd-toc-active-row .nd-toc-item{background:transparent}
+`
+    // 仿纸正文底（0.6.10）：阅读区和正文编辑器共用同一张纸，宽屏窄屏一致。
+    // 纸色/墨色都写死成暖色，不跟 DSH 明暗主题走——翻到哪一屏都是「纸上的正文」。
+    const PAPER_CSS = `
+.nd-overlay{
+  --nd-paper:#f7f2e6;
+  --nd-paper-ink:#3b352a;
+  --nd-paper-muted:#8a7b61;
+  --nd-paper-line:rgba(122,98,60,.18);
+  --nd-paper-img:radial-gradient(130% 95% at 12% -25%,rgba(255,255,255,.9),rgba(255,255,255,0) 58%),radial-gradient(90% 80% at 104% 6%,rgba(222,199,157,.22),rgba(222,199,157,0) 60%),radial-gradient(70% 55% at 16% 106%,rgba(200,172,124,.16),rgba(200,172,124,0) 62%),repeating-linear-gradient(92deg,rgba(122,98,60,.022) 0 1px,rgba(122,98,60,0) 1px 7px),repeating-linear-gradient(6deg,rgba(122,98,60,.012) 0 1px,rgba(122,98,60,0) 1px 11px)
+}
+.nd-reader-scroll{background-color:var(--nd-paper);background-image:var(--nd-paper-img);color:var(--nd-paper-ink);box-shadow:inset 0 0 64px rgba(120,96,58,.06)}
+/* 审阅要在手机上长按选字：显式允许选中正文（宿主可能给容器设了 user-select:none） */
+.nd-reader-body,.nd-reader-body .nd-para{user-select:text;-webkit-user-select:text}
+.nd-reader-body .nd-chapter{border-bottom-color:var(--nd-paper-line)}
+.nd-reader-body .nd-ch-num,.nd-reader-body .nd-ch-words,.nd-reader-body .nd-muted,.nd-reader-body .nd-loading-more{color:var(--nd-paper-muted)}
+.nd-reader-body .nd-hl{background:rgba(214,168,42,.30)}
+.nd-reader-body .nd-target{background:rgba(214,168,42,.18);box-shadow:0 0 0 6px rgba(214,168,42,.10)}
+.nd-reader-scroll .nd-empty{border-color:var(--nd-paper-line);color:var(--nd-paper-muted)}
+.nd-reader-scroll .nd-tag{background:rgba(122,98,60,.10);color:#6f6149}
+.nd-reader-scroll .nd-tag-brand{background:rgba(180,83,9,.14);color:#9a3412}
+.nd-reader-scroll .nd-tag-ok{background:rgba(22,163,74,.14);color:#15803d}
+.nd-reader-scroll .nd-tag-warn{background:rgba(217,119,6,.16);color:#b45309}
+.nd-reader-scroll .nd-tag-error{background:rgba(220,38,38,.13);color:#b91c1c}
+.nd-edit-bar{color:var(--nd-paper-ink)}
+.nd-edit-bar .nd-hint,.nd-edit-bar .nd-edit-state,.nd-edit-bar .nd-edit-words{color:var(--nd-paper-muted)}
+.nd-edit-bar .nd-btn:not(.nd-btn-primary){background:rgba(255,255,255,.52);border-color:var(--nd-paper-line);color:var(--nd-paper-ink)}
+.nd-edit-bar .nd-btn:not(.nd-btn-primary):hover:not(:disabled){border-color:#8a6f3a}
+.nd-editor{max-width:800px;margin:0 auto;padding:14px 34px 30px;background:transparent;border-color:transparent;border-radius:0;color:var(--nd-paper-ink);caret-color:#3b352a;font-family:inherit;resize:none}
+.nd-editor:focus{outline:2px solid rgba(122,98,60,.26);outline-offset:-2px}
+.nd-editor::placeholder{color:#a99a80}
+/* 沉浸模式：正文只留阅读 / 编辑 / 审阅 + 退出，其余外壳全收掉，接近全屏。 */
+.nd-overlay.nd-immersive{padding:0;background:var(--dsw-alias-bg,#fff)}
+.nd-overlay.nd-immersive .nd-panel{max-width:none;height:100vh;height:100dvh;border:0;border-radius:0;box-shadow:none}
+.nd-immersive .nd-top,.nd-immersive .nd-principle-bar,.nd-immersive .nd-nav{display:none}
+.nd-immersive .nd-read{display:flex;flex-direction:column}
+.nd-immersive .nd-read-main{flex:1;min-height:0}
+.nd-immersive .nd-toc,.nd-immersive .nd-side,.nd-immersive .nd-mobile-close{display:none}
+.nd-immersive .nd-read-head{padding:6px 12px;background-color:var(--nd-paper);border-bottom:1px solid var(--nd-paper-line)}
+.nd-immersive .nd-read-row{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:10px}
+.nd-immersive .nd-read-prefs,.nd-immersive .nd-mode-legend,.nd-immersive .nd-read-pos,.nd-immersive .nd-im-toggle,.nd-immersive .nd-read-row .nd-btn{display:none}
+.nd-immersive .nd-read-head .nd-search,.nd-immersive .nd-read-head .nd-msg{display:none}
+.nd-immersive .nd-im-state{font-size:11px;color:var(--nd-paper-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-immersive .nd-seg{justify-self:center;border:1px solid rgba(122,98,60,.30);border-radius:999px;overflow:hidden;background:rgba(255,255,255,.45)}
+.nd-immersive .nd-seg-item{color:#4b4334;font-size:13px;padding:5px 18px}
+.nd-immersive .nd-seg-item+.nd-seg-item{border-left:1px solid rgba(122,98,60,.22)}
+.nd-immersive .nd-seg-item.nd-seg-active{background:#3b352a;color:#f7f2e6}
+.nd-im-exit{justify-self:end;display:inline-flex;align-items:center;gap:4px;padding:4px 11px;border:1px solid rgba(122,98,60,.30);border-radius:999px;background:rgba(255,255,255,.5);color:#4b4334;font:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+.nd-im-exit:hover{background:#3b352a;border-color:#3b352a;color:#f7f2e6}
+/* 沉浸模式顶栏左侧：章位 / 保存状态 + 字号 −/+（纯 CSS 字号，不加载字体） */
+.nd-im-left{display:flex;align-items:center;gap:10px;min-width:0;justify-self:start}
+.nd-im-state{min-width:0}
+.nd-im-size{display:inline-flex;align-items:center;gap:2px;flex:none}
+.nd-im-size-btn{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:1px solid rgba(122,98,60,.30);border-radius:999px;background:rgba(255,255,255,.55);color:#4b4334;font:inherit;font-size:15px;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+.nd-im-size-btn:hover{background:#3b352a;border-color:#3b352a;color:#f7f2e6}
+.nd-im-size-btn:active{transform:translateY(1px)}
+.nd-im-size-val{min-width:20px;text-align:center;font-size:11px;color:#8a7b61;font-variant-numeric:tabular-nums}
+.nd-immersive .nd-reader-body{max-width:820px;padding:30px 36px 100px}
+.nd-immersive .nd-edit{padding:0}
+.nd-immersive .nd-edit .nd-banner,.nd-immersive .nd-edit .nd-msg{margin:8px 14px 0}
+.nd-immersive .nd-editor{max-width:820px;padding:26px 36px 90px}
+`
+    // 手机 / 窄屏：DSH Remote（dsh-pocket）与本地窄窗口都要能用、能关，
+    // 不能因为顶栏溢出把关闭入口裁到屏幕外。
+    const MOBILE_CSS = `
+.nd-mobile-close{display:none}
+@media (max-width: 900px){
+  .nd-overlay{padding:0;background:var(--dsw-alias-bg,#fff)}
+  .nd-overlay .nd-panel{height:100vh;height:100dvh;max-width:none;border:0;border-radius:0;box-shadow:none}
+  .nd-top{flex-wrap:wrap;gap:6px 8px;padding:8px 12px;padding-top:calc(8px + env(safe-area-inset-top,0px))}
+  .nd-top-close{display:none}
+  .nd-page-name,.nd-top-meta{display:none}
+  .nd-brand{gap:6px}.nd-brand strong{font-size:13px}
+  .nd-proj{order:3;width:100%}.nd-proj .nd-select{width:100%;min-width:0;max-width:none}
+  .nd-top-right{margin-left:auto;gap:4px}.nd-top-right .nd-btn{padding:4px 7px;font-size:11px}
+  .nd-principle-bar{white-space:normal;flex-direction:column;align-items:flex-start;gap:3px;padding:6px 12px;font-size:11px;line-height:1.5}
+  .nd-principle-slogan{white-space:nowrap}
+  .nd-mode-legend{display:none}
+  .nd-principle-text{white-space:normal;overflow:visible;text-overflow:clip}
+  .nd-body{flex-direction:column}
+  .nd-nav{width:100%;flex:none;flex-direction:row;align-items:center;gap:2px;overflow-x:auto;overflow-y:hidden;border-right:0;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb);padding:6px 8px;background:var(--dsw-alias-bg,#fff)}
+  .nd-nav-group{display:contents}
+  .nd-nav-group > .nd-nav-title{display:none}
+  .nd-nav-item{width:auto;flex:none;white-space:nowrap;padding:6px 9px;font-size:12px}
+  .nd-main{width:100%}
+  .nd-page{padding:10px 12px;gap:10px}
+  .nd-page-head{flex-wrap:wrap;gap:8px}
+  .nd-page-head h2{font-size:16px}
+  .nd-toolbar{gap:6px}
+  .nd-read{display:flex;flex-direction:column}
+  .nd-toc{flex:none;max-height:138px;border-right:0;border-bottom:1px solid var(--dsw-alias-border,#e5e7eb)}
+  .nd-toc-head{padding:6px 10px}.nd-toc-list{display:flex;gap:4px;overflow-x:auto;overflow-y:hidden;padding:4px 6px}
+  .nd-toc-item{flex:none;min-width:148px;max-width:230px;padding:6px 8px}
+  .nd-toc-foot{display:none}
+  .nd-side{display:none}
+  .nd-read-head{padding:8px 12px}
+  .nd-read-row{flex-wrap:wrap;gap:6px 8px}
+  .nd-reader-scroll{flex:1}
+  .nd-reader-body{padding:18px 16px 64px}
+  .nd-edit{padding:8px 12px}
+  .nd-editor{min-height:320px;padding:14px 8px 30px;font-size:14px}
+  .nd-immersive .nd-read-head{padding:6px 8px;padding-top:calc(6px + env(safe-area-inset-top,0px))}
+  .nd-immersive .nd-read-row{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'left exit' 'seg seg';gap:6px 8px}
+  .nd-immersive .nd-im-left{grid-area:left;justify-self:stretch;gap:8px}
+  .nd-immersive .nd-im-state{font-size:10px}
+  .nd-immersive .nd-seg{grid-area:seg;justify-self:center}
+  .nd-immersive .nd-im-exit{grid-area:exit}
+  .nd-immersive .nd-seg-item{padding:5px 13px;font-size:12px}
+  .nd-immersive .nd-im-exit{padding:4px 8px}
+  .nd-immersive .nd-im-exit-text{display:none}
+  .nd-im-size-btn{width:30px;height:30px;font-size:17px}
+  .nd-im-size-val{min-width:18px;font-size:10px}
+  .nd-immersive .nd-reader-body{padding:18px 16px 76px}
+  .nd-immersive .nd-edit{padding:0}
+  .nd-immersive .nd-editor{padding:16px 14px 70px}
+  .nd-two-col,.nd-run-grid,.nd-map-wrap,.nd-map-layout,.nd-map-layout.nd-map-with-detail,.nd-map-wrap.nd-map-with-detail{grid-template-columns:minmax(0,1fr)}
+  .nd-map-scroll{height:52vh}
+  .nd-map-preview .nd-map-svg{height:52vh}
+  .nd-modal,.nd-modal-wide{width:calc(100vw - 20px);max-height:88dvh}
+  .nd-form-grid{grid-template-columns:minmax(0,1fr)}
+  .nd-stat-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .nd-hero{padding:12px 14px}
+  .nd-hero-stats{gap:10px 16px}.nd-hero-stat{min-width:64px}
+  .nd-diff{grid-template-columns:minmax(0,1fr)}
+  .nd-mapfull{padding:0}.nd-mapfull-panel{width:100vw;height:100dvh;border-radius:0}
+  .nd-mapfull-detail{right:8px;top:8px;width:min(280px,72vw);max-height:56%}
+  .nd-note-pop{position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom,0px));width:auto;max-height:72dvh;overflow-y:auto;z-index:200}
+  .nd-mobile-close{display:flex;position:fixed;right:calc(12px + env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));z-index:70;width:42px;height:42px;align-items:center;justify-content:center;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:50%;background:var(--dsw-alias-bg,#fff);color:inherit;box-shadow:0 6px 20px rgba(0,0,0,.22);font-size:17px;cursor:pointer}
+}
+`
+    // ── 注册 ──────────────────────────────────────────────────
     return {
       inject: ['slots'],
       apply(ctx) {
-        clientCtx = ctx
+        hostCtx = ctx
         const style = document.createElement('style')
-        style.dataset.plugin = 'dsh-story-desk'
-        style.textContent = CSS
+        style.dataset.novelDesk = '1'
+        style.textContent = CSS + CSS_EXTRA + PAPER_CSS + MAP_CSS + MOBILE_CSS
         document.head.appendChild(style)
-        ctx.effect(() => () => style.remove(), 'story-desk: styles')
-
+        ctx.effect(() => () => style.remove(), 'novel-desk: styles')
         ctx.slots.inject('sidebar.footer.action', () =>
-          ctx.slots.register({ name: 'sidebar.footer.action', id: 'story-desk', order: 40, label: '长篇中文小说工作台' }, SidebarEntry),
+          ctx.slots.register({ name: 'sidebar.footer.action', id: 'novel-desk', order: 40, label: '小说工作台' }, SidebarEntry),
         )
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register({ name: 'shell.overlay', id: 'story-desk', order: 60, label: '长篇中文小说工作台' }, Workbench),
-        )
+        // 浏览器标签里注册浮层；只有「显式工作台链接」才自动展开（桌面/手机一致）。
+        // DSH Remote 的手机页面没有 #novel-desk=1，保持 DSH 原样，用户点侧栏入口才打开。
+        if (IS_BROWSER_TAB) {
+          ctx.slots.inject('shell.overlay', () =>
+            ctx.slots.register({ name: 'shell.overlay', id: 'novel-desk', order: 60, label: '小说工作台' }, Workbench),
+          )
+          if (IS_STANDALONE_TAB) setOpen(true)
+        }
       },
     }
   },
