@@ -2515,8 +2515,10 @@ window.__ModuleLoader__.load({
               h('span', null, '更新时间'), h('span', null, activeInfo ? fmtAgo(activeInfo.updatedAt) : '—'),
             ),
             h(AttentionBars, { row: activeAtt, chapter: active, projectId, onSaved: onChanged }),
-            h('div', { className: 'nd-actions' },
-              h(Btn, { small: true, onClick: () => go('reviews', { source: 'all', chapter: active, recheck: 1 }) }, '🧊 AI 冷读打分本章'),
+            h('div', { className: 'nd-actions', style: { flexWrap: 'wrap' } },
+              h(Btn, { small: true, onClick: () => go('reviews', { source: 'all', chapter: active, recheck: 1 }) }, '❄️ 冷读本章'),
+              h(Btn, { small: true, onClick: () => go('reviews', { ask: 'logic', chapter: active }) }, '⚖️ 逻辑审核本章'),
+              h(Btn, { small: true, onClick: () => go('reviews', { ask: 'ai-style', chapter: active }) }, '🤖 去 AI 化本章'),
             ),
           ),
           h(
@@ -2972,6 +2974,27 @@ window.__ModuleLoader__.load({
           setNotice({ tone: 'error', text: friendlyError(error) })
         }
       }
+      const makeReviewWorkorder = async (source, chapterList = [], focus = '') => {
+        if (!projectId || busy) return
+        setBusy(`review-${source}`)
+        setNotice(null)
+        try {
+          const allRows = chaptersForWorkorder()
+          const rows = Array.isArray(chapterList) && chapterList.length
+            ? allRows.filter((row) => chapterList.map(Number).includes(row.chapter))
+            : allRows
+          if (!rows.length) { setNotice({ tone: 'warn', text: '没有可审核的章节' }); return }
+          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rows, sources: [source], focus: focus || undefined, dryRun: true })
+          const label = source === 'logic' ? '逻辑审核' : source === 'ai-style' ? '去 AI 化' : '审核'
+          const scopeLabel = Array.isArray(chapterList) && chapterList.length ? `第 ${chapterList.map(Number).join('、')} 章` : `全文（${rows.length} 章）`
+          setWorkorder({ title: `${scopeLabel} ${label}工作单`, text: String(value.prompt || ''), sending: false })
+        } catch (error) {
+          setNotice({ tone: 'error', text: friendlyError(error) })
+        } finally {
+          setBusy('')
+        }
+      }
+
       const makeLocalWorkorder = async () => {
         if (busy) return
         setBusy('local'); setNotice(null)
@@ -2987,6 +3010,15 @@ window.__ModuleLoader__.load({
         finally { setBusy('') }
       }
       const chip = (key, label, value, onClick) => h(Btn, { small: true, kind: value === key ? 'primary' : undefined, onClick: () => onClick(key) }, label)
+      const askRef = useRef(false)
+      useEffect(() => {
+        if (askRef.current) return
+        if (!pageArg || !pageArg.ask) return
+        askRef.current = true
+        const chapter = Number(pageArg.chapter) || 0
+        makeReviewWorkorder(String(pageArg.ask), chapter ? [chapter] : [])
+      }, [pageArg])
+
       const cats = [
         { id: 'all', label: `全部 ${sourceRows.length}` },
         { id: 'ai-style', label: `去 AI 化 ${sourceRows.filter((row) => categoryOf(row) === 'ai-style').length}` },
@@ -3000,7 +3032,9 @@ window.__ModuleLoader__.load({
             h('p', { className: 'nd-hint' }, '作者意见与 AI 意见分开。AI 意见只分三类：去 AI 化 / 事实逻辑 / 注意力（冷读）；AI 意见带地址和改法，采纳即替换该段。')),
           h('div', { className: 'nd-page-actions' },
             h(Btn, { small: true, onClick: reload, disabled: res.loading }, '刷新'),
-            h(Btn, { small: true, kind: 'primary', onClick: () => { setColdOpen(true); setColdFocus('') } }, '❄️ 冷读（注意力）'),
+            h(Btn, { small: true, kind: 'primary', onClick: () => { setColdOpen(true); setColdFocus('') } }, '❄️ 全文冷读（注意力）'),
+            h(Btn, { small: true, onClick: () => makeReviewWorkorder('ai-style', []), disabled: Boolean(busy) }, '🤖 全文去 AI 化'),
+            h(Btn, { small: true, onClick: () => makeReviewWorkorder('logic', []), disabled: Boolean(busy) }, '⚖️ 全文逻辑审核'),
           ),
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
@@ -3607,6 +3641,11 @@ window.__ModuleLoader__.load({
             h(Btn, { small: true, onClick: resetRun, disabled: !!busy }, '重置'),
             h(Btn, { small: true, onClick: runRes.reload }, '刷新'),
           ),
+          (run.status === 'running' || run.status === 'paused')
+            ? h('div', { className: 'nd-banner nd-banner-warn' },
+                h('span', null, '⚠ 工作台的「暂停 / 完成 / 中止」只更新工作台状态，**不会停止左侧对话里正在跑的 AI**。要真正停止，请到对话里中断/停止该会话，或关闭 DSH 页面；否则 AI 会继续跑并继续产生费用。'),
+              )
+            : null,
           notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
           h('div', { className: 'nd-run-grid' },
             h('section', { className: 'nd-card' },
@@ -5144,6 +5183,24 @@ window.__ModuleLoader__.load({
           setBusy('')
         }
       }
+      const buildAllOnce = async () => {
+        if (busy) return
+        setBusy('fullOnce')
+        setNotice(null)
+        try {
+          const size = Math.max(1, Number(chapters) || 1)
+          await api('ledger.sync', scope(projectId, { action: 'plan', from: 1, to: size, batchSize: size }))
+          const value = await api('ledger.sync', scope(projectId, { action: 'workorder', mode: 'full' }))
+          if (!value || !value.prompt) throw new Error('没有可建账的章节')
+          setFullPrompt({ text: String(value.prompt), batchIndex: 1, total: 1, sending: false, confirming: false, target: '' })
+          setFullDialog(false)
+          syncRes.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `一次性建账失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
       const openFullOrder = async () => {
         setBusy('fullWork')
         try {
@@ -5332,11 +5389,13 @@ window.__ModuleLoader__.load({
               footer: !full || fullReplan
                 ? h(Fragment, null,
                     h(Btn, { onClick: full && fullReplan ? () => setFullReplan(false) : closeFull }, '取消'),
-                    h(Btn, { kind: 'primary', onClick: planFull, disabled: busy === 'fullPlan' }, busy === 'fullPlan' ? '制定中…' : full && fullReplan ? '重建计划' : '制定同步计划'),
+                    h(Btn, { kind: 'primary', onClick: buildAllOnce, disabled: busy === 'fullOnce' }, busy === 'fullOnce' ? '生成中…' : '一次性全书建账（不分批）'),
+                    h(Btn, { onClick: planFull, disabled: busy === 'fullPlan' }, busy === 'fullPlan' ? '制定中…' : full && fullReplan ? '重建计划' : '分批同步计划'),
                   )
                 : h(Fragment, null,
                     h(Btn, { small: true, onClick: resetFull, disabled: busy === 'fullReset' }, '清除计划'),
                     h(Btn, { small: true, onClick: () => setFullReplan(true), disabled: !!busy }, '重新制定计划'),
+                    h(Btn, { small: true, onClick: buildAllOnce, disabled: busy === 'fullOnce' }, busy === 'fullOnce' ? '生成中…' : '一次性全书建账'),
                     h(Btn, { small: true, onClick: doneFullBatch, disabled: busy === 'fullDone' || full.done >= full.total }, fullSent ? `第 ${fullSent} 批已同步` : '本批已同步'),
                     h(Btn, { onClick: closeFull }, '关闭'),
                     full.done < full.total ? h(Btn, { kind: 'primary', onClick: openFullOrder, disabled: busy === 'fullWork' }, busy === 'fullWork' ? '生成中…' : '发送下一批工作单') : null,
@@ -5344,7 +5403,7 @@ window.__ModuleLoader__.load({
             },
               !full || fullReplan
                 ? h(Fragment, null,
-                    h('p', { className: 'nd-hint' }, '正文写完后，账本里的时间线 / 人物 / 事实 / 伏笔可能没跟上。全书同步会把正文按批切开，每批让 AI 读正文、只提有依据的 ledger-fix 提案；你批准提案后回来点「本批已同步」。'),
+                    h('p', { className: 'nd-hint' }, '**首次建账必须全书统一做一次**：点「一次性全书建账」，AI 一次读完所有正文、统一建立人物/地点/事实/事件/伏笔；之后的日常同步才分批（每批让 AI 只读改动过的章节，提 ledger-fix 提案，批准后点「本批已同步」）。'),
                     h(Field, { label: '每批章数', hint: '批越大，AI 一次读的正文越多：省轮次，但也更容易看漏。' },
                       h(Select, { value: String(fullBatchSize), onChange: (value) => setFullBatchSize(Number(value) || 6), options: [4, 6, 8, 10].map((n) => ({ value: String(n), label: `每批 ${n} 章` })) }),
                     ),
