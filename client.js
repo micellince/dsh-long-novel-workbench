@@ -3356,6 +3356,7 @@ window.__ModuleLoader__.load({
             h(Btn, { small: true, kind: 'primary', onClick: () => { setColdOpen(true); setColdFocus('') } }, '❄️ 全文冷读（注意力）'),
             h(Btn, { small: true, onClick: () => makeReviewWorkorder('ai-style', []), disabled: Boolean(busy) }, '🤖 全文去 AI 化'),
             h(Btn, { small: true, onClick: () => makeReviewWorkorder('logic', []), disabled: Boolean(busy) }, '⚖️ 全文逻辑审核'),
+            h(Btn, { small: true, kind: 'primary', onClick: makeFixWorkorder, disabled: !picked.length || Boolean(busy) }, picked.length ? `🤖 AI 出改法（${picked.length}）` : '🤖 AI 出改法'),
           ),
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
