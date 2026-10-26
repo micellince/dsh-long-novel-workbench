@@ -114,6 +114,7 @@ export const WRITE_OPS = [
   'opinions.merge',
   'opinions.patch',
   'opinions.note',
+  'opinions.relatedChapters',
   'opinions.accept',
   'opinions.reject',
   'ledger.confirm',
@@ -1512,6 +1513,14 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         after: String(payload.after ?? ''),
         role: String(payload.role ?? ''),
       })
+    }
+    case 'opinions.relatedChapters': {
+      const projectId = String(need(payload, 'projectId'))
+      const id = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      const opinion = await bookdb.getOpinion(dir, id)
+      if (!opinion) throw invalid('意见不存在')
+      return { chapters: await bookdb.relatedChaptersForOpinion(dir, opinion) }
     }
     case 'opinions.note': {
       const projectId = String(need(payload, 'projectId'))

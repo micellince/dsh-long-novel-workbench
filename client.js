@@ -2897,6 +2897,7 @@ window.__ModuleLoader__.load({
       const [suggestFor, setSuggestFor] = useState('')
       const [suggestRole, setSuggestRole] = useState('')
       const [suggestText, setSuggestText] = useState('')
+      const [suggestScope, setSuggestScope] = useState('ai')
       const [coldOpen, setColdOpen] = useState(Boolean(pageArg && pageArg.recheck))
       const [coldFocus, setColdFocus] = useState('')
       const [workorder, setWorkorder] = useState(null)
@@ -3020,6 +3021,7 @@ window.__ModuleLoader__.load({
       const openSuggest = (row) => {
         setSuggestFor(row.id)
         setSuggestRole('')
+        setSuggestScope('ai')
         setSuggestText(String(row.authorNote || ''))
       }
       const submitSuggest = async () => {
@@ -3030,14 +3032,28 @@ window.__ModuleLoader__.load({
         const source = ROLE_TO_SOURCE[suggestRole] || 'logic'
         const roleName = (SUGGEST_ROLES.find((item) => item.id === suggestRole) || {}).name || suggestRole
         const allRows = chaptersForWorkorder()
-        const rowsForChapter = allRows.filter((item) => item.chapter === Number(row.chapter))
+        const chapterNumbers = new Set([Number(row.chapter)])
+        if (suggestScope === 'related') {
+          const related = await api('opinions.relatedChapters', scope(projectId, { id: row.id })).catch(() => null)
+          for (const item of (related && related.chapters) || []) chapterNumbers.add(Number(item.chapter))
+        }
+        const useAll = suggestScope === 'ai' || suggestScope === 'book'
+        const rowsForChapter = useAll ? allRows.filter((item) => item.chapter > 0) : allRows.filter((item) => chapterNumbers.has(item.chapter))
         if (!rowsForChapter.length) { setNotice({ tone: 'warn', text: '这一章找不到正文' }); return }
+        const scopeRule = suggestScope === 'ai'
+          ? '范围由你判断：先判断这条问题是本段 / 本章 / 跨章 / 全书级；允许用 novel_desk_read 读其他章节确认，但不要顺手审全书；跨章/全局问题提交 chapter=0 全书级意见并列出涉及章号。'
+          : suggestScope === 'related'
+            ? `范围：相关章节（${[...chapterNumbers].sort((a, b) => a - b).join('、')}），可读范围内章节确认；若判断是全书级问题，提交 chapter=0 并列出涉及章号。`
+            : suggestScope === 'book'
+              ? '范围：全书；允许读任意章节确认，但只处理这一条问题。'
+              : '范围：仅本条所在章。如果你判断其实是跨章/全书问题，请明确说出并列出涉及章号，不要硬塞进本章。'
         const focus = [
           `只针对这一条已有意见给出建议/改法，不要重审全章、不要找新问题；交给「${roleName}」判断。`,
           `- 第${row.chapter}章 第${Number(row.para) + 1}段`,
           `- 问题：${row.text}`,
           row.after ? `- AI 原改法：${row.after}` : '',
           String(suggestText || '').trim() ? `- 作者建议（必须遵守）：${String(suggestText).trim()}` : '',
+          scopeRule,
           '输出：1 条 AI 意见；如果能给整段替换就带 after，只给判断也可以。',
         ].filter(Boolean).join('\n')
         setBusy(`suggest-${row.id}`); setNotice(null)
@@ -3181,6 +3197,18 @@ window.__ModuleLoader__.load({
               value: suggestRole,
               onChange: setSuggestRole,
               options: [{ value: '', label: '请选择' }].concat(SUGGEST_ROLES.map((role) => ({ value: role.id, label: `${role.name}（${role.hint}）` }))),
+            }),
+          ),
+          h(Field, { label: '范围' },
+            h(Select, {
+              value: suggestScope,
+              onChange: setSuggestScope,
+              options: [
+                { value: 'ai', label: 'AI 判断（推荐）：局部还是全局由 AI 先判断' },
+                { value: 'chapter', label: '仅本条所在章' },
+                { value: 'related', label: '相关章节（按人物/地点出现范围）' },
+                { value: 'book', label: '全书' },
+              ],
             }),
           ),
           h(Field, { label: '我的建议（可留空）' },
