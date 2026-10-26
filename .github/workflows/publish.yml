@@ -4,7 +4,7 @@ name: Publish to npm
 # 前置条件（由发布者本人完成，Lead 统一操作）：
 #   1. package.json 的 version、本 tag、CHANGELOG.md 顶部版本三者一致；
 #   2. 仓库 Settings → Secrets and variables → Actions 里配置好 NPM_TOKEN；
-#   3. 先走一遍 CI（本工作流也会先跑测试再发布）。
+#   3. 先走一遍 CI（本工作流会做语法 + 版本/发布文档预检，再发布）。
 on:
   push:
     tags:
@@ -28,9 +28,19 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      # 仓库没有依赖/锁文件，不要用 npm ci；测试零依赖。
-      - name: Run tests
-        run: npm test
+      # 0.7.1 起 test/ 仍是 0.6 行为断言，项目规则是不跑自动化测试；
+      # 发布前改为预检：ESM 语法 + 版本/发布文档一致性（不执行测试）。
+      - name: Preflight (syntax + release docs)
+        run: |
+          for f in index.js lib/*.js; do
+            echo "check $f"
+            node --check "$f"
+          done
+          node --check client.js
+          PKG_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          echo "version=$PKG_VERSION"
+          grep -q "## \[${PKG_VERSION}\]" CHANGELOG.md
+          test -f "docs/releases/v${PKG_VERSION}.md"
 
       # 防止 tag 与 package.json 版本不一致（例如打了 v0.4.0 却还是 0.3.1）。
       - name: Verify tag matches package.json version

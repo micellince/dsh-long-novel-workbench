@@ -1,9 +1,9 @@
 /**
- * dsh-long-novel-workbench 0.7.0-dev.0 — 宿主层入口（ATTENTION IS ALL YOU NEED）。
+ * dsh-long-novel-workbench 0.7.1 — 宿主层入口（ATTENTION IS ALL YOU NEED）。
  *
  * 职责（全部在这一层收口）：
  *   1) 路由 /novel-desk/api：鉴权 → RPC 分发（40 op：读 20 + 写 20）→ {ok,value|error}
- *   2) 6 个 Agent 工具：novel_desk_read / _review / _propose / _attention / _write / _run
+ *   2) 7 个 Agent 工具：novel_desk_read / _dispatch / _propose / _write / _run / _map / _problems
  *   3) Web 客户端 boot 注入：window.__ND_BOOT__ = {apiUrl,...}
  *   4) 写盘唯一通道：AI 正文走 lib/gates.js 的闸门，失败不落盘
  *   5) app.open：用系统默认浏览器打开同一套工作台（复用宿主认证，见 browserUrl）
@@ -23,18 +23,21 @@ import { writeChapterWithGates, formatGateLine, formatFailures } from './lib/gat
 import * as prompts from './lib/prompts.js'
 import { estimateSessionCost, loadChatUsage, loadModelPrices } from './lib/usage.js'
 import * as bookdb from './lib/bookdb.js'
-import { buildIndex, splitTitle, splitParagraphs } from './lib/paras.js'
+import { buildIndex, splitTitle, splitParagraphs, findParagraphByQuote } from './lib/paras.js'
 import { ROLES, ROLE_BY_ID, roleForSource } from './lib/roles.js'
 import { issueTicket, requireTicket, dispatchPrompt } from './lib/dispatch.js'
 import * as ledgerdb from './lib/ledgerdb.js'
 import { scanChapterLocal } from './lib/localchecks.js'
+import * as problems from './lib/problems.js'
+import { exportManuscript, scanFactsCandidates } from './lib/review-doc.js'
+import { readingPrompt, factsPrompt, revisePrompt } from './lib/problems-prompts.js'
 import { applyMapPlan, parseMapPlan } from './lib/mapplan.js'
 import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
 
-export const VERSION = '0.7.0-dev.0'
+export const VERSION = '0.7.1'
 
 /** 启动期错误（装配失败不拖垮 DSH，只记录并在诊断里显示）。 */
 const bootErrors = []
@@ -88,6 +91,9 @@ export const READ_OPS = [
   'ledger.rebuildMentions',
   'outline.list',
   'ledger.unknown',
+  'problems.list',
+  'problems.reviews',
+  'problems.factsScan',
 ]
 
 /** 写操作 21 个（app.open = 在默认浏览器打开工作台，不写数据）。 */
@@ -123,6 +129,15 @@ export const WRITE_OPS = [
   'ledger.confirm',
   'outline.upsert',
   'outline.delete',
+  'problems.add',
+  'problems.note',
+  'problems.accept',
+  'problems.ignore',
+  'problems.restoreDraft',
+  'problems.prepareReading',
+  'problems.prepareFacts',
+  'problems.prepareRevise',
+  'problems.setReviewSession',
 ]
 
 /** 全部 RPC op（测试与 boot 显示用；顺序 = 读在前写在后）。 */
@@ -439,6 +454,228 @@ async function resolveProject(s, root, nameOrId) {
   const hit = projects.find((row) => String(row?.id ?? '') === key || String(row?.name ?? '') === key || String(row?.title ?? '') === key)
   if (!hit) throw invalid(`找不到作品「${key}」`)
   return hit
+}
+
+// ── 0.7.1 问题 / 修改稿：审稿、采纳、地址刷新 ─────────────────
+
+function normalizeReviewScope(value) {
+  const scope = String(value ?? 'chapter')
+  if (!['chapter', 'cross', 'global'].includes(scope)) throw invalid('审稿范围只能是 chapter / cross / global')
+  return scope
+}
+
+function projectDisplayName(project, fallbackId) {
+  const row = project && typeof project === 'object'
+    ? (project.project && typeof project.project === 'object' ? project.project : project)
+    : {}
+  return String(row.title ?? row.name ?? fallbackId ?? '未命名')
+}
+
+/** 按范围取要审的章节正文（TXT 导出与问题落地址都用它）。 */
+async function loadReviewChapters(s, root, projectId, rawScope, chapterList) {
+  const scope = normalizeReviewScope(rawScope)
+  const all = listOf(await s.listChapters(root, projectId)).map((row) => Number(row.chapter ?? row.id)).filter((n) => n > 0)
+  let nums = []
+  if (scope === 'global') {
+    nums = all.slice()
+  } else {
+    const wanted = [...new Set((Array.isArray(chapterList) ? chapterList : []).map(Number).filter((n) => n > 0))]
+    if (wanted.length === 0) throw invalid('请先选择要审的章节')
+    nums = wanted
+    if (scope === 'chapter' && nums.length !== 1) throw invalid('单章审稿只能选一章')
+    if (scope === 'cross' && nums.length < 2) throw invalid('跨章审稿至少选两章')
+  }
+  const missing = nums.filter((n) => !all.includes(n))
+  if (missing.length > 0) throw invalid(`章节不存在：第 ${missing.join('、')} 章`)
+  const rows = []
+  for (const chapter of nums) {
+    const doc = await s.readChapter(root, projectId, chapter)
+    rows.push({ chapter, title: String(doc.meta?.title ?? ''), text: String(doc.text ?? ''), meta: doc.meta ?? {} })
+  }
+  return { scope, nums, rows }
+}
+
+/** 把 AI 交的问题地址归一：限定在单章；para/hash 由服务端按当前正文重算。 */
+async function resolveProblemAddress(s, root, projectId, row = {}) {
+  const chapters = [...new Set((Array.isArray(row.chapters) ? row.chapters : []).map(Number).filter((n) => n > 0))]
+  let chapter = Number(row.chapter) || chapters[0] || 0
+  const scope = normalizeReviewScope(row.scope ?? (chapters.length > 1 ? 'cross' : 'chapter'))
+  if (scope === 'global') {
+    chapter = 0
+    if (chapters.length === 0) {
+      const all = listOf(await s.listChapters(root, projectId)).map((item) => Number(item.chapter ?? item.id)).filter((n) => n > 0)
+      chapters.push(...all)
+    }
+  } else if (!chapter) {
+    throw invalid('这条问题缺少章号')
+  }
+  let para = row.para === undefined || row.para === null || row.para === '' ? null : Number(row.para)
+  const quote = String(row.quote ?? '').trim()
+  let paraHash = ''
+  if (scope === 'chapter' && chapter) {
+    const doc = await s.readChapter(root, projectId, chapter)
+    const hint = String(doc.meta?.title ?? '')
+    const index = buildIndex(doc.text, chapter, hint)
+    const body = splitTitle(doc.text, hint).body
+    if ((para === null || !Number.isInteger(para)) && quote) {
+      const at = findParagraphByQuote({ ...index, body }, quote)
+      if (at >= 0) para = at
+    }
+    if (Number.isInteger(para) && para >= 0) paraHash = index.paras[para]?.hash || ''
+    else para = null
+  } else {
+    para = null
+  }
+  if (chapter && chapters.length === 0) chapters.push(chapter)
+  return { scope, chapters, chapter, para: Number.isInteger(para) && para >= 0 ? para : null, paraHash, quote }
+}
+
+/** 一条问题下的稿全部采完 → accepted；还有 pending → open。 */
+function finalizeProblemStatus(db, problemId) {
+  const drafts = problems.listDrafts(db, { problemId })
+  const pending = drafts.filter((row) => row.status === 'pending').length
+  const accepted = drafts.filter((row) => row.status === 'accepted').length
+  const status = pending > 0 ? 'open' : accepted > 0 ? 'accepted' : 'open'
+  return problems.patchProblem(db, problemId, { status })
+}
+
+/** 保存正文后：本章其它问题按 hash/引文跟随；跟不上的标「原文已变」并作废其稿。 */
+async function refreshChapterProblems(s, root, projectId, dir, chapter) {
+  const { db } = await bookdb.openBook(dir)
+  const doc = await s.readChapter(root, projectId, chapter)
+  const hint = String(doc.meta?.title ?? '')
+  const raw = String(doc.text ?? '')
+  const index = buildIndex(raw, chapter, hint)
+  const body = splitTitle(raw, hint).body
+  const open = problems.listProblems(db, { chapter, status: 'open' })
+  let moved = 0
+  let outdated = 0
+  for (const problem of open) {
+    if (problem.scope !== 'chapter' || problem.para === null || problem.para === undefined) continue
+    const at = Number(problem.para)
+    if (index.paras[at] && index.paras[at].hash === problem.paraHash) continue
+    const found = problem.paraHash ? index.paras.findIndex((item) => item.hash === problem.paraHash) : -1
+    if (found >= 0) {
+      problems.patchProblem(db, problem.id, { para: found, para_hash: index.paras[found]?.hash || problem.paraHash })
+      moved += 1
+      continue
+    }
+    const quoteAt = problem.quote ? findParagraphByQuote({ ...index, body }, problem.quote) : -1
+    if (quoteAt >= 0) {
+      problems.patchProblem(db, problem.id, { para: quoteAt, para_hash: index.paras[quoteAt]?.hash || '' })
+      moved += 1
+      continue
+    }
+    problems.patchProblem(db, problem.id, { status: 'outdated' })
+    problems.supersedePendingDrafts(db, problem.id)
+    outdated += 1
+  }
+  return { moved, outdated }
+}
+
+/** 高光直接进账本（同章同引文同评论去重）。 */
+async function addHighlightRow(db, item = {}) {
+  const chapter = Number(item.chapter) || 0
+  const quote = String(item.quote ?? '').trim()
+  const comment = String(item.comment ?? '').trim()
+  if (!chapter || !comment) return false
+  const exists = db.prepare(
+    "SELECT id FROM highlights WHERE chapter = ? AND COALESCE(quote,'') = ? AND COALESCE(comment,'') = ? LIMIT 1",
+  ).get(chapter, quote, comment)
+  if (exists) return false
+  await ledgerdb.addHighlight(db, {
+    chapter,
+    para: item.para === undefined || item.para === null ? null : Number(item.para),
+    quote,
+    comment,
+    sourceOpinionId: null,
+  })
+  return true
+}
+
+/**
+ * 采纳一条修改稿：段级稿只替换该段区间（不重排整章）；整章稿整章替换。
+ * 失败不落盘；原文变了就作废该稿并把问题标为「原文已变」，让作者去继续改。
+ */
+async function acceptProblemDraft(s, root, projectId, dir, draftId) {
+  const { db } = await bookdb.openBook(dir)
+  const draft = problems.getDraft(db, String(draftId))
+  if (!draft) throw invalid('这条改法不存在')
+  if (draft.status !== 'pending') throw invalid('这条改法已经处理过了')
+  const problem = problems.getProblem(db, draft.problemId)
+  if (!problem) throw invalid('问题不存在')
+  if (problem.status === 'ignored') throw invalid('这条问题已被忽略：先点「撤销忽略」再采纳')
+  const chapter = Number(draft.chapter || problem.chapter) || 0
+  if (!chapter) throw invalid('这条改法缺少章号')
+  const doc = await s.readChapter(root, projectId, chapter)
+  const hint = String(doc.meta?.title ?? '')
+  const raw = String(doc.text ?? '')
+  const baseHash = String(doc.meta?.contentHash ?? '')
+
+  if (draft.kind === 'chapter') {
+    const text = String(draft.text ?? '').trim()
+    if (!text) throw invalid('整章改法为空')
+    const nextText = text.endsWith('\n') ? text : `${text}\n`
+    await s.saveChapter(root, projectId, chapter, nextText, {}, { baseHash, source: 'problem-accept-chapter' })
+    problems.patchDraft(db, draft.id, { status: 'accepted' })
+    finalizeProblemStatus(db, problem.id)
+    const others = problems.listProblems(db, { chapter, status: 'open' }).filter((row) => row.id !== problem.id)
+    for (const other of others) {
+      problems.patchProblem(db, other.id, { status: 'outdated' })
+      problems.supersedePendingDrafts(db, other.id)
+    }
+    return { ok: true, chapter, kind: 'chapter', message: `已用整章改法替换第 ${chapter} 章${others.length ? `（本章 ${others.length} 条其它问题已标为「原文已变」）` : ''}` }
+  }
+
+  const { title, body } = splitTitle(raw, hint)
+  const paragraphs = splitParagraphs(body)
+  const draftHash = String(draft.paraHash || '')
+  let at = Number(draft.para === undefined || draft.para === null ? problem.para : draft.para)
+  // 新稿带「出稿时该段的指纹」；旧稿没有，就只在「段号没变」时参考问题创建时的指纹。
+  let pinHash = draftHash || (Number(draft.chapter) === Number(problem.chapter) && Number(at) === Number(problem.para) ? String(problem.paraHash || '') : '')
+  const failOutdated = (reason) => {
+    // 保住 AI 已经出的方案：只把问题标成「原文已变」，稿不删、不 supersede，作者还能看
+    problems.patchProblem(db, problem.id, { status: 'outdated' })
+    throw invalid(reason)
+  }
+  if (!Number.isInteger(at) || at < 0 || !paragraphs[at]) {
+    failOutdated(`原文已变（第 ${chapter} 章第 ${Number.isInteger(at) ? at + 1 : '?'} 段已不存在）。改法已保留，点「继续改」让 AI 按新原文重出稿。`)
+  }
+  if (pinHash && paragraphs[at].hash !== pinHash) {
+    const index = buildIndex(raw, chapter, hint)
+    const moved = index.paras.findIndex((item) => item.hash === pinHash)
+    if (moved >= 0) {
+      // 段落只是挪了位置（前面插/删了段），跟着走，不报失效
+      at = moved
+    } else {
+      const quoteAt = problem.quote ? findParagraphByQuote({ ...index, body }, problem.quote) : -1
+      if (quoteAt >= 0) {
+        at = quoteAt
+      } else if (draftHash) {
+        // 新稿有「出稿时指纹」却对不上：原文确实在出稿后被改过；稿保留，只标问题失效
+        failOutdated(`原文已变（第 ${chapter} 章第 ${at + 1} 段和出稿时不一致）。改法已保留，点「继续改」重新出稿。`)
+      }
+      // 旧稿没有稿级指纹：可能只是之前采纳改过这一段，信任 AI 指到的段继续替换
+    }
+  }
+  const replacement = String(draft.text ?? '').trim()
+  if (!replacement) throw invalid('这条改法为空')
+  if (/\n[ \t]*\n/.test(replacement)) throw invalid('段级改法里不能有空行分段；要改整章请用整章改写稿')
+  const start = Number(paragraphs[at].start)
+  const end = Number(paragraphs[at].end)
+  const nextBody = body.slice(0, start) + replacement + body.slice(end)
+  const nextText = title ? `${title}\n\n${nextBody}\n` : `${nextBody}\n`
+  await s.saveChapter(root, projectId, chapter, nextText, {}, { baseHash, source: 'problem-accept-paragraph' })
+  problems.patchDraft(db, draft.id, { status: 'accepted' })
+  finalizeProblemStatus(db, problem.id)
+  const refresh = await refreshChapterProblems(s, root, projectId, dir, chapter)
+  return {
+    ok: true,
+    chapter,
+    kind: 'paragraph',
+    para: at,
+    message: `已替换第 ${chapter} 章第 ${at + 1} 段${refresh.moved ? `；${refresh.moved} 条问题地址已跟随` : ''}${refresh.outdated ? `；${refresh.outdated} 条问题标为「原文已变」` : ''}`,
+  }
 }
 
 // ── align.status 派生（不进 store） ─────────────────────────
@@ -1465,6 +1702,173 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const doc = await s.readChapter(root, projectId, chapter)
       const index = buildIndex(doc.text, chapter, String(doc.meta?.title ?? ''))
       return { index, title: index.title, bodyHash: index.bodyHash }
+    }
+    // ── 0.7.1 问题 / 修改稿 ─────────────────────────────
+    case 'problems.list': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const rows = problems.listProblems(db, {}).map((problem) => ({
+        ...problem,
+        drafts: problems.listDrafts(db, { problemId: problem.id }),
+      }))
+      return { rows, counts: problems.problemCounts(db) }
+    }
+    case 'problems.reviews': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const limit = Math.max(1, Math.min(50, Number(payload.limit) || 20))
+      return { rows: problems.listReviews(db, { limit }) }
+    }
+    case 'problems.factsScan': {
+      const projectId = String(need(payload, 'projectId'))
+      const built = await loadReviewChapters(s, root, projectId, payload.scope, payload.chapters)
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const facts = db.prepare('SELECT subject, attribute, value FROM facts').all()
+      const candidates = scanFactsCandidates({ chapters: built.rows, facts })
+      const review = problems.createReview(db, {
+        kind: 'facts-scan', scope: built.scope, chapters: built.nums, candidates, status: 'prepared',
+      })
+      return { reviewId: review.id, scanned: built.rows.length, chapters: built.nums, candidates }
+    }
+    case 'problems.prepareReading': {
+      const projectId = String(need(payload, 'projectId'))
+      const built = await loadReviewChapters(s, root, projectId, payload.scope, payload.chapters)
+      const dir = await s.projectDir(root, projectId)
+      const project = await s.getProject(root, projectId).catch(() => null)
+      const projectName = projectDisplayName(project, projectId)
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+      const manuscript = await exportManuscript({ dir, projectName, scope: built.scope, chapters: built.rows, stamp })
+      const { db } = await bookdb.openBook(dir)
+      const review = problems.createReview(db, {
+        kind: 'reading', scope: built.scope, chapters: built.nums, manuscriptPath: manuscript.filePath, status: 'prepared',
+      })
+      const prompt = readingPrompt({
+        projectName, projectId, scope: built.scope, chapters: built.rows, filePath: manuscript.filePath, reviewId: review.id, words: manuscript.words,
+      })
+      return { reviewId: review.id, prompt, filePath: manuscript.filePath, fileName: manuscript.fileName, words: manuscript.words, chapters: built.nums }
+    }
+    case 'problems.prepareFacts': {
+      const projectId = String(need(payload, 'projectId'))
+      const built = await loadReviewChapters(s, root, projectId, payload.scope, payload.chapters)
+      const dir = await s.projectDir(root, projectId)
+      const project = await s.getProject(root, projectId).catch(() => null)
+      const projectName = projectDisplayName(project, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const facts = db.prepare('SELECT subject, attribute, value FROM facts').all()
+      const candidates = scanFactsCandidates({ chapters: built.rows, facts })
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+      const manuscript = await exportManuscript({ dir, projectName, scope: built.scope, chapters: built.rows, stamp })
+      const review = problems.createReview(db, {
+        kind: 'facts-ai', scope: built.scope, chapters: built.nums, manuscriptPath: manuscript.filePath, candidates, status: 'prepared',
+      })
+      const prompt = factsPrompt({
+        projectName, projectId, scope: built.scope, chapters: built.rows, filePath: manuscript.filePath, reviewId: review.id, words: manuscript.words, candidates,
+      })
+      return {
+        reviewId: review.id, prompt, filePath: manuscript.filePath, fileName: manuscript.fileName, words: manuscript.words, chapters: built.nums, candidates,
+      }
+    }
+    case 'problems.prepareRevise': {
+      const projectId = String(need(payload, 'projectId'))
+      const ids = [...new Set((Array.isArray(payload.problemIds) ? payload.problemIds : [payload.problemId]).map(String).filter(Boolean))]
+      if (ids.length === 0) throw invalid('请先选择要改的问题')
+      if (ids.length > 40) throw invalid('一次最多 40 条问题：请按你勾选的范围分批，不按固定章数自动切')
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const rows = []
+      let sessionId = ''
+      for (const id of ids) {
+        const problem = problems.getProblem(db, id)
+        if (!problem) throw invalid(`问题不存在：${id}`)
+        if (problem.status === 'ignored') throw invalid(`问题 ${id} 已被忽略：先撤销忽略再继续改`)
+        rows.push({ ...problem, drafts: problems.listDrafts(db, { problemId: id }) })
+        if (!sessionId && problem.reviewId) {
+          const review = problems.getReview(db, problem.reviewId)
+          if (review?.sessionId) sessionId = review.sessionId
+        }
+      }
+      const project = await s.getProject(root, projectId).catch(() => null)
+      const prompt = revisePrompt({
+        projectName: projectDisplayName(project, projectId),
+        projectId,
+        problems: rows,
+        requirement: String(payload.requirement ?? ''),
+        batch: ids.length > 1,
+      })
+      return { prompt, problemCount: rows.length, sessionId }
+    }
+    case 'problems.setReviewSession': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const sessionId = String(payload.sessionId ?? '').trim()
+      if (!sessionId) throw invalid('缺少 sessionId')
+      const review = problems.updateReview(db, String(need(payload, 'reviewId')), { session_id: sessionId })
+      if (!review) throw invalid('审稿记录不存在')
+      return { ok: true }
+    }
+    case 'problems.add': {
+      const projectId = String(need(payload, 'projectId'))
+      const chapter = needNumber(payload, 'chapter')
+      const text = String(payload.text ?? '').trim()
+      if (!text) throw invalid('请先写问题内容')
+      const type = problems.PROBLEM_TYPES.includes(String(payload.type ?? '')) ? String(payload.type) : 'other'
+      const dir = await s.projectDir(root, projectId)
+      const addr = await resolveProblemAddress(s, root, projectId, {
+        scope: 'chapter', chapters: [chapter], chapter, para: payload.para, quote: payload.quote,
+      })
+      const { db } = await bookdb.openBook(dir)
+      const row = problems.addProblem(db, {
+        reviewId: '', type, scope: 'chapter', chapters: [chapter], chapter,
+        para: addr.para, paraHash: addr.paraHash, quote: addr.quote,
+        severity: 'major', text, source: 'author',
+      })
+      return { ok: true, id: row.id, chapter, para: addr.para }
+    }
+    case 'problems.note': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const row = problems.patchProblem(db, String(need(payload, 'problemId')), { author_note: String(payload.note ?? '') })
+      if (!row) throw invalid('问题不存在')
+      return { ok: true }
+    }
+    case 'problems.ignore': {
+      const projectId = String(need(payload, 'projectId'))
+      const problemId = String(need(payload, 'problemId'))
+      const ignored = payload.ignored !== false
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const current = problems.getProblem(db, problemId)
+      if (!current) throw invalid('问题不存在')
+      if (current.status === 'accepted') throw invalid('这条问题已采纳，不能再忽略')
+      const row = problems.patchProblem(db, problemId, { status: ignored ? 'ignored' : 'open' })
+      return { ok: true, id: row?.id || problemId, status: row?.status || (ignored ? 'ignored' : 'open') }
+    }
+    case 'problems.restoreDraft': {
+      const projectId = String(need(payload, 'projectId'))
+      const draftId = String(need(payload, 'draftId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const draft = problems.getDraft(db, draftId)
+      if (!draft) throw invalid('改法不存在')
+      const problem = problems.getProblem(db, draft.problemId)
+      if (!problem) throw invalid('问题不存在')
+      if (problem.status === 'accepted') throw invalid('这条问题已采纳，不能恢复旧稿')
+      if (draft.status === 'pending') return { ok: true, id: draftId, status: 'pending' }
+      problems.patchDraft(db, draftId, { status: 'pending' })
+      if (problem.status === 'ignored') throw invalid('这条问题已被忽略：先撤销忽略')
+      problems.patchProblem(db, problem.id, { status: problem.status === 'outdated' ? 'open' : problem.status })
+      return { ok: true, id: draftId, status: 'pending' }
+    }
+    case 'problems.accept': {
+      const projectId = String(need(payload, 'projectId'))
+      const draftId = String(need(payload, 'draftId'))
+      const dir = await s.projectDir(root, projectId)
+      return acceptProblemDraft(s, root, projectId, dir, draftId)
     }
     case 'opinions.list': {
       const projectId = String(need(payload, 'projectId'))
@@ -2951,7 +3355,270 @@ const coldSplitTool = {
   },
 }
 
-export const TOOLS = [readTool, dispatchTool, reviewTool, proposeTool, attentionTool, writeTool, runTool, mapTool, coldSplitTool]
+// ── 0.7.1 工具：审稿结果 / 修改稿提交 ─────────────────────────
+
+const NL = String.fromCharCode(10)
+
+async function problemDraftInput(s, root, projectId, problemId, draft, addr) {
+  const kind = String(draft?.kind ?? 'paragraph')
+  if (!problems.DRAFT_KINDS.includes(kind)) throw new Error(`修改稿类型不对：${kind}（只能是 paragraph / chapter）`)
+  const text = String(draft?.text ?? '').trim()
+  if (!text) throw new Error('修改稿 text 不能为空')
+  const fallbackChapter = Number(addr.chapter) || Number(addr.chapters?.[0]) || 0
+  if (kind === 'chapter') {
+    const chapter = Number(draft?.chapter) || fallbackChapter
+    if (!chapter) throw new Error('整章改写稿缺少 chapter')
+    if (text.length < 50) throw new Error('整章改写稿太短：整章替换文本不能少于 50 字')
+    if (text.length > 200000) throw new Error('整章改写稿过长')
+    return { problemId, kind, chapter, para: null, paraHash: '', text }
+  }
+  if (text.split(NL).some((line) => line.trim() === '')) throw new Error('段级修改稿不能包含空行分段：一段换一段；要改整章请用 kind="chapter"')
+  if (text.length > 4000) throw new Error('段级修改稿超过 4000 字：只替换指到的那一段')
+  const chapter = Number(draft?.chapter) || fallbackChapter
+  if (!chapter) throw new Error('段级修改稿缺少章号（跨章/全局问题每份段级稿都要写 chapter）')
+  const doc = await s.readChapter(root, projectId, chapter)
+  const hint = String(doc.meta?.title ?? '')
+  const index = buildIndex(doc.text, chapter, hint)
+  const body = splitTitle(doc.text, hint).body
+  let para = draft?.para === undefined || draft?.para === null || draft?.para === '' ? null : Number(draft.para)
+  if (para === null && String(draft?.quote ?? '').trim()) {
+    const at = findParagraphByQuote({ ...index, body }, String(draft.quote).trim())
+    if (at >= 0) para = at
+  }
+  if (para === null && addr.scope === 'chapter' && chapter === Number(addr.chapter)) para = addr.para
+  if (!Number.isInteger(para) || para < 0) throw new Error(`段级修改稿缺少段号（第 ${chapter} 章）：请给 para，或给该段逐字 quote`)
+  if (!index.paras[para]) throw new Error(`第 ${chapter} 章没有第 ${para} 段（para 从 0 开始，标题不算段）`)
+  return { problemId, kind, chapter, para, paraHash: index.paras[para]?.hash || '', text }
+}
+
+async function submitProblemsTool(args) {
+  const s = store
+  const root = s.defaultRoot()
+  await s.ensureRoot(root)
+  const project = await resolveProject(s, root, args.projectId)
+  const projectId = String(project.id)
+  const dir = await s.projectDir(root, projectId)
+  const { db } = await bookdb.openBook(dir)
+  const rows = Array.isArray(args.problems) ? args.problems : []
+  if (rows.length > 60) throw new Error('一次最多 60 条问题：分多次提交（先提 blocker/最严重的）')
+  const reviewId = String(args.reviewId ?? '').trim()
+  let review = reviewId ? problems.getReview(db, reviewId) : null
+  if (reviewId && !review) throw new Error(`审稿记录不存在：${reviewId}；请让作者从工作台重新发起审稿`)
+  let reviewCreated = false
+  if (!review && rows.length > 0) {
+    // AI 漏带 reviewId 时的兜底：先建审稿记录，问题都挂到它下面
+    review = problems.createReview(db, { kind: 'reading', scope: 'chapter', chapters: [], status: 'prepared' })
+    reviewCreated = true
+  }
+  let added = 0
+  let draftCount = 0
+  let noDraft = 0
+  const scopeSet = new Set()
+  const chapterSet = new Set()
+  for (const raw of rows) {
+    const type = String(raw?.type ?? 'other')
+    if (!problems.PROBLEM_TYPES.includes(type)) throw new Error(`问题类型不对：${type}（只能是 ai-style / logic-fact / style / other）`)
+    const severity = String(raw?.severity ?? 'major')
+    if (!problems.PROBLEM_SEVERITIES.includes(severity)) throw new Error(`严重度不对：${severity}（critical/major/minor/note）`)
+    const text = String(raw?.text ?? '').trim()
+    if (!text) throw new Error('每条问题都必须有 text（一句话说清读者卡在哪）')
+    if (text.length > 400) throw new Error('问题说明超过 400 字：写清问题即可')
+    const addr = await resolveProblemAddress(s, root, projectId, raw)
+    scopeSet.add(addr.scope)
+    if (addr.chapter) chapterSet.add(addr.chapter)
+    const problem = problems.addProblem(db, {
+      reviewId: review ? review.id : '',
+      type, scope: addr.scope, chapters: addr.chapters, chapter: addr.chapter,
+      para: addr.para, paraHash: addr.paraHash, quote: addr.quote,
+      severity, text, source: 'ai',
+    })
+    added += 1
+    const drafts = Array.isArray(raw?.drafts) ? raw.drafts : (raw?.draft ? [raw.draft] : [])
+    if (drafts.length > 10) throw new Error(`问题 ${problem.id} 的修改稿超过 10 份`)
+    if (drafts.length === 0) noDraft += 1
+    for (const draft of drafts) {
+      const row = await problemDraftInput(s, root, projectId, problem.id, draft, addr)
+      problems.addDraft(db, row)
+      draftCount += 1
+    }
+  }
+  const verdict = String(args.verdict ?? '').trim()
+  const scores = Array.isArray(args.scores) ? args.scores : []
+  let scored = 0
+  for (const row of scores.slice(0, 200)) {
+    const chapter = Number(row?.chapter)
+    const score = Number(row?.score)
+    if (!Number.isInteger(chapter) || chapter <= 0) continue
+    if (!Number.isFinite(score) || score < 0 || score > 100) continue
+    try {
+      await s.mergeAttention(root, projectId, chapter, { score, verdict })
+      scored += 1
+    } catch { /* 评分落库失败不影响问题 */ }
+  }
+  const finalScope = scopeSet.has('global') ? 'global' : scopeSet.has('cross') ? 'cross' : 'chapter'
+  if (review && reviewCreated) {
+    problems.createReview(db, {
+      id: review.id,
+      kind: 'reading',
+      scope: finalScope,
+      chapters: [...chapterSet],
+      verdict,
+      scores,
+      status: 'submitted',
+    })
+  } else if (review) {
+    problems.updateReview(db, review.id, { status: 'submitted', verdict, scores })
+  }
+  const highlights = Array.isArray(args.highlights) ? args.highlights : []
+  let highlightAdded = 0
+  for (const item of highlights.slice(0, 30)) {
+    try { if (await addHighlightRow(db, item)) highlightAdded += 1 } catch { /* 高光失败不影响问题 */ }
+  }
+  return `已记录审稿：问题 ${added} 条（修改稿 ${draftCount} 份${noDraft ? `，${noDraft} 条暂无稿` : ''}）；高光 ${highlightAdded} 条已进账本；注意力评分 ${scored} 章。作者在「问题」页采纳或继续改。`
+}
+
+async function reviseProblemsTool(args) {
+  const s = store
+  const root = s.defaultRoot()
+  await s.ensureRoot(root)
+  const project = await resolveProject(s, root, args.projectId)
+  const projectId = String(project.id)
+  const dir = await s.projectDir(root, projectId)
+  const { db } = await bookdb.openBook(dir)
+  const revisions = Array.isArray(args.revisions) ? args.revisions : []
+  if (revisions.length === 0) throw new Error('revisions 不能为空')
+  if (revisions.length > 40) throw new Error('一次最多回写 40 条问题的修改稿')
+  let updated = 0
+  for (const row of revisions) {
+    const problemId = String(row?.problemId ?? '').trim()
+    if (!problemId) throw new Error('revision 缺少 problemId')
+    const problem = problems.getProblem(db, problemId)
+    if (!problem) throw new Error(`问题不存在：${problemId}`)
+    const drafts = Array.isArray(row?.drafts) ? row.drafts : (row?.draft ? [row.draft] : [])
+    if (drafts.length === 0) throw new Error(`问题 ${problemId} 没有新修改稿`)
+    const addr = {
+      scope: problem.scope,
+      chapters: problem.chapters,
+      chapter: problem.chapter,
+      para: problem.para,
+      paraHash: problem.paraHash,
+      quote: problem.quote,
+    }
+    problems.supersedePendingDrafts(db, problemId)
+    for (const draft of drafts) {
+      problems.addDraft(db, await problemDraftInput(s, root, projectId, problemId, draft, addr))
+    }
+    problems.patchProblem(db, problemId, { status: 'open' })
+    updated += 1
+  }
+  return `已为 ${updated} 条问题写入新修改稿（旧稿作废），作者可在「问题」页采纳或继续改。`
+}
+
+const problemsTool = {
+  name: 'novel_desk_problems',
+  description: '0.7.1 审稿/改稿提交：op=submit 提交一次审稿（评分 + 四类问题 + 高光）；op=revise 回写继续改的新修改稿。一次审稿只由一个 AI 读工作台给定的 TXT 全文后提交：不要派子 agent、不要分章转交、不要在对话里改正文。问题类型 ai-style/logic-fact/style/other；每条尽量带修改稿（paragraph=一段换一段；chapter=整章替换；跨章问题可按章给多份稿：段级稿每份带 chapter+para/quote，严重到修不了才整章稿）。**任何一档读到的问题都要提交（按性质给 type），不要因为不是本次档位目标就丢掉。** 高光只进账本，不是问题。',
+  parameters: {
+    type: 'object',
+    properties: {
+      projectId: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
+      reviewId: { type: 'string', description: '工作台发审稿工作单时给的 reviewId；提交时必须原样带回' },
+      op: { type: 'string', enum: ['submit', 'revise'], description: 'submit=交审稿结果；revise=继续改回写新稿' },
+      verdict: { type: 'string', description: 'op=submit：全书/本次范围的结论（≤80 字）' },
+      scores: {
+        type: 'array',
+        description: 'op=submit：注意力评分，每章一条',
+        items: { type: 'object', properties: { chapter: { type: 'number' }, score: { type: 'number' } }, required: ['chapter', 'score'] },
+      },
+      problems: {
+        type: 'array',
+        description: 'op=submit：问题清单（四类分开、不合并）。每条带 type/scope/severity/text；能定位就带 chapter/para/quote；能改就给 drafts。',
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            type: { type: 'string', enum: ['ai-style', 'logic-fact', 'style', 'other'] },
+            scope: { type: 'string', enum: ['chapter', 'cross', 'global'] },
+            chapters: { type: 'array', items: { type: 'number' } },
+            chapter: { type: 'number' },
+            para: { type: 'number', description: '正文段号，从 0 开始（标题不算段）' },
+            quote: { type: 'string', description: '该段逐字原文（用于核对地址）' },
+            severity: { type: 'string', enum: ['critical', 'major', 'minor', 'note'] },
+            text: { type: 'string', description: '问题说明（≤400 字）' },
+            drafts: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  kind: { type: 'string', enum: ['paragraph', 'chapter'] },
+                  chapter: { type: 'number' },
+                  para: { type: 'number' },
+                  quote: { type: 'string', description: '段级稿在该章的逐字原文（跨章/全局问题用来定位段号）' },
+                  text: { type: 'string', description: '整段替换成文 / 整章替换成文' },
+                },
+                required: ['kind', 'text'],
+              },
+            },
+          },
+          required: ['type', 'scope', 'severity', 'text'],
+        },
+      },
+      highlights: {
+        type: 'array',
+        description: 'op=submit：高光（直接进账本，不是问题）',
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            chapter: { type: 'number' },
+            para: { type: 'number' },
+            quote: { type: 'string' },
+            comment: { type: 'string' },
+          },
+          required: ['chapter', 'comment'],
+        },
+      },
+      revisions: {
+        type: 'array',
+        description: 'op=revise：逐条回写新修改稿',
+        items: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            problemId: { type: 'string' },
+            drafts: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: true,
+                properties: {
+                  kind: { type: 'string', enum: ['paragraph', 'chapter'] },
+                  chapter: { type: 'number' },
+                  para: { type: 'number' },
+                  quote: { type: 'string', description: '段级稿在该章的逐字原文（用来定位段号）' },
+                  text: { type: 'string' },
+                },
+                required: ['kind', 'text'],
+              },
+            },
+          },
+          required: ['problemId', 'drafts'],
+        },
+      },
+    },
+    required: ['op'],
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args = {}) {
+    const op = String(args.op ?? 'submit')
+    if (op === 'submit') return submitProblemsTool(args)
+    if (op === 'revise') return reviseProblemsTool(args)
+    throw new Error('op 只能是 submit 或 revise')
+  },
+}
+
+export const TOOLS = [readTool, dispatchTool, proposeTool, writeTool, runTool, mapTool, problemsTool]
 
 // ── 入口 ────────────────────────────────────────────────────
 

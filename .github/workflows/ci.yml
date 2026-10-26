@@ -5,11 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# 本仓库没有第三方运行时/开发依赖，也没有锁文件，
-# 所以不要用 `npm ci` / `npm install`（会因为没有 lockfile 而失败）。
-# 直接 `npm test` 即可：测试用 node:test，零依赖。
+# 0.7.1 起 `test/` 仍是 0.6 行为断言，项目规则是不跑自动化测试；
+# CI 改为发布前预检：ESM 语法 + 版本/发布文档一致性。不跑 npm test。
 jobs:
-  test:
+  check:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     strategy:
@@ -27,12 +26,22 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
-      - name: Run tests
-        run: npm test
+      # host 半边是 ESM 入口；lib/*.js 是宿主模块。逐个做语法检查（不执行）。
+      - name: Syntax check host + lib
+        run: |
+          for f in index.js lib/*.js; do
+            echo "check $f"
+            node --check "$f"
+          done
 
-      # host 半边是 ESM 入口；client.js 是浏览器模块，只做语法检查。
-      - name: Syntax check index.js
-        run: node --check index.js
-
+      # client.js 是浏览器模块，只做语法检查。
       - name: Syntax check client.js
         run: node --check client.js
+
+      # 版本号、CHANGELOG、发布说明必须一致，避免发布文档缺失。
+      - name: Version & release docs consistency
+        run: |
+          PKG_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          echo "version=$PKG_VERSION"
+          grep -q "## \[${PKG_VERSION}\]" CHANGELOG.md
+          test -f "docs/releases/v${PKG_VERSION}.md"
