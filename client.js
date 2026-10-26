@@ -2995,6 +2995,8 @@ window.__ModuleLoader__.load({
         map.get(key).opinions.push(row)
       }
       const reload = () => { res.reload(); if (onChanged) onChanged() }
+      const itemParas = (row) => (Array.isArray(row?.paras) && row.paras.length ? row.paras : [row?.para]).filter((p) => Number.isInteger(Number(p))).map(Number)
+      const itemMarks = (row) => itemParas(row).map((para) => ({ chapter: row.chapter, para, quote: row.quote, kind: row.kind, message: row.message }))
       const scanLocal = async () => {
         if (!projectId || localScanning) return
         setLocalScanning(true); setNotice(null)
@@ -3267,7 +3269,7 @@ window.__ModuleLoader__.load({
             h('h3', null, '🧪 本地检查（0 AI 成本）'),
             localChecks ? h('span', { className: 'nd-hint' }, `事实逻辑 ${localChecks.counts?.logic || 0} ｜ 去 AI 化 ${localChecks.counts?.deai || 0}${localAt ? ` ｜ 上次扫描 ${localAt}` : ''}（正文改过再点重新扫描）`) : h('span', { className: 'nd-hint' }, '只在点「扫描」时跑；结果会保留，切页回来不用重扫'),
             h(Btn, { small: true, kind: localChecks ? undefined : 'primary', onClick: scanLocal, disabled: localScanning }, localScanning ? '扫描中…' : localChecks ? '重新扫描' : '扫描全文'),
-            localChecks && localChecks.items && localChecks.items.length && go ? h(Btn, { small: true, onClick: () => go('read', { chapter: Number(localChecks.items[0].chapter), marks: localChecks.items.map((row) => ({ chapter: row.chapter, para: row.para, quote: row.quote, kind: row.kind, message: row.message })) }) }, '全部高亮') : null,
+            localChecks && localChecks.items && localChecks.items.length && go ? h(Btn, { small: true, onClick: () => go('read', { chapter: Number(localChecks.items[0].chapter), marks: localChecks.items.flatMap((row) => itemMarks(row)) }) }, '全部高亮') : null,
             localChecks && localChecks.items && localChecks.items.length ? h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点') : null,
           ),
           localChecks
@@ -3279,10 +3281,10 @@ window.__ModuleLoader__.load({
             ? h('div', { className: 'nd-local-list' },
                 localChecks.items.slice(0, 20).map((row, index) => h('div', { className: 'nd-local-item', key: index },
                   h(Tag, { tone: row.kind === 'deai' ? 'warn' : 'muted' }, row.kind === 'deai' ? '去 AI 化' : '事实逻辑'),
-                  h('span', { className: 'nd-hint' }, `第 ${row.chapter} 章 · 第 ${Number(row.para) + 1} 段`),
+                  h('span', { className: 'nd-hint' }, `第 ${row.chapter} 章 · 第 ${itemParas(row).map((p) => Number(p) + 1).join('、')} 段`),
                   h('span', null, row.message),
                   row.quote ? h('span', { className: 'nd-hint' }, `「${String(row.quote).slice(0, 40)}」`) : null,
-                  openChapterAt ? h(Btn, { small: true, onClick: () => openChapterAt(row.chapter, row.para, { quote: row.quote, kind: row.kind, message: row.message }) }, '定位') : null,
+                  go ? h(Btn, { small: true, onClick: () => go('read', { chapter: Number(row.chapter), para: itemParas(row)[0], marks: itemMarks(row) }) }, '定位') : null,
                 )),
                 localChecks.items.length > 20 ? h('p', { className: 'nd-hint' }, `还有 ${localChecks.items.length - 20} 条；点「让 AI 判这些点」会全部带上。`) : null,
               )
