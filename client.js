@@ -1556,6 +1556,9 @@ window.__ModuleLoader__.load({
 
     function Nav({ page, go }) {
       const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
+      const visibleIds = filtered.map((row) => String(row.id))
+      const allVisibleChecked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id))
+      const toggleAllVisible = () => setPicked((prev) => (allVisibleChecked ? prev.filter((id) => !visibleIds.includes(id)) : [...new Set([...prev, ...visibleIds])]))
       const groups = []
       for (const item of PAGES) {
         let group = groups.find((g) => g.name === item.group)
@@ -3075,6 +3078,9 @@ window.__ModuleLoader__.load({
         return true
       })
       const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
+      const visibleIds = filtered.map((row) => String(row.id))
+      const allVisibleChecked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id))
+      const toggleAllVisible = () => setPicked((prev) => (allVisibleChecked ? prev.filter((id) => !visibleIds.includes(id)) : [...new Set([...prev, ...visibleIds])]))
       const groups = []
       const map = new Map()
       for (const row of filtered) {
@@ -3356,7 +3362,6 @@ window.__ModuleLoader__.load({
             h(Btn, { small: true, kind: 'primary', onClick: () => { setColdOpen(true); setColdFocus('') } }, '❄️ 全文冷读（注意力）'),
             h(Btn, { small: true, onClick: () => makeReviewWorkorder('ai-style', []), disabled: Boolean(busy) }, '🤖 全文去 AI 化'),
             h(Btn, { small: true, onClick: () => makeReviewWorkorder('logic', []), disabled: Boolean(busy) }, '⚖️ 全文逻辑审核'),
-            h(Btn, { small: true, kind: 'primary', onClick: makeFixWorkorder, disabled: !picked.length || Boolean(busy) }, picked.length ? `🤖 AI 出改法（${picked.length}）` : '🤖 AI 出改法'),
           ),
         ),
         notice ? h(Msg, { tone: notice.tone, onClose: () => setNotice(null) }, notice.text) : null,
@@ -3372,6 +3377,16 @@ window.__ModuleLoader__.load({
           chip('all', `全部 ${rows.length}`, status, setStatus),
         ),
         who === 'ai' ? h('div', { className: 'nd-toolbar' }, cats.map((item) => chip(item.id, item.label, cat, setCat))) : null,
+        h('div', { className: 'nd-toolbar nd-selectbar' },
+          h('label', { className: 'nd-checkline' },
+            h('input', { type: 'checkbox', checked: allVisibleChecked, onChange: toggleAllVisible }),
+            h('span', null, '全选当前'),
+          ),
+          h('span', { className: 'nd-hint' }, `已选 ${picked.length} 条`),
+          h(Btn, { small: true, onClick: toggleAllVisible, disabled: !visibleIds.length }, allVisibleChecked ? '取消全选' : '全选'),
+          h(Btn, { small: true, onClick: () => setPicked([]), disabled: !picked.length }, '清空'),
+          h(Btn, { small: true, kind: 'primary', onClick: makeFixWorkorder, disabled: !picked.length || Boolean(busy) }, busy === 'fix' ? '生成中…' : `🤖 让 AI 批量改${picked.length ? `（${picked.length}）` : ''}`),
+        ),
         res.error ? h(ErrorBox, { error: res.error, onRetry: res.reload }) : null,
         res.loading && !rows.length ? h(Loading, null, '读取意见…') : null,
         !res.loading && !groups.length ? h('p', { className: 'nd-hint' }, who === 'author' ? '还没有作者意见：正文页切到「批注」，选中文字或点「整章意见」提交。' : '这个分类下还没有 AI 意见。去 AI 化的入口在正文选区里；事实逻辑先跑「全书同步」或让它出意见；注意力用右上角冷读。') : null,
@@ -5436,6 +5451,9 @@ window.__ModuleLoader__.load({
         return `${year}${month}` || '时间未标'
       }
       const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
+      const visibleIds = filtered.map((row) => String(row.id))
+      const allVisibleChecked = visibleIds.length > 0 && visibleIds.every((id) => picked.includes(id))
+      const toggleAllVisible = () => setPicked((prev) => (allVisibleChecked ? prev.filter((id) => !visibleIds.includes(id)) : [...new Set([...prev, ...visibleIds])]))
       const groups = []
       for (const item of ordered) {
         const p = item.parts
@@ -6699,7 +6717,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-outline-list{display:flex;flex-direction:column;gap:6px}.nd-outline-row{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-outline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-outline-title{font-weight:600}.nd-outline-summary{margin:4px 0 0}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-opinion-author-note{margin:4px 0;padding:6px 8px;border-radius:8px;background:rgba(37,99,235,.06);font-size:12px;color:#1d4ed8}.nd-opinion-note-edit{margin:6px 0}.nd-opinion-note-edit .nd-textarea{width:100%}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-outline-list{display:flex;flex-direction:column;gap:6px}.nd-outline-row{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-outline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-outline-title{font-weight:600}.nd-outline-summary{margin:4px 0 0}.nd-checkline{display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer}.nd-selectbar{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-opinion-author-note{margin:4px 0;padding:6px 8px;border-radius:8px;background:rgba(37,99,235,.06);font-size:12px;color:#1d4ed8}.nd-opinion-note-edit{margin:6px 0}.nd-opinion-note-edit .nd-textarea{width:100%}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}
