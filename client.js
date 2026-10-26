@@ -3024,8 +3024,14 @@ window.__ModuleLoader__.load({
         setWorkorder((prev) => (prev ? { ...prev, sending: true } : prev))
         try {
           await sendToChat(projectId, { prompt: workorder.text }, target)
+          const parentId = workorder.parentId
           setWorkorder(null)
-          setNotice({ tone: 'ok', text: '冷读工作单已发到对话' })
+          if (parentId) {
+            await api('opinions.patch', scope(projectId, { id: parentId, patch: { status: 'resolved' } })).catch(() => null)
+            setNotice({ tone: 'ok', text: '已发到对话；原意见转出为「已随处理」，新建议会进待处理。' })
+          } else {
+            setNotice({ tone: 'ok', text: '冷读工作单已发到对话' })
+          }
         } catch (error) {
           setWorkorder((prev) => (prev ? { ...prev, sending: false } : prev))
           setNotice({ tone: 'error', text: friendlyError(error) })
@@ -3044,7 +3050,7 @@ window.__ModuleLoader__.load({
           const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rows, sources: [source], focus: focus || undefined, dryRun: true })
           const label = source === 'logic' ? '逻辑审核' : source === 'ai-style' ? '去 AI 化' : '审核'
           const scopeLabel = Array.isArray(chapterList) && chapterList.length ? `第 ${chapterList.map(Number).join('、')} 章` : `全文（${rows.length} 章）`
-          setWorkorder({ title: `${scopeLabel} ${label}工作单`, text: String(value.prompt || ''), sending: false })
+          setWorkorder({ title: `${scopeLabel} ${label}工作单`, text: String(value.prompt || ''), sending: false, parentId: row.id })
         } catch (error) {
           setNotice({ tone: 'error', text: friendlyError(error) })
         } finally {
