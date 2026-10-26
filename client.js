@@ -4951,51 +4951,27 @@ window.__ModuleLoader__.load({
       const [showLabels, setShowLabels] = useState(() => lsGet('nd.mapLabels', '1') !== '0')
       const [mapBusy, setMapBusy] = useState('')
       const [mapError, setMapError] = useState('')
-      const [mapWork, setMapWork] = useState(null)
-      const [mapTarget, setMapTarget] = useState('')
-      const [planPasteOpen, setPlanPasteOpen] = useState(false)
-      const [planPasteText, setPlanPasteText] = useState('')
-      const [planApplyResult, setPlanApplyResult] = useState(null)
+      const [mapNotice, setMapNotice] = useState('')
       const genBackground = async () => {
         if (mapBusy) return
-        setMapBusy('bg'); setMapError('')
+        setMapBusy('bg'); setMapError(''); setMapNotice('')
         try {
           await api('map.background', scope(projectId, { seed: Math.floor(Math.random() * 9000) + 1 }))
           if (onRefresh) onRefresh()
         } catch (error) { setMapError(friendlyError(error)) }
         finally { setMapBusy('') }
       }
-      const makeMapWorkorder = async () => {
+      const generateMapPlan = async () => {
         if (mapBusy) return
-        setMapBusy('plan'); setMapError('')
+        setMapBusy('plan'); setMapError(''); setMapNotice('')
         try {
           const value = await api('chat.send', { projectId, workorder: 'mapBackgroundWorkorder', world, locations, path: scene.routes, dryRun: true })
-          setMapWork({ text: String(value.prompt || ''), sending: false })
+          const prompt = String(value.prompt || '')
+          if (!prompt) throw new Error('没生成出工作单')
+          await sendToChat(projectId, { prompt })
+          setMapNotice('已直接发到对话：AI 会生成区域 / 路线 / 坐标 / 绘制提示词，并调用 novel_desk_map(op=save) 把坐标直接写进地点；完成后回来刷新地图即可。')
         } catch (error) { setMapError(friendlyError(error)) }
         finally { setMapBusy('') }
-      }
-      const applyPastedPlan = async () => {
-        if (mapBusy) return
-        setMapBusy('apply'); setMapError(''); setPlanApplyResult(null)
-        try {
-          const result = await api('map.applyPlan', scope(projectId, { text: planPasteText }))
-          setPlanApplyResult(result)
-          setPlanPasteOpen(false)
-          setPlanPasteText('')
-          if (onRefresh) onRefresh()
-        } catch (error) { setMapError(friendlyError(error)) }
-        finally { setMapBusy('') }
-      }
-      const sendMapWorkorder = async () => {
-        if (!mapWork) return
-        setMapWork((prev) => (prev ? { ...prev, sending: true } : prev))
-        try {
-          await sendToChat(projectId, { prompt: mapWork.text }, mapTarget)
-          setMapWork(null)
-        } catch (error) {
-          setMapWork((prev) => (prev ? { ...prev, sending: false } : prev))
-          setMapError(friendlyError(error))
-        }
       }
       const withCoords = locations.filter(hasCoords)
       const scene = useMemo(() => buildWorldMapScene({ world, locations, events }), [world, locations, events])
@@ -5034,12 +5010,11 @@ window.__ModuleLoader__.load({
             `${locations.length} 个地点 · ${withCoords.length} 个有坐标 · 区域 ${scene.regions.length} · 路线 ${scene.routes.length}`),
           h(Btn, { small: true, kind: 'brand', onClick: () => setOpen(true) }, '🗺 打开全屏地图'),
           h(Btn, { small: true, onClick: genBackground, disabled: mapBusy === 'bg' }, mapBusy === 'bg' ? '生成中…' : '🎨 生成底图'),
-          h(Btn, { small: true, onClick: makeMapWorkorder, disabled: mapBusy === 'plan' }, mapBusy === 'plan' ? '生成中…' : '🧭 AI 地图方案'),
-          h(Btn, { small: true, onClick: () => { setPlanPasteOpen(true); setPlanApplyResult(null) } }, '📥 贴回方案'),
+          h(Btn, { small: true, kind: 'primary', onClick: generateMapPlan, disabled: mapBusy === 'plan' }, mapBusy === 'plan' ? '发送中…' : '🧭 生成地图方案（直接入库）'),
           h(Btn, { small: true, onClick: () => go('ledger', { tab: 'locations' }) }, '编辑坐标'),
         ),
         mapError ? h('p', { className: 'nd-hint', style: { color: '#b45309' } }, `地图操作失败：${mapError}`) : null,
-        planApplyResult ? h('p', { className: 'nd-hint' }, `已写入方案：坐标 ${planApplyResult.updated.length}/${planApplyResult.total} 个地点${planApplyResult.missing.length ? `；未匹配：${planApplyResult.missing.slice(0, 5).join('、')}` : ''}`) : null,
+        mapNotice ? h('p', { className: 'nd-hint' }, mapNotice) : null,
         h('div', { className: 'ndm-toggles' },
           h(Btn, { small: true, onClick: () => toggle('nd.mapRegions', showRegions, setShowRegions) }, `区域：${showRegions ? '开' : '关'}`),
           h(Btn, { small: true, onClick: () => toggle('nd.mapTerrain', showTerrain, setShowTerrain) }, `山水：${showTerrain ? '开' : '关'}`),
@@ -5081,36 +5056,6 @@ window.__ModuleLoader__.load({
               onPick: setPickedId,
               onClose: () => setOpen(false),
             })
-          : null,
-        planPasteOpen
-          ? h(Modal, {
-              title: '贴回 AI 地图方案',
-              wide: true,
-              onClose: () => setPlanPasteOpen(false),
-              footer: h(Fragment, null,
-                h(Btn, { onClick: () => setPlanPasteOpen(false) }, '取消'),
-                h(Btn, { kind: 'primary', onClick: applyPastedPlan, disabled: mapBusy === 'apply' || !planPasteText.trim() }, mapBusy === 'apply' ? '写入中…' : '解析并写入'),
-              ),
-            },
-              h('p', { className: 'nd-hint' }, '把 AI 输出的完整方案贴进来（必须含【坐标】段：地点名｜x｜y｜类型｜区域）。坐标会写进地点，方案存进 world；解析失败会提示。'),
-              h('textarea', { className: 'nd-input nd-textarea', rows: 14, value: planPasteText, placeholder: '【区域】\n关中平原｜x 100–300｜y 200–400｜平原\n【坐标】\n刺桐城｜120｜350｜城市｜东南沿海', onChange: (e) => setPlanPasteText(e.target.value) }),
-            )
-          : null,
-        mapWork
-          ? h(Modal, {
-              title: 'AI 地图方案工作单',
-              wide: true,
-              onClose: () => setMapWork(null),
-              footer: h(Fragment, null,
-                h(Btn, { onClick: () => copyText(mapWork.text) }, '复制'),
-                h(Btn, { small: true, onClick: () => { setMapWork(null); setMapTarget('') } }, '关闭'),
-                h(Btn, { kind: 'primary', disabled: mapWork.sending, onClick: sendMapWorkorder }, mapWork.sending ? '发送中…' : '发送到对话'),
-              ),
-            },
-              h('p', { className: 'nd-hint' }, 'AI 会输出【区域】【路线】【坐标】【绘制提示词】并自动调用 novel_desk_map(op=save) 落库，坐标直接写进地点；如果 AI 只回了文本，用本条工作单执行完后点「📥 贴回方案」粘贴即可。'),
-              h(TargetPicker, { projectId, value: mapTarget, onChange: setMapTarget }),
-              h('pre', { className: 'nd-pre nd-pre-tall' }, mapWork.text),
-            )
           : null,
       )
     }
