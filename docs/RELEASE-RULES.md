@@ -235,6 +235,10 @@ plugin_manager({ action: "install_bundle", target: "dsh-long-novel-workbench" })
 
 ## 六、🔴 测试门禁（0.7.1 打 tag 前必须先决策）
 
+> **本次 0.7.1 的实际决定（2026-10-26）**：作者当次明确要求发布 0.7.1。已按**选项 C（换预检）**执行——`publish.yml` / `ci.yml` 不再跑 0.6 旧测试，改为「`node --check` 语法 + 版本 / CHANGELOG / 发布说明一致性」预检；CI 与 npm 发布均通过。
+> **待办（0.7.2 前）**：把 `test/` 更新到 0.7 行为后恢复测试门禁（由作者决定）。
+> 以下为决策前的原始风险记录，保留供以后版本参考。
+
 **现状（高风险，红字）**：
 
 - `publish.yml` 第 2 步会跑 `npm test`（`.github/workflows/publish.yml:32-33`）；`ci.yml` 也会在 push main / PR 时跑 `npm test` + `node --check`。

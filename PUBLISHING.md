@@ -1,7 +1,7 @@
 # 发布与收录（DSH 插件）
 
-> 最后更新：2026-10-26（0.7.1 发布文档已备；发布由作者发起、尚未执行）
-> 当前版本：工作区代码为 `0.7.0-dev.0`，**目标发布版本 `0.7.1`** ｜ npm 上当前 `latest` 以 `npm view dsh-long-novel-workbench dist-tags` 实测为准
+> 最后更新：2026-10-26（**0.7.1 已发布**：GitHub tag/Release + npm）
+> 当前版本：`0.7.1` ｜ npm `dist-tags.latest = 0.7.1`
 > **权威发布手册：[`docs/RELEASE-RULES.md`](docs/RELEASE-RULES.md)。** 本文件只是摘要与历史备注；冲突时以 RELEASE-RULES 为准。
 
 ## 结论先说
@@ -20,19 +20,20 @@ DSH 插件**没有“官方登记”这一步**。一个插件要能被别人安
 - **npm 只由 GitHub Actions 发布**（推 `v*` tag 触发），不在本机 `npm publish`；本机 npm 登录凭据已失效（`npm whoami` → `E401`），不要本地硬试。
 - **0.7.1 打 tag 前必须先处理 CI 测试门禁**（见下节风险），否则发布会被 `npm test` 挡住。
 
-## 发布状态（2026-10-26）
+## 发布状态（2026-10-26，0.7.1 已发布）
 
-- **0.7.1 文档已备、发布未执行**：已准备 `docs/RELEASE-RULES.md`、`docs/releases/v0.7.1.md`、`CHANGELOG.md` 顶部条目、`README.md` 与本文；**打包、tag、npm、Release、市场 PR 均未执行**，全部待作者发起。
-- **版本号已改为 `0.7.1`**：`package.json` / `index.js VERSION` 已同步（2026-10-26 开发线实现落地时更新）；发布前仍需按 RELEASE-RULES §2 复核 CHANGELOG / release notes / README / 干净包 / tag 全部一致。
-- **🔴 CI 测试门禁是当前唯一已知硬阻塞**：`.github/workflows/publish.yml` 在推 tag 后会先跑 `npm test`（`publish.yml:32-33`），而 `test/` 仍是 0.6 行为断言（`test/api.test.js` 断言 `TOOLS.length === 7` 且含已移除的 `novel_desk_review` / `novel_desk_attention`，`RPC_OPS.length === 41`）。0.7.1 工具面变化后这些断言必然失败 → **npm 发布会被阻断**。打 tag 前必须由作者决定：更新测试 / 临时移除 CI 测试门禁 / 换其他预检；**Agent 不擅自改 workflow、不跑测试**（详见 RELEASE-RULES §6）。
-- **干净包待重建**：`release/dsh-long-novel-workbench/` 与其中 tgz 仍是 `0.7.0-dev.0` 旧快照；发布前按 RELEASE-RULES §3 用 `rsync` 白名单重建并重新 `npm pack`。
-- **npm**：`v0.7.1` 发布后 `latest` 应指向 `0.7.1`（发布前的旧 latest 以 `npm view dsh-long-novel-workbench dist-tags` 实测为准）；`0.7.1` 目前在 npm 上应不存在（发布前用 `npm view dsh-long-novel-workbench@0.7.1 version` 确认 404）。
-- **GitHub Release**：正文用仓库里的 [`docs/releases/v0.7.1.md`](docs/releases/v0.7.1.md)，并挂 `dsh-long-novel-workbench-0.7.1.tgz`（+ 免版本号稳定别名 `dsh-long-novel-workbench.tgz`）。
-- **社区目录已收录**：PR #8520 已合并，条目文件 `data/plugins/micellince__dsh-long-novel-workbench.yml`。
-  - 目录站的**版本号与下载数由市场每日探针（npm）自动更新**，发布 npm 后不用手动改；
-  - 市场详情页 README 由目录仓库的每日构建从本仓库 `README.md` 自动同步，改完 README 等下一次构建即可；
-  - 条目里的 `description`（en/zh）仍是 0.5.x 时代文案，**需要单独提一个 PR 更新**（是否提、提什么由作者决定；RELEASE-RULES §7 有建议文案）。
-- [ ] 发布后确认：npm `latest` 指向 0.7.1、GitHub Release 可见、市场详情页在下次构建后显示新 README。
+- **0.7.1 已发布**（作者当次明确要求；发布流程：推 tag → GitHub Actions → npm）：
+  - GitHub `main`：`a2335bf`；tag：`v0.7.1`；
+  - GitHub Release：<https://github.com/micellince/dsh-long-novel-workbench/releases/tag/v0.7.1>；
+    附件 `dsh-long-novel-workbench-0.7.1.tgz` 与稳定别名 `dsh-long-novel-workbench.tgz`（与 npm 官方 tarball 同一文件，sha1 `1d1096c45a09e8e0e2284f21820a7c91edc8477a`）；
+  - npm：`dsh-long-novel-workbench@0.7.1`，`dist-tags.latest = 0.7.1`；`0.6.11` 仍在版本列表。
+- **CI 测试门禁已按选项 C 更换（本次发布决定）**：`test/` 仍是 0.6 断言，原 `npm test` 会阻断发布；本次把 `ci.yml` / `publish.yml` 的 `npm test` 换成「`node --check` 语法 + 版本 / CHANGELOG / 发布说明一致性」预检，CI 与 npm 发布均通过。
+  - **待办（0.7.2 前）**：把 `test/` 更新到 0.7 行为后恢复测试门禁（由作者决定；细节见 RELEASE-RULES §6）。
+- **干净包已重建**：`release/dsh-long-novel-workbench/` = 0.7.1（解包自 npm 官方 tarball）；`release/dsh-long-novel-workbench-0.7.1.tgz` 与 npm 包一致。
+- **社区目录**：PR #8520 已收录；版本号 / 下载数由市场探针自动更新（npm 已是 0.7.1），README 由每日构建自动同步。
+  - 条目 `description`（en/zh）仍是 0.5.x 文案，是否需要单独 PR 由作者决定（RELEASE-RULES §7 有建议文案）。
+- [x] 发布后确认：npm `latest` = 0.7.1；GitHub Release 可见、两个 tgz 附件已挂。
+- [ ] 市场详情页在下次每日构建后显示新 README（自动，无需操作）。
 
 ## 发版流程（摘要，细节看 RELEASE-RULES）
 
