@@ -1415,6 +1415,15 @@ window.__ModuleLoader__.load({
         },
         [go],
       )
+      // 定位到「第几段」：阅读页会滚到该段并高亮
+      const openChapterAt = useCallback(
+        (chapter, para) => {
+          const n = Number(chapter)
+          const p = para == null ? null : Number(para)
+          go('read', { chapter: n, ...(Number.isInteger(p) && p >= 0 ? { para: p } : {}) })
+        },
+        [go],
+      )
 
       useEffect(() => {
         if (!open) return undefined
@@ -1481,6 +1490,7 @@ window.__ModuleLoader__.load({
           pageArg,
           go,
           openChapter,
+          openChapterAt,
           onChanged: tocRes.reload,
           refreshContext: contextRes.reload,
           openProject: switchProject,
@@ -1874,12 +1884,27 @@ window.__ModuleLoader__.load({
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [immersive, mode])
 
-      // pageArg 指定章号（来自地图 / 总览 / 审阅跳转）
+      // pageArg 指定章号（来自地图 / 总览 / 意见跳转）
       useEffect(() => {
         const n = Number(pageArg && pageArg.chapter)
         if (n > 0 && docs.length > 0 && mode !== 'edit') scrollToChapter(n)
         // eslint-disable-next-line react-hooks/exhaustive-deps
       }, [pageArg])
+
+      // pageArg.para：定位到该章第几段（本地检查/意见「定位」用）
+      useEffect(() => {
+        const n = Number(pageArg && pageArg.chapter)
+        const p = Number(pageArg && pageArg.para)
+        if (!n || !Number.isInteger(p) || p < 0 || docs.length === 0 || mode === 'edit') return
+        const doc = docs.find((row) => Number(row.chapter) === n)
+        if (!doc) return
+        const parsed = splitChapterText(doc.text, doc.meta && doc.meta.title ? String(doc.meta.title) : '')
+        const spans = paragraphSpans(parsed.body)
+        const span = spans[p]
+        if (!span) return
+        setJumpOffset({ chapter: n, offset: parsed.bodyStart + span.start })
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [pageArg, docs])
 
       // 搜索结果落到具体段落：目录跳到章首后，再把那一段滚到视口中间并高亮 1.4s
       useEffect(() => {
@@ -2885,7 +2910,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 意见页：AI 意见 / 作者意见 分开；AI 意见分 去AI化 / 事实逻辑 / 注意力（冷读）──
-    function OpinionsPage({ projectId, toc, pageArg, openChapter, onChanged }) {
+    function OpinionsPage({ projectId, toc, pageArg, openChapter, openChapterAt, onChanged }) {
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState('')
       const [who, setWho] = useState('ai')
@@ -2904,7 +2929,10 @@ window.__ModuleLoader__.load({
       const [workorder, setWorkorder] = useState(null)
       const [target, setTarget] = useState('')
       const res = useAsync(() => api('opinions.list', scope(projectId)), [projectId])
-      const localRes = useAsync(() => (projectId ? api('checks.local', scope(projectId)) : Promise.resolve(null)), [projectId])
+      // 本地检查只在作者点「扫描」时跑；不挂 useAsync，避免进页面/切页就整个盘扫一遍
+      const [localChecks, setLocalChecks] = useState(null)
+      const [localScanning, setLocalScanning] = useState(false)
+      const [localAt, setLocalAt] = useState('')
       const rows = res.data && Array.isArray(res.data.rows) ? res.data.rows : []
       const counts = (res.data && res.data.counts) || {}
       const titleOf = (chapter) => {
@@ -2936,6 +2964,17 @@ window.__ModuleLoader__.load({
         map.get(key).opinions.push(row)
       }
       const reload = () => { res.reload(); if (onChanged) onChanged() }
+      const scanLocal = async () => {
+        if (!projectId || localScanning) return
+        setLocalScanning(true); setNotice(null)
+        try {
+          const value = await api('checks.local', scope(projectId))
+          setLocalChecks(value || { items: [], counts: {} })
+          setLocalAt(new Date().toLocaleString())
+        } catch (error) {
+          setNotice({ tone: 'error', text: friendlyError(error) })
+        } finally { setLocalScanning(false) }
+      }
       const toggle = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
       const accept = async (id) => {
         setBusy(id); setNotice(null)
@@ -3134,7 +3173,7 @@ window.__ModuleLoader__.load({
         if (busy) return
         setBusy('local'); setNotice(null)
         try {
-          const items = (localRes.data && Array.isArray(localRes.data.items)) ? localRes.data.items : []
+          const items = (localChecks && Array.isArray(localChecks.items)) ? localChecks.items : []
           if (!items.length) return
           const chapters = [...new Set(items.map((row) => Number(row.chapter)))].filter((n) => n > 0)
           const rowsFor = (toc || []).filter((row) => chapters.includes(chapterNo(row))).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' }))
@@ -3190,25 +3229,31 @@ window.__ModuleLoader__.load({
         res.error ? h(ErrorBox, { error: res.error, onRetry: res.reload }) : null,
         res.loading && !rows.length ? h(Loading, null, '读取意见…') : null,
         !res.loading && !groups.length ? h('p', { className: 'nd-hint' }, who === 'author' ? '还没有作者意见：正文页切到「批注」，选中文字或点「整章意见」提交。' : '这个分类下还没有 AI 意见。去 AI 化的入口在正文选区里；事实逻辑先跑「全书同步」或让它出意见；注意力用右上角冷读。') : null,
-        localRes.data && Array.isArray(localRes.data.items) && localRes.data.items.length
-          ? h('section', { className: 'nd-card' },
-              h('div', { className: 'nd-card-head' },
-                h('h3', null, '🧪 本地检查（0 AI 成本）'),
-                h('span', { className: 'nd-hint' }, `事实逻辑 ${localRes.data.counts.logic || 0} ｜ 去 AI 化 ${localRes.data.counts.deai || 0}`),
-                h(Btn, { small: true, onClick: () => localRes.reload() }, '重新扫'),
-                h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点'),
-              ),
-              h('p', { className: 'nd-hint' }, '这些是程序确定性筛出的候选点，不是结论；只把可疑点交给 AI，省 token。'),
-              h('div', { className: 'nd-local-list' },
-                localRes.data.items.slice(0, 8).map((row, index) => h('div', { className: 'nd-local-item', key: index },
+        h('section', { className: 'nd-card' },
+          h('div', { className: 'nd-card-head' },
+            h('h3', null, '🧪 本地检查（0 AI 成本）'),
+            localChecks ? h('span', { className: 'nd-hint' }, `事实逻辑 ${localChecks.counts?.logic || 0} ｜ 去 AI 化 ${localChecks.counts?.deai || 0}${localAt ? ` ｜ 上次扫描 ${localAt}` : ''}`) : h('span', { className: 'nd-hint' }, '只在点「扫描」时跑，不会后台反复扫盘'),
+            h(Btn, { small: true, kind: localChecks ? undefined : 'primary', onClick: scanLocal, disabled: localScanning }, localScanning ? '扫描中…' : localChecks ? '重新扫描' : '扫描全文'),
+            localChecks && localChecks.items && localChecks.items.length ? h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点') : null,
+          ),
+          localChecks
+            ? h('p', { className: 'nd-hint' }, localChecks.items && localChecks.items.length
+              ? '每条都给到「第几章·第几段」+ 原文；点「定位」直接跳到正文那一段，作者可以自己改。'
+              : '扫完了，没发现明显问题。')
+            : h('p', { className: 'nd-hint' }, '扫描全书，找 Markdown 残留、重复段、超长段、AI 套话密度、长句过多、账本数字缺口。点一次扫一次。'),
+          localChecks && localChecks.items && localChecks.items.length
+            ? h('div', { className: 'nd-local-list' },
+                localChecks.items.slice(0, 20).map((row, index) => h('div', { className: 'nd-local-item', key: index },
                   h(Tag, { tone: row.kind === 'deai' ? 'warn' : 'muted' }, row.kind === 'deai' ? '去 AI 化' : '事实逻辑'),
                   h('span', { className: 'nd-hint' }, `第 ${row.chapter} 章 · 第 ${Number(row.para) + 1} 段`),
                   h('span', null, row.message),
+                  row.quote ? h('span', { className: 'nd-hint' }, `「${String(row.quote).slice(0, 40)}」`) : null,
+                  openChapterAt ? h(Btn, { small: true, onClick: () => openChapterAt(row.chapter, row.para) }, '定位') : null,
                 )),
-                localRes.data.items.length > 8 ? h('p', { className: 'nd-hint' }, `还有 ${localRes.data.items.length - 8} 条，点「让 AI 判这些点」会全部带上。`) : null,
-              ),
-            )
-          : null,
+                localChecks.items.length > 20 ? h('p', { className: 'nd-hint' }, `还有 ${localChecks.items.length - 20} 条；点「让 AI 判这些点」会全部带上。`) : null,
+              )
+            : null,
+        ),
         groups.map((group) => {
           const pickedHere = group.opinions.filter((row) => picked.includes(row.id))
           const head = Number(group.chapter) === 0 ? '全书级' : `第 ${group.chapter} 章${group.para == null ? ' · 章级' : ` · 第 ${Number(group.para) + 1} 段`}`
@@ -3216,7 +3261,7 @@ window.__ModuleLoader__.load({
             h('div', { className: 'nd-card-head' },
               h('h3', null, head),
               h('span', { className: 'nd-hint' }, titleOf(group.chapter)),
-              group.para != null && openChapter ? h(Btn, { small: true, onClick: () => openChapter(group.chapter) }, '看正文') : null,
+              group.para != null && openChapterAt ? h(Btn, { small: true, onClick: () => openChapterAt(group.chapter, group.para) }, '定位正文') : (group.para == null && openChapter ? h(Btn, { small: true, onClick: () => openChapter(group.chapter) }, '看正文') : null),
               group.opinions.length >= 2 ? h('span', { className: 'nd-hint' }, `本段 ${group.opinions.length} 条，建议合并成一条完整意见`) : null,
               pickedHere.length >= 2 ? h(Btn, { small: true, kind: 'primary', disabled: busy === 'merge', onClick: () => mergePicked(group) }, `合并所选 ${pickedHere.length}`) : null,
             ),
