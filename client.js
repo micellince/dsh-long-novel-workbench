@@ -2989,6 +2989,24 @@ window.__ModuleLoader__.load({
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
+      const splitColdReadLocal = async (row) => {
+        if (!projectId || busy) return
+        const lines = String(row.text || '').split('\n').map((line) => line.trim()).filter(Boolean)
+        const items = []
+        for (const line of lines) {
+          const hit = line.match(/^第\s*(\d+)\s*章[:：]\s*(.+)$/)
+          if (!hit) continue
+          items.push({ chapter: Number(hit[1]), text: hit[2].slice(0, 200) })
+        }
+        if (!items.length) { setNotice({ tone: 'warn', text: '这条冷读没有带章号的条目，先点「按章拆分」让 AI 拆。' }); return }
+        setBusy(`splitlocal-${row.id}`); setNotice(null)
+        try {
+          const value = await api('coldRead.splitLocal', scope(projectId, { id: row.id, items }))
+          setNotice({ tone: 'ok', text: `已拆出 ${value.added} 条按章子意见，进待处理。` })
+          res.reload()
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
       const splitColdRead = async (row) => {
         if (!projectId || busy) return
         setBusy(`split-${row.id}`); setNotice(null)
@@ -3223,7 +3241,10 @@ window.__ModuleLoader__.load({
                 row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, row.after ? '我的建议重新生成' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
                 (String(row.role || '') === '冷读审稿人' || String(row.role || '') === 'attention') && Number(row.chapter) === 0
-                  ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => splitColdRead(row) }, '按章拆分')
+                  ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => splitColdReadLocal(row) }, '按章拆分')
+                  : null,
+                (String(row.role || '') === '冷读审稿人' || String(row.role || '') === 'attention') && Number(row.chapter) === 0
+                  ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => splitColdRead(row) }, '让 AI 拆')
                   : null,
                 row.status === 'rejected' ? h(Btn, { small: true, onClick: async () => {
                   setBusy(`reopen-${row.id}`); setNotice(null)

@@ -81,6 +81,7 @@ export const READ_OPS = [
   'checks.local',
   'coldRead.prepare',
   'coldRead.split',
+  'coldRead.splitLocal',
   'opinions.list',
   'ledger.digest',
   'ledger.entities',
@@ -1403,11 +1404,20 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         '读完后直接回答三件事（不要客套、不要分段复述剧情）：',
         '1. 评分：0–100 的读者吸引力分；',
         '2. 接纳与否：建议接纳 / 退修 / 拒稿，并给一句理由；',
-        '3. 不足：哪里不足，写到章和段（能指出具体句子更好），每条约 1–2 句，最多 10 条；可分「硬伤」和「观感」。',
+        '3. 不足：哪里不足，**每行以「第N章：」开头**，写到章和段（能指出具体句子更好），每条约 1–2 句，最多 10 条；可分「硬伤」和「观感」。',
+        '4. 高光：真有写得极好的地方，单独一两行「高光：第N章……」，这类会自动进高光账本，不需要作者处理。',
         '',
         '回答完以后，只调用一次极简工具上报结果：novel_desk_attention(op="measured", dispatchId, score, verdict, notes=[{chapter, comment, after?}])（notes 可选；after 只在你能直接给出整段替换时填）。',
       ].join('\n')
       return { filePath, fileName, scope, chapters: picked.map((row) => Number(row.chapter)), words: parts.reduce((sum, text) => sum + text.length, 0), prompt }
+    }
+    case 'coldRead.splitLocal': {
+      const projectId = String(need(payload, 'projectId'))
+      const parentId = String(need(payload, 'id'))
+      const items = Array.isArray(payload.items) ? payload.items : []
+      const dir = await s.projectDir(root, projectId)
+      const result = await bookdb.addColdReadChildren({ dir, parentId, items })
+      return result
     }
     case 'coldRead.split': {
       const projectId = String(need(payload, 'projectId'))
@@ -2502,7 +2512,8 @@ const attentionTool = {
           properties: {
             chapter: { type: 'number' },
             comment: { type: 'string' },
-            after: { type: 'string' },
+            after: { type: 'string', description: 'weakness：整段替换成文（可选）' },
+            quote: { type: 'string', description: 'highlight：这类设为高光，会直接进高光账本' },
             kind: { type: 'string', enum: ['highlight', 'weakness'] },
           },
           required: ['chapter', 'comment'],
@@ -2551,15 +2562,17 @@ const attentionTool = {
         const notes = Array.isArray(args.notes) ? args.notes.filter((row) => row && String(row.comment ?? '').trim()).slice(0, 30) : []
         const textLines = notes.length ? notes.map((row) => `第${Number(row.chapter) || 0}章：${String(row.comment).slice(0, 200)}`) : []
         const dir = await s.projectDir(root, projectId)
+        const highlights = notes.filter((row) => String(row.kind ?? '') === 'highlight')
         const summary = await bookdb.addColdReadSummary({
           dir,
           score,
           verdict: String(args.verdict ?? ''),
           text: [String(args.detail ?? '').trim(), ...textLines].filter(Boolean).join('\n'),
           chapters: [...new Set(notes.map((row) => Number(row.chapter)).filter((n) => n > 0))],
+          highlights,
         })
         requireTicket(args.dispatchId, { projectId, consume: true })
-        return `已记录冷读：${score}/100${args.verdict ? `｜${String(args.verdict)}` : ''}。统一意见 id=${summary.id}（1 条，作者可在意见页「按章拆分」）`
+        return `已记录冷读：${score}/100${args.verdict ? `｜${String(args.verdict)}` : ''}。统一意见 id=${summary.id}（1 条，可在意见页「按章拆分」）；高光 ${summary.highlights} 条已自动入高光账本。`
       }
     }
     if (op === 'design' || op === 'measured') {
