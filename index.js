@@ -856,7 +856,26 @@ async function chatSend(ctx, s, root, payload) {
     const items = listOf(listed)
     const deliverable = items.filter(isDeliveryTarget)
     const sameCwd = workspacePath ? deliverable.filter((row) => String(row?.cwd ?? '') === workspacePath) : []
-    if (workspacePath && sameCwd.length === 0) {
+    if (payload?.preferContext && workspacePath) {
+      // 优先发给「有全文的对话」以吃前缀缓存；没有就新开，不回落到最近的当前对话
+      const pool = sameCwd.length ? sameCwd : []
+      const ids = pool.map((row) => String(row?.sessionId ?? '')).filter(Boolean)
+      const usage = ids.length ? await loadChatUsage(workspacePath, { limit: 50, sessionIds: ids }).catch(() => null) : null
+      const weights = new Map((usage?.sessions || []).map((row) => [String(row.id), row]))
+      const eligible = pool
+        .map((row) => ({ row, stat: weights.get(String(row.sessionId)) }))
+        .filter((item) => item.stat && Number(item.stat.totalTokens) >= 200000)
+        .sort((a, b) => (Number(b.stat.totalTokens) || 0) - (Number(a.stat.totalTokens) || 0) || String(b.row?.updatedAt ?? '').localeCompare(String(a.row?.updatedAt ?? '')))
+      if (eligible.length > 0) {
+        sessionId = String(eligible[0].row.sessionId)
+        candidates = eligible.slice(1).map((item) => String(item.row.sessionId))
+      } else {
+        // 明确要求：没有全文对话就新开，不要用当前/最近会话
+        sessionId = ''
+        candidates = []
+        if (typeof controller.create === 'function') sessionId = await createSession()
+      }
+    } else if (workspacePath && sameCwd.length === 0) {
       candidates = []
       sessionId = ''
     } else {
