@@ -3024,10 +3024,11 @@ window.__ModuleLoader__.load({
         { id: 'cold-reader', name: '冷读审稿人', hint: '读者会不会继续读 / 哪里弃读' },
         { id: 'stylist', name: '文笔文风优化师', hint: '语感 / 节奏 / 用词' },
       ]
+      const scopeOf = (row) => (Number(row.chapter) === 0 ? 'book' : row.para == null ? 'chapter' : 'paragraph')
       const openSuggest = (row) => {
         setSuggestFor(row.id)
         setSuggestRole('')
-        setSuggestScope('ai')
+        setSuggestScope(scopeOf(row))
         setSuggestDecision('')
         setSuggestText(String(row.authorNote || ''))
       }
@@ -3047,7 +3048,10 @@ window.__ModuleLoader__.load({
         const useAll = suggestScope === 'ai' || suggestScope === 'book'
         const rowsForChapter = useAll ? allRows.filter((item) => item.chapter > 0) : allRows.filter((item) => chapterNumbers.has(item.chapter))
         if (!rowsForChapter.length) { setNotice({ tone: 'warn', text: '这一章找不到正文' }); return }
-        const scopeRule = suggestScope === 'ai'
+        if (suggestScope === 'paragraph') { chapterNumbers.clear(); chapterNumbers.add(Number(row.chapter)) }
+        const scopeRule = suggestScope === 'paragraph'
+          ? `范围：仅第${row.chapter}章第${Number(row.para) + 1}段；只改这一段，不要重审本章其它段。`
+          : suggestScope === 'ai'
           ? '范围由你判断：先判断这条问题是本段 / 本章 / 跨章 / 全书级；允许用 novel_desk_read 读其他章节确认，但不要顺手审全书；跨章/全局问题提交 chapter=0 全书级意见并列出涉及章号。'
           : suggestScope === 'related'
             ? `范围：相关章节（${[...chapterNumbers].sort((a, b) => a - b).join('、')}），可读范围内章节确认；若判断是全书级问题，提交 chapter=0 并列出涉及章号。`
@@ -3120,12 +3124,12 @@ window.__ModuleLoader__.load({
           chip('ai', `AI 意见 ${rows.filter((row) => row.origin !== 'user').length}`, who, setWho),
           chip('author', `作者意见 ${rows.filter((row) => row.origin === 'user').length}`, who, setWho),
           h('span', { className: 'nd-hint' }, ' ｜ '),
-          chip('open', '待处理', status, setStatus),
-          chip('stale', '失效', status, setStatus),
-          chip('resolved', '已随处理', status, setStatus),
-          chip('accepted', '已采纳', status, setStatus),
-          chip('rejected', '已驳回', status, setStatus),
-          chip('all', '全部状态', status, setStatus),
+          chip('open', `待处理 ${counts.open || 0}`, status, setStatus),
+          chip('stale', `失效 ${counts.stale || 0}`, status, setStatus),
+          chip('resolved', `已随处理 ${counts.resolved || 0}`, status, setStatus),
+          chip('accepted', `已采纳 ${counts.accepted || 0}`, status, setStatus),
+          chip('rejected', `已驳回 ${counts.rejected || 0}`, status, setStatus),
+          chip('all', `全部 ${rows.length}`, status, setStatus),
         ),
         who === 'ai' ? h('div', { className: 'nd-toolbar' }, cats.map((item) => chip(item.id, item.label, cat, setCat))) : null,
         res.error ? h(ErrorBox, { error: res.error, onRetry: res.reload }) : null,
@@ -3166,6 +3170,7 @@ window.__ModuleLoader__.load({
                 h('input', { type: 'checkbox', checked: picked.includes(row.id), onChange: () => toggle(row.id), title: '选择以合并' }),
                 h(Tag, { tone: row.status === 'stale' ? 'error' : row.status === 'accepted' ? 'ok' : row.status === 'rejected' || row.status === 'resolved' ? 'muted' : 'warn' }, row.status === 'resolved' ? '已随处理' : row.status || 'open'),
                 row.origin === 'user' ? h(Tag, { tone: 'brand' }, '作者意见') : h(Tag, { tone: 'muted' }, `AI · ${categoryOf(row) === 'ai-style' ? '去 AI 化' : categoryOf(row) === 'logic' ? '事实逻辑' : '注意力'}`),
+                h(Tag, { tone: 'muted' }, Number(row.chapter) === 0 ? '全文' : row.para == null ? `第${row.chapter}章` : `第${row.chapter}章·第${Number(row.para) + 1}段`),
                 row.kind === 'highlight' ? h(Tag, { tone: 'ok' }, '高光') : null,
                 h('span', { className: 'nd-opinion-when' }, row.createdAt ? String(row.createdAt).slice(0, 10) : ''),
               ),
@@ -3186,8 +3191,7 @@ window.__ModuleLoader__.load({
                 : null,
               h('div', { className: 'nd-opinion-actions' },
                 row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, Number(row.chapter) === 0 ? '采纳并替换（自动定位）' : '采纳并替换') : null,
-                row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, '生成建议') : null,
-                row.status === 'open' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => { setNoteFor(row.id); setNoteText(row.authorNote || '') } }, row.authorNote ? '改我的建议' : '我的建议') : null,
+                row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, row.after ? '我的建议重新生成' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
                 row.status === 'rejected' ? h(Btn, { small: true, onClick: async () => {
                   setBusy(`reopen-${row.id}`); setNotice(null)
@@ -3200,11 +3204,11 @@ window.__ModuleLoader__.load({
           )
         }),
         suggestFor ? h(Modal, {
-          title: '生成建议（指定子 agent）',
+          title: '我的建议 / 生成改动',
           onClose: () => setSuggestFor(''),
           footer: h(Fragment, null,
             h(Btn, { onClick: () => setSuggestFor('') }, '取消'),
-            h(Btn, { kind: 'primary', onClick: submitSuggest, disabled: Boolean(busy) }, busy ? '生成中…' : '生成工作单'),
+            h(Btn, { kind: 'primary', onClick: submitSuggest, disabled: Boolean(busy) }, busy ? '生成中…' : '生成改动'),
           ),
         },
           h('p', { className: 'nd-hint' }, '这次让哪个子 agent 出建议？不默认，由你选；逻辑 bug 选「事实逻辑设计师」，AI 味选「审核 AI 化的 AI」，弃读/节奏选「冷读审稿人」，语感选「文笔文风优化师」。'),
@@ -3221,6 +3225,7 @@ window.__ModuleLoader__.load({
               onChange: setSuggestScope,
               options: [
                 { value: 'ai', label: 'AI 判断（推荐）：局部还是全局由 AI 先判断' },
+                { value: 'paragraph', label: '仅本段（AI 判断出的段落）' },
                 { value: 'chapter', label: '仅本条所在章' },
                 { value: 'related', label: '相关章节（按人物/地点出现范围）' },
                 { value: 'book', label: '全书' },
