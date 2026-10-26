@@ -1555,6 +1555,7 @@ window.__ModuleLoader__.load({
     }
 
     function Nav({ page, go }) {
+      const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
       const groups = []
       for (const item of PAGES) {
         let group = groups.find((g) => g.name === item.group)
@@ -3073,6 +3074,7 @@ window.__ModuleLoader__.load({
         if (status !== 'all' && String(row.status) !== status) return false
         return true
       })
+      const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
       const groups = []
       const map = new Map()
       for (const row of filtered) {
@@ -5413,6 +5415,7 @@ window.__ModuleLoader__.load({
         const month = p.sortMonth > 0 ? `${p.sortMonth}月` : ''
         return `${year}${month}` || '时间未标'
       }
+      const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
       const groups = []
       for (const item of ordered) {
         const p = item.parts
