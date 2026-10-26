@@ -1468,7 +1468,7 @@ window.__ModuleLoader__.load({
           h('h2', null, '还没有作品'),
           h('p', { className: 'nd-hint' }, '开一本新书：选预设、写一段想法，AI 会把世界、人物与全书大纲生成提案交给你批准。也可以让 AI 在对话里新建，或使用导入动作把旧稿接进来。'),
           h(Btn, { kind: 'primary', onClick: () => setNewBookOpen(true) }, '＋ 开新书'),
-          h('p', { className: 'nd-code-hint' }, '~/StoryDesk/projects/<id>/'),
+          h('p', { className: 'nd-code-hint' }, '~/.dsh/data/dsh-long-novel-workbench/'),
         )
       } else if (!projectId) {
         body = h(Loading, null, '正在选择作品…')
@@ -6288,15 +6288,14 @@ window.__ModuleLoader__.load({
       const rolesRes = useAsync(() => api('roles.list'), [])
       const unknownRes = useAsync(() => (projectId ? api('ledger.unknown', scope(projectId)) : Promise.resolve({ items: [] })), [projectId])
 
-      const rootValue =
-        (settingsRes.data && (settingsRes.data.dataRoot || settingsRes.data.root || settingsRes.data.dataDir)) ||
-        (project && (project.root || project.dataDir)) ||
-        '~/StoryDesk'
+      const pluginRoot = (settingsRes.data && settingsRes.data.dataRoot) || '~/.dsh/data/dsh-long-novel-workbench'
+      const rootValue = (settingsRes.data && settingsRes.data.projectDir) || (project && (project.dataDir || project.root)) || ''
       const realProject = (settingsRes.data && settingsRes.data.project) || project || null
       const projectRows = realProject
         ? [
             { key: '作品 id', text: String(realProject.id || projectId) },
-            { key: '数据目录', text: String(rootValue) },
+            { key: '作品数据目录（书工作区）', text: String(rootValue) },
+            { key: '插件私有数据根', text: String(pluginRoot) },
             { key: '章节数', text: `${toc.length} 章` },
             { key: '创建时间', text: realProject.createdAt ? String(realProject.createdAt) : '—' },
           ]
@@ -6440,7 +6439,7 @@ window.__ModuleLoader__.load({
                 h('section', { className: 'nd-card' },
                   h('div', { className: 'nd-card-head' }, h('h3', null, '📁 数据位置（只读）')),
                   h(KeyValue, { rows: projectRows, emptyText: '还没有读取到作品信息' }),
-                  h('p', { className: 'nd-hint' }, '数据是 ~/StoryDesk 下的普通 Markdown / JSON 文件，可直接用其他编辑器查看。'),
+                  h('p', { className: 'nd-hint' }, '作品数据在自己的书工作区（普通 Markdown / JSON 文件）；插件私有索引在 ~/.dsh/data/dsh-long-novel-workbench，与小说工作区隔离。'),
                 ),
               ),
             )
