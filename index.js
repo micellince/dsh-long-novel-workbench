@@ -862,10 +862,11 @@ async function chatSend(ctx, s, root, payload) {
       const ids = pool.map((row) => String(row?.sessionId ?? '')).filter(Boolean)
       const usage = ids.length ? await loadChatUsage(workspacePath, { limit: 50, sessionIds: ids }).catch(() => null) : null
       const weights = new Map((usage?.sessions || []).map((row) => [String(row.id), row]))
+      // 有「全局工单」历史的对话（全文动作/全文提案/全局修改/全书同步/开新书底座），按最近使用优先
       const eligible = pool
         .map((row) => ({ row, stat: weights.get(String(row.sessionId)) }))
-        .filter((item) => item.stat && Number(item.stat.totalTokens) >= 200000)
-        .sort((a, b) => (Number(b.stat.totalTokens) || 0) - (Number(a.stat.totalTokens) || 0) || String(b.row?.updatedAt ?? '').localeCompare(String(a.row?.updatedAt ?? '')))
+        .filter((item) => item.stat && item.stat.hasGlobalWorkorder)
+        .sort((a, b) => String(b.row?.updatedAt ?? '').localeCompare(String(a.row?.updatedAt ?? '')))
       if (eligible.length > 0) {
         sessionId = String(eligible[0].row.sessionId)
         candidates = eligible.slice(1).map((item) => String(item.row.sessionId))
