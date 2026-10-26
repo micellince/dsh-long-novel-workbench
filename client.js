@@ -2898,6 +2898,7 @@ window.__ModuleLoader__.load({
       const [suggestRole, setSuggestRole] = useState('')
       const [suggestText, setSuggestText] = useState('')
       const [suggestScope, setSuggestScope] = useState('ai')
+      const [suggestDecision, setSuggestDecision] = useState('')
       const [coldOpen, setColdOpen] = useState(Boolean(pageArg && pageArg.recheck))
       const [coldFocus, setColdFocus] = useState('')
       const [workorder, setWorkorder] = useState(null)
@@ -2938,7 +2939,17 @@ window.__ModuleLoader__.load({
       const toggle = (id) => setPicked((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
       const accept = async (id) => {
         setBusy(id); setNotice(null)
-        try { await api('opinions.accept', scope(projectId, { id })); setNotice({ tone: 'ok', text: '已采纳' }); reload() }
+        try {
+          const row = rows.find((item) => item.id === id)
+          if (row && Number(row.chapter) === 0) {
+            await api('opinions.patch', scope(projectId, { id, patch: { status: 'accepted' } }))
+            setNotice({ tone: 'ok', text: '全书级意见已标记为采纳（不会直接改正文，按章改法需逐章处理）' })
+          } else {
+            await api('opinions.accept', scope(projectId, { id }))
+            setNotice({ tone: 'ok', text: '已采纳' })
+          }
+          reload()
+        }
         catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }); reload() }
         finally { setBusy('') }
       }
@@ -3022,6 +3033,7 @@ window.__ModuleLoader__.load({
         setSuggestFor(row.id)
         setSuggestRole('')
         setSuggestScope('ai')
+        setSuggestDecision('')
         setSuggestText(String(row.authorNote || ''))
       }
       const submitSuggest = async () => {
@@ -3049,6 +3061,7 @@ window.__ModuleLoader__.load({
               : '范围：仅本条所在章。如果你判断其实是跨章/全书问题，请明确说出并列出涉及章号，不要硬塞进本章。'
         const focus = [
           `只针对这一条已有意见给出建议/改法，不要重审全章、不要找新问题；交给「${roleName}」判断。`,
+          String(suggestDecision || '').trim() ? `## 作者裁定（最高优先级，直接执行，不要讨论/不要比较/不要反问）\n${String(suggestDecision).trim()}` : '',
           `- 第${row.chapter}章 第${Number(row.para) + 1}段`,
           `- 问题：${row.text}`,
           row.after ? `- AI 原改法：${row.after}` : '',
@@ -3143,7 +3156,7 @@ window.__ModuleLoader__.load({
           : null,
         groups.map((group) => {
           const pickedHere = group.opinions.filter((row) => picked.includes(row.id))
-          const head = `第 ${group.chapter} 章${group.para == null ? ' · 章级' : ` · 第 ${Number(group.para) + 1} 段`}`
+          const head = Number(group.chapter) === 0 ? '全书级' : `第 ${group.chapter} 章${group.para == null ? ' · 章级' : ` · 第 ${Number(group.para) + 1} 段`}`
           return h('section', { className: 'nd-card', key: group.key },
             h('div', { className: 'nd-card-head' },
               h('h3', null, head),
@@ -3175,10 +3188,16 @@ window.__ModuleLoader__.load({
                   )
                 : null,
               h('div', { className: 'nd-opinion-actions' },
-                row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, '采纳并替换') : null,
+                row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, Number(row.chapter) === 0 ? '标记已采纳' : '采纳并替换') : null,
                 row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, '生成建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => { setNoteFor(row.id); setNoteText(row.authorNote || '') } }, row.authorNote ? '改我的建议' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
+                row.status === 'rejected' ? h(Btn, { small: true, onClick: async () => {
+                  setBusy(`reopen-${row.id}`); setNotice(null)
+                  try { await api('opinions.patch', scope(projectId, { id: row.id, patch: { status: 'open' } })); setNotice({ tone: 'ok', text: '已撤销驳回，重新放回待处理' }); res.reload() }
+                  catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+                  finally { setBusy('') }
+                }, disabled: busy === `reopen-${row.id}` }, '撤销驳回') : null,
               ),
             )),
           )
@@ -3210,6 +3229,9 @@ window.__ModuleLoader__.load({
                 { value: 'book', label: '全书' },
               ],
             }),
+          ),
+          h(Field, { label: '作者裁定（可选，最高优先级：已定的结论，AI 直接照改）', hint: '例：年龄以 72 为准，把 73 全改成 72；不要论证，不要做生辰推演。' },
+            h(TextArea, { rows: 2, value: suggestDecision, onChange: setSuggestDecision, placeholder: '例：年龄以 72 为准；只改数字，不分析“九十年”设定。' }),
           ),
           h(Field, { label: '我的建议（可留空）' },
             h(TextArea, { rows: 4, value: suggestText, onChange: setSuggestText, placeholder: '例：这里死了人下一章却像没事发生，逻辑不成立；让事实逻辑设计师判断。' }),
