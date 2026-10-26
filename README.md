@@ -44,7 +44,7 @@
 dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 ```
 
-> **从源码或本地 link 安装（开发者）**：`git clone` 后让 profile 指向本仓库（用 `plugin_manager` 的 `install_bundle`，target 填仓库绝对路径）。完整步骤、升级 / 切换、热重载、`preflight` 体检、旧稿迁移与发版说明见 [docs/DEV-INSTALL.md](docs/DEV-INSTALL.md)。
+> **从源码或本地 link 安装（开发者）**：`git clone` 后让 profile 指向本仓库（用 `plugin_manager` 的 `install_bundle`，target 填仓库绝对路径）。
 
 ## 第一次打开
 
@@ -160,7 +160,7 @@ AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入�
 ### 开新书、写作预设与导入旧稿
 
 - **开新书向导**：书名（同时是工作区名）→ 选预设（4 套内置口径或「自定义（让 AI 定）」）→ 写一段想法 → 创建作品、独立工作区与对话，并把底座工作单发过去。选「自定义」时 AI 先出一份方案（类型 / 篇幅 / 结构 / 风格 + **注意力总设计**），批准后自动成为本书预设。
-- **写作预设**：设置页 **📚 写作预设** 内置 5 套（标准长篇 / 冷峻悬疑 / 家国武侠 / 文学现实 / 自定义模板），可新建、编辑、删除、应用、复制绝对模板（字段说明见 [`docs/PRESET-TEMPLATE.md`](docs/PRESET-TEMPLATE.md)）。**换预设不改正文**，只影响之后生成的 AI 工作单。
+- **写作预设**：设置页 **📚 写作预设** 内置 5 套（标准长篇 / 冷峻悬疑 / 家国武侠 / 文学现实 / 自定义模板），可新建、编辑、删除、应用、复制绝对模板。**换预设不改正文**，只影响之后生成的 AI 工作单。
 - **导入旧稿**：支持任意目录（递归找 `.md` / `.txt`，有 `chapters/` 优先）或单个 `.md` / `.txt`；单文件会先按「第 X 章」标题拆章，≥2 章才拆。章号优先取文件名数字前缀，冲突或缺失时按自然序排。扫描预览后才导入，导入会新建作品，原目录不动。
 
 ### 导出正文
@@ -249,25 +249,17 @@ npm run check       # node --check：index.js / client.js / lib/*.js 语法检�
 2. 作者打 `v0.7.1` tag 并推送——`.github/workflows/publish.yml` 会先校验 tag 与 `package.json` 版本一致，再用仓库密钥 `NPM_TOKEN` 执行 `npm publish --access public`；
 3. 发布后在 npm 上校验 `version` / `dist-tags`，GitHub Release 用 [docs/releases/v0.7.1.md](docs/releases/v0.7.1.md) 做正文并挂上打包好的 `.tgz`。
 
-干净打包、版本一致性清单、发布前检查、发布后验证与回滚规则见 **[docs/RELEASE-RULES.md](docs/RELEASE-RULES.md)**；每个版本的发布说明在 [docs/releases/](docs/releases/)（本版：[v0.7.1](docs/releases/v0.7.1.md)）。发布与打 tag 一律由作者本人发起，Agent 不推送、不打 tag、不发布。
+每个版本的发布说明在 [docs/releases/](docs/releases/)（本版：[v0.7.1](docs/releases/v0.7.1.md)）。发布与打 tag 一律由作者本人发起，Agent 不推送、不打 tag、不发布。
 
 - 改 Host 代码（`index.js`、`lib/*.js`）后需要重载插件；改 `client.js` 后刷新页面即可。
-- 本地 link 安装、升级 / 切换、`preflight` 体检、旧稿迁移见 [docs/DEV-INSTALL.md](docs/DEV-INSTALL.md)。
 
 ## 文档索引
 
 | 文档 | 内容 |
 | --- | --- |
-| [`docs/0.7-PROBLEM-WORKFLOW.md`](docs/0.7-PROBLEM-WORKFLOW.md) | 0.7.1 产品逻辑：问题单、修改稿、两个找问题入口、范围、处理粒度、采纳 / 继续改 / 忽略 |
-| [`docs/releases/v0.7.1.md`](docs/releases/v0.7.1.md) | 0.7.1 发布说明（GitHub Release 正文） |
-| [`docs/RELEASE-RULES.md`](docs/RELEASE-RULES.md) | 发布手册：三区隔离、版本一致性、干净打包、GitHub / npm / 市场、回滚 |
-| [`docs/REBUILD-CONTRACT.md`](docs/REBUILD-CONTRACT.md) | 重建契约：数据模型（Chapter / Review / Attention / Proposal / Run）、模块边界、RPC 与工具、客户端结构 |
-| [`docs/ACCEPTANCE-0.6.md`](docs/ACCEPTANCE-0.6.md) | 0.6.1 → 0.6.11 每一版的增减与验收证据（0.7 之前的历史） |
-| [`docs/MAP-MODEL.md`](docs/MAP-MODEL.md) | 地图模型：坐标、分区、路线、水线山形、地名落点规则 |
-| [`docs/PRESET-TEMPLATE.md`](docs/PRESET-TEMPLATE.md) | 写作预设的绝对模板与字段口径 |
-| [`docs/DEV-INSTALL.md`](docs/DEV-INSTALL.md) | 开发安装、升级切换、热重载、preflight、旧稿迁移 |
+| [`docs/releases/`](docs/releases/) | 每个版本的发布说明（GitHub Release 正文） |
+| [`docs/screenshots/`](docs/screenshots/) | 界面截图（README 与市场共用） |
 | [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 参与贡献：环境、加载插件、测试与代码约定 |
 
 ## 问题与反馈
 
