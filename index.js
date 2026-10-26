@@ -1623,7 +1623,8 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         const nextBody = best.paragraphs.map((row, index) => (index === best.para ? afterText : row.text)).join('\n\n')
         const nextText = best.parsed.title ? `${best.parsed.title}\n\n${nextBody}\n` : `${nextBody}\n`
         await s.saveChapter(root, projectId, best.chapter, nextText, {}, { source: 'opinion-accept-global' })
-        return { ok: true, applied: { chapter: best.chapter, para: best.para, score: Math.round(best.score * 100) }, opinion: await bookdb.patchOpinion(dir, id, { status: 'accepted' }) }
+        const resolved = await bookdb.resolveRelatedOpinions(dir, { sourceId: id, text: opinion.text, chapters: candidates })
+        return { ok: true, applied: { chapter: best.chapter, para: best.para, score: Math.round(best.score * 100) }, resolved: resolved.resolved, opinion: await bookdb.patchOpinion(dir, id, { status: 'accepted' }) }
       }
       if (opinion.kind === 'highlight') {
         await bookdb.addHighlight(dir, {
@@ -1653,7 +1654,8 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const nextBody = paragraphs.map((row, i) => (i === at ? String(opinion.after).trim() : row.text)).join('\n\n')
       const nextText = title ? `${title}\n\n${nextBody}\n` : `${nextBody}\n`
       await s.saveChapter(root, projectId, opinion.chapter, nextText, {}, { baseHash: doc.meta && doc.meta.contentHash, source: 'opinion-accept' })
-      return bookdb.patchOpinion(dir, id, { status: 'accepted' })
+      const resolved = await bookdb.resolveRelatedOpinions(dir, { sourceId: id, chapter: opinion.chapter, para: opinion.para, text: opinion.text, chapters: [opinion.chapter] })
+      return { ok: true, resolved: resolved.resolved, opinion: await bookdb.patchOpinion(dir, id, { status: 'accepted' }) }
     }
     case 'opinions.reject': {
       const projectId = String(need(payload, 'projectId'))

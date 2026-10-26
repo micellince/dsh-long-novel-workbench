@@ -2941,8 +2941,8 @@ window.__ModuleLoader__.load({
         setBusy(id); setNotice(null)
         try {
           const value = await api('opinions.accept', scope(projectId, { id }))
-          if (value && value.applied) setNotice({ tone: 'ok', text: `已定位第 ${value.applied.chapter} 章第 ${Number(value.applied.para) + 1} 段并替换（相似度 ${value.applied.score}%）` })
-          else setNotice({ tone: 'ok', text: '已采纳' })
+          if (value && value.applied) setNotice({ tone: 'ok', text: `已定位第 ${value.applied.chapter} 章第 ${Number(value.applied.para) + 1} 段并替换（相似度 ${value.applied.score}%）${value.resolved ? `；同时把 ${value.resolved} 条相关意见标为已处理` : ''}` })
+          else setNotice({ tone: 'ok', text: `已采纳${value && value.resolved ? `；同时把 ${value.resolved} 条相关意见标为已处理` : ''}` })
           reload()
         }
         catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }); reload() }
@@ -3122,6 +3122,7 @@ window.__ModuleLoader__.load({
           h('span', { className: 'nd-hint' }, ' ｜ '),
           chip('open', '待处理', status, setStatus),
           chip('stale', '失效', status, setStatus),
+          chip('resolved', '已随处理', status, setStatus),
           chip('accepted', '已采纳', status, setStatus),
           chip('rejected', '已驳回', status, setStatus),
           chip('all', '全部状态', status, setStatus),
@@ -3163,7 +3164,7 @@ window.__ModuleLoader__.load({
             group.opinions.map((row) => h('div', { className: `nd-opinion nd-opinion-${row.status}`, key: row.id },
               h('div', { className: 'nd-opinion-head' },
                 h('input', { type: 'checkbox', checked: picked.includes(row.id), onChange: () => toggle(row.id), title: '选择以合并' }),
-                h(Tag, { tone: row.status === 'stale' ? 'error' : row.status === 'accepted' ? 'ok' : row.status === 'rejected' ? 'muted' : 'warn' }, row.status || 'open'),
+                h(Tag, { tone: row.status === 'stale' ? 'error' : row.status === 'accepted' ? 'ok' : row.status === 'rejected' || row.status === 'resolved' ? 'muted' : 'warn' }, row.status === 'resolved' ? '已随处理' : row.status || 'open'),
                 row.origin === 'user' ? h(Tag, { tone: 'brand' }, '作者意见') : h(Tag, { tone: 'muted' }, `AI · ${categoryOf(row) === 'ai-style' ? '去 AI 化' : categoryOf(row) === 'logic' ? '事实逻辑' : '注意力'}`),
                 row.kind === 'highlight' ? h(Tag, { tone: 'ok' }, '高光') : null,
                 h('span', { className: 'nd-opinion-when' }, row.createdAt ? String(row.createdAt).slice(0, 10) : ''),
@@ -3172,6 +3173,7 @@ window.__ModuleLoader__.load({
               row.authorNote ? h('p', { className: 'nd-opinion-author-note' }, `我的建议：${row.authorNote}`) : null,
               row.after ? h('div', { className: 'nd-opinion-after' }, h('div', { className: 'nd-diff-head' }, '改为'), h('pre', { className: 'nd-pre' }, row.after)) : null,
               row.status === 'stale' ? h('p', { className: 'nd-hint nd-opinion-stale' }, `地址失效：${row.staleReason || '正文已改动'}（保留原文，可在正文重新批注）`) : null,
+              row.status === 'resolved' ? h('p', { className: 'nd-hint' }, '这条问题已随另一条意见的采纳一起处理，保留记录，不再待办。') : null,
               noteFor === row.id
                 ? h('div', { className: 'nd-opinion-note-edit' },
                     h('textarea', { className: 'nd-input nd-textarea', rows: 3, value: noteText, placeholder: '你的建议（例：这段别删，改成更冷的写法；或：按这个人物的性格不该示弱）', onChange: (e) => setNoteText(e.target.value) }),
