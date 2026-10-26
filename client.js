@@ -2892,6 +2892,8 @@ window.__ModuleLoader__.load({
       const [cat, setCat] = useState('all')
       const [status, setStatus] = useState('open')
       const [picked, setPicked] = useState([])
+      const [noteFor, setNoteFor] = useState('')
+      const [noteText, setNoteText] = useState('')
       const [coldOpen, setColdOpen] = useState(Boolean(pageArg && pageArg.recheck))
       const [coldFocus, setColdFocus] = useState('')
       const [workorder, setWorkorder] = useState(null)
@@ -2995,6 +2997,40 @@ window.__ModuleLoader__.load({
         }
       }
 
+      const saveNote = async (id) => {
+        setBusy(`note-${id}`); setNotice(null)
+        try {
+          await api('opinions.note', scope(projectId, { id, note: noteText }))
+          setNoteFor(''); setNoteText('')
+          setNotice({ tone: 'ok', text: '已保存你的建议' })
+          res.reload()
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const makeFixWorkorder = async (row) => {
+        if (!projectId || busy) return
+        const source = categoryOf(row) === 'logic' ? 'logic' : categoryOf(row) === 'attention' ? 'attention' : 'ai-style'
+        const allRows = chaptersForWorkorder()
+        const rows = allRows.filter((item) => item.chapter === Number(row.chapter))
+        if (!rows.length) { setNotice({ tone: 'warn', text: '这一章找不到正文' }); return }
+        const note = noteFor === row.id ? String(noteText || '').trim() : String(row.authorNote || '').trim()
+        const focus = [
+          '只针对这一条已有意见重新出改法，不要找新问题、不要重审全章：',
+          `- 第${row.chapter}章 第${Number(row.para) + 1}段`,
+          `- 问题：${row.text}`,
+          row.after ? `- AI 原改法：${row.after}` : '',
+          note ? `- 作者建议（必须遵守）：${note}` : '',
+          '输出 1 条 AI 意见，必须带整段替换 after；op 走 review。',
+        ].filter(Boolean).join('\n')
+        setBusy(`fix-${row.id}`); setNotice(null)
+        try {
+          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rows, sources: [source], focus, dryRun: true })
+          const label = source === 'logic' ? '逻辑审核' : source === 'attention' ? '注意力' : '去 AI 化'
+          setWorkorder({ title: `第 ${row.chapter} 章 · 按意见重出改法（${label}）`, text: String(value.prompt || ''), sending: false })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+
       const makeLocalWorkorder = async () => {
         if (busy) return
         setBusy('local'); setNotice(null)
@@ -3091,10 +3127,23 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'nd-opinion-when' }, row.createdAt ? String(row.createdAt).slice(0, 10) : ''),
               ),
               h('p', { className: 'nd-opinion-text' }, row.text),
+              row.authorNote ? h('p', { className: 'nd-opinion-author-note' }, `我的建议：${row.authorNote}`) : null,
               row.after ? h('div', { className: 'nd-opinion-after' }, h('div', { className: 'nd-diff-head' }, '改为'), h('pre', { className: 'nd-pre' }, row.after)) : null,
               row.status === 'stale' ? h('p', { className: 'nd-hint nd-opinion-stale' }, `地址失效：${row.staleReason || '正文已改动'}（保留原文，可在正文重新批注）`) : null,
+              noteFor === row.id
+                ? h('div', { className: 'nd-opinion-note-edit' },
+                    h('textarea', { className: 'nd-input nd-textarea', rows: 3, value: noteText, placeholder: '你的建议（例：这段别删，改成更冷的写法；或：按这个人物的性格不该示弱）', onChange: (e) => setNoteText(e.target.value) }),
+                    h('div', { className: 'nd-actions' },
+                      h(Btn, { small: true, kind: 'primary', onClick: () => saveNote(row.id), disabled: busy === `note-${row.id}` }, '保存建议'),
+                      h(Btn, { small: true, onClick: () => setNoteFor('') }, '取消'),
+                      h(Btn, { small: true, onClick: () => makeFixWorkorder(row), disabled: Boolean(busy) }, '按建议让 AI 出改法'),
+                    ),
+                  )
+                : null,
               h('div', { className: 'nd-opinion-actions' },
-                row.status === 'open' ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, row.after ? '采纳并替换' : '采纳') : null,
+                row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, '采纳并替换') : null,
+                row.status === 'open' && !row.after ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => makeFixWorkorder(row) }, '让 AI 出改法') : null,
+                row.status === 'open' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => { setNoteFor(row.id); setNoteText(row.authorNote || '') } }, row.authorNote ? '改我的建议' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
               ),
             )),
@@ -4810,6 +4859,39 @@ window.__ModuleLoader__.load({
       const [showRegions, setShowRegions] = useState(() => lsGet('nd.mapRegions', '1') !== '0')
       const [showRoutes, setShowRoutes] = useState(() => lsGet('nd.mapRoutes', '1') !== '0')
       const [showLabels, setShowLabels] = useState(() => lsGet('nd.mapLabels', '1') !== '0')
+      const [mapBusy, setMapBusy] = useState('')
+      const [mapError, setMapError] = useState('')
+      const [mapWork, setMapWork] = useState(null)
+      const [mapTarget, setMapTarget] = useState('')
+      const genBackground = async () => {
+        if (mapBusy) return
+        setMapBusy('bg'); setMapError('')
+        try {
+          await api('map.background', scope(projectId, { seed: Math.floor(Math.random() * 9000) + 1 }))
+          if (onRefresh) onRefresh()
+        } catch (error) { setMapError(friendlyError(error)) }
+        finally { setMapBusy('') }
+      }
+      const makeMapWorkorder = async () => {
+        if (mapBusy) return
+        setMapBusy('plan'); setMapError('')
+        try {
+          const value = await api('chat.send', { projectId, workorder: 'mapBackgroundWorkorder', world, locations, path: scene.routes, dryRun: true })
+          setMapWork({ text: String(value.prompt || ''), sending: false })
+        } catch (error) { setMapError(friendlyError(error)) }
+        finally { setMapBusy('') }
+      }
+      const sendMapWorkorder = async () => {
+        if (!mapWork) return
+        setMapWork((prev) => (prev ? { ...prev, sending: true } : prev))
+        try {
+          await sendToChat(projectId, { prompt: mapWork.text }, mapTarget)
+          setMapWork(null)
+        } catch (error) {
+          setMapWork((prev) => (prev ? { ...prev, sending: false } : prev))
+          setMapError(friendlyError(error))
+        }
+      }
       const withCoords = locations.filter(hasCoords)
       const scene = useMemo(() => buildWorldMapScene({ world, locations, events }), [world, locations, events])
       const show = useMemo(
@@ -4846,8 +4928,11 @@ window.__ModuleLoader__.load({
           h('span', { className: 'nd-hint' },
             `${locations.length} 个地点 · ${withCoords.length} 个有坐标 · 区域 ${scene.regions.length} · 路线 ${scene.routes.length}`),
           h(Btn, { small: true, kind: 'brand', onClick: () => setOpen(true) }, '🗺 打开全屏地图'),
+          h(Btn, { small: true, onClick: genBackground, disabled: mapBusy === 'bg' }, mapBusy === 'bg' ? '生成中…' : '🎨 生成底图'),
+          h(Btn, { small: true, onClick: makeMapWorkorder, disabled: mapBusy === 'plan' }, mapBusy === 'plan' ? '生成中…' : '🧭 AI 地图方案'),
           h(Btn, { small: true, onClick: () => go('ledger', { tab: 'locations' }) }, '编辑坐标'),
         ),
+        mapError ? h('p', { className: 'nd-hint', style: { color: '#b45309' } }, `地图操作失败：${mapError}`) : null,
         h('div', { className: 'ndm-toggles' },
           h(Btn, { small: true, onClick: () => toggle('nd.mapRegions', showRegions, setShowRegions) }, `区域：${showRegions ? '开' : '关'}`),
           h(Btn, { small: true, onClick: () => toggle('nd.mapTerrain', showTerrain, setShowTerrain) }, `山水：${showTerrain ? '开' : '关'}`),
@@ -4889,6 +4974,22 @@ window.__ModuleLoader__.load({
               onPick: setPickedId,
               onClose: () => setOpen(false),
             })
+          : null,
+        mapWork
+          ? h(Modal, {
+              title: 'AI 地图方案工作单',
+              wide: true,
+              onClose: () => setMapWork(null),
+              footer: h(Fragment, null,
+                h(Btn, { onClick: () => copyText(mapWork.text) }, '复制'),
+                h(Btn, { small: true, onClick: () => { setMapWork(null); setMapTarget('') } }, '关闭'),
+                h(Btn, { kind: 'primary', disabled: mapWork.sending, onClick: sendMapWorkorder }, mapWork.sending ? '发送中…' : '发送到对话'),
+              ),
+            },
+              h('p', { className: 'nd-hint' }, 'AI 只出区域 / 路线 / 绘制提示词，不改正文；回填到 world.json 可由 novel_desk_map(op=save) 或你手动保存。'),
+              h(TargetPicker, { projectId, value: mapTarget, onChange: setMapTarget }),
+              h('pre', { className: 'nd-pre nd-pre-tall' }, mapWork.text),
+            )
           : null,
       )
     }
@@ -5129,6 +5230,19 @@ window.__ModuleLoader__.load({
           setBusy('')
         }
       }
+      const rebuildMentions = async () => {
+        setBusy('mentions')
+        setNotice(null)
+        try {
+          const value = await api('ledger.rebuildMentions', scope(projectId))
+          setNotice({ tone: 'ok', text: `已重建提及：${value.chapters || 0} 章 / ${value.mentions || 0} 条` })
+          dbRes.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `重建提及失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
       const openSync = async () => {
         setBusy('sync')
         setNotice(null)
@@ -5309,16 +5423,22 @@ window.__ModuleLoader__.load({
               h('div', { className: 'nd-card-head' },
                 h('h3', null, '🗄️ 账本数据库'),
                 h(Btn, { small: true, onClick: () => dbRes.reload() }, '刷新'),
+                h(Btn, { small: true, onClick: rebuildMentions, disabled: busy === 'mentions' }, busy === 'mentions' ? '重建中…' : '重建提及'),
                 h(Btn, { small: true, kind: 'primary', onClick: openFullSync }, '首次建账 / 全书同步'),
               ),
               h('p', { className: 'nd-hint' }, `实体 ${dbRes.data.stats.entities} ｜ 提及 ${dbRes.data.stats.mentions} ｜ 事实 ${dbRes.data.stats.facts} ｜ 事件 ${dbRes.data.stats.events} ｜ 高光 ${dbRes.data.stats.highlights} ｜ 待确认专名 ${dbRes.data.stats.unknown}`),
-              Array.isArray(dbRes.data.items) && dbRes.data.items.length
-                ? h('div', { className: 'nd-db-entities' },
-                    dbRes.data.items.slice(0, 18).map((item) => h('span', { className: 'nd-db-entity', key: `${item.kind}:${item.entityId}` },
-                      `${item.name}×${item.mentions}`,
-                    )),
+              (() => {
+                const located = (Array.isArray(dbRes.data.items) ? dbRes.data.items : []).filter((item) => Number(item.mentions) > 0)
+                if (located.length) {
+                  return h('div', { className: 'nd-db-entities' },
+                    located.slice(0, 18).map((item) => h('span', { className: 'nd-db-entity', key: `${item.kind}:${item.entityId}` }, `${item.name}×${item.mentions}`)),
                   )
-                : h('p', { className: 'nd-hint' }, '数据库还没有实体：先跑一次「全书同步」建账，之后改正文只做本地增量同步。'),
+                }
+                if (Number(dbRes.data.stats.entities) > 0) {
+                  return h('p', { className: 'nd-hint' }, `实体已入账，但正文提及还没建立（${dbRes.data.stats.entities} 个实体当前都是 0 次）。点「重建提及」本地扫一遍正文即可；不扫也不会影响正文。`)
+                }
+                return h('p', { className: 'nd-hint' }, '数据库还没有实体：先跑一次「一次性全书建账」，之后改正文只做本地增量同步。')
+              })(),
             )
           : null,
         pending.length > 0
@@ -6249,7 +6369,7 @@ const CSS_EXTRA = `
 .nd-proj-label{white-space:nowrap}.nd-proj .nd-select{width:auto;min-width:150px;max-width:280px}
 .nd-principle-bar{display:flex;align-items:center;gap:10px;padding:5px 16px;flex:none;border-bottom:1px solid rgba(180,83,9,.22);background:linear-gradient(90deg,rgba(251,191,36,.16),rgba(251,191,36,.05));font-size:12px;color:#92400e;white-space:nowrap;overflow:hidden}
 .nd-principle-slogan{font-weight:700;letter-spacing:.02em;color:#b45309}
-.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-outline-list{display:flex;flex-direction:column;gap:6px}.nd-outline-row{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-outline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-outline-title{font-weight:600}.nd-outline-summary{margin:4px 0 0}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nd-principle-text{opacity:.86;overflow:hidden;text-overflow:ellipsis}.nd-outline-list{display:flex;flex-direction:column;gap:6px}.nd-outline-row{padding:8px 10px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;background:var(--dsw-alias-bg,#fff)}.nd-outline-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.nd-outline-title{font-weight:600}.nd-outline-summary{margin:4px 0 0}.nd-local-list{display:flex;flex-direction:column;gap:4px;margin-top:6px}.nd-local-item{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px}.nd-db-entities{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.nd-db-entity{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#f3f4f6);color:var(--dsw-alias-fg-muted,#4b5563)}.nd-unknown-list{margin-top:8px}.nd-unknown{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;padding:4px 0}.nd-role-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-role{font-size:12px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-role p{margin:2px 0 0}.nd-att-points{display:flex;flex-direction:column;gap:6px;margin-top:6px}.nd-att-point{padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-elevated,#fafafa)}.nd-att-point-text{margin:2px 0;font-size:12px}.nd-opinions .nd-card{margin-bottom:12px}.nd-opinion{padding:10px 12px;border:1px solid var(--dsw-alias-border,#e5e7eb);border-radius:10px;margin-bottom:8px;background:var(--dsw-alias-bg,#fff)}.nd-opinion-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;margin-bottom:6px}.nd-opinion-when{color:var(--dsw-alias-fg-muted,#6b7280);margin-left:auto;font-size:11px}.nd-opinion-text{margin:0 0 6px;font-size:13px;white-space:pre-wrap}.nd-opinion-after .nd-pre{max-height:160px}.nd-opinion-actions{display:flex;gap:8px;justify-content:flex-end}.nd-opinion-stale{color:#b45309}.nd-opinion-author-note{margin:4px 0;padding:6px 8px;border-radius:8px;background:rgba(37,99,235,.06);font-size:12px;color:#1d4ed8}.nd-opinion-note-edit{margin:6px 0}.nd-opinion-note-edit .nd-textarea{width:100%}.nd-storage-warn{flex:none;padding:5px 16px;font-size:12px;color:#92400e;background:rgba(217,119,6,.14);border-bottom:1px solid rgba(180,83,9,.22);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .nd-hero{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:16px 18px;border:1px solid rgba(180,83,9,.25);border-radius:14px;background:linear-gradient(120deg,rgba(251,191,36,.14),rgba(251,191,36,.03) 55%,rgba(37,99,235,.06));margin-bottom:12px}
 .nd-hero-slogan{font-size:17px;font-weight:800;letter-spacing:.03em;color:#b45309}
 .nd-hero-sub{margin:6px 0 0;font-size:12px;line-height:1.7;color:var(--dsw-alias-fg-muted,#6b7280);max-width:640px}

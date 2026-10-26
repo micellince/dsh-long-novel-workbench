@@ -81,6 +81,7 @@ export const READ_OPS = [
   'opinions.list',
   'ledger.digest',
   'ledger.entities',
+  'ledger.rebuildMentions',
   'outline.list',
   'ledger.unknown',
 ]
@@ -110,6 +111,7 @@ export const WRITE_OPS = [
   'import.run',
   'opinions.merge',
   'opinions.patch',
+  'opinions.note',
   'opinions.accept',
   'opinions.reject',
   'ledger.confirm',
@@ -1385,6 +1387,11 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const dir = await s.projectDir(root, projectId)
       return { outlines: await bookdb.listOutlines(dir) }
     }
+    case 'ledger.rebuildMentions': {
+      const projectId = String(need(payload, 'projectId'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.rebuildAllMentions(dir)
+    }
     case 'ledger.entities': {
       const projectId = String(need(payload, 'projectId'))
       const dir = await s.projectDir(root, projectId)
@@ -1504,6 +1511,12 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         role: String(payload.role ?? ''),
       })
     }
+    case 'opinions.note': {
+      const projectId = String(need(payload, 'projectId'))
+      const id = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      return bookdb.patchOpinion(dir, id, { authorNote: String(payload.note ?? '') })
+    }
     case 'opinions.patch': {
       const projectId = String(need(payload, 'projectId'))
       const id = String(need(payload, 'id'))
@@ -1569,15 +1582,16 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         return bookdb.patchOpinion(dir, id, { status: 'accepted' })
       }
       if (!String(opinion.after || '').trim()) {
-        return bookdb.patchOpinion(dir, id, { status: 'accepted' })
+        throw invalid('这条意见只有问题、没有改法（after），不能直接采纳。请先点「让 AI 出改法」或补充你的建议。')
       }
       const doc = await s.readChapter(root, projectId, opinion.chapter)
       const raw = String(doc.text ?? '')
-      const { title, body } = splitTitle(raw)
+      const titleHint = String(doc.meta?.title ?? '')
+      const { title, body } = splitTitle(raw, titleHint)
       const paragraphs = splitParagraphs(body)
       const at = Number(opinion.para)
       if (!(at >= 0) || !paragraphs[at]) throw invalid('意见地址已失效，请重新定位后再采纳')
-      const index = buildIndex(raw, opinion.chapter)
+      const index = buildIndex(raw, opinion.chapter, titleHint)
       if (opinion.paraHash && index.paras[at] && index.paras[at].hash !== opinion.paraHash) {
         await bookdb.patchOpinion(dir, id, { status: 'stale', staleReason: '正文已改动，段落指纹不一致' })
         throw invalid('正文已改动，这条意见地址失效，已标记为失效（stale）')
@@ -2208,6 +2222,9 @@ const reviewTool = {
     }
     if (reviews.length > 5) throw new Error(`一次最多提交 5 条意见（收到 ${reviews.length} 条）：分多次调用，避免一个大 JSON 解析失败。`)
     for (const row of reviews) {
+      if (['logic', 'ai-style'].includes(String(row?.source ?? '')) && !String(row?.after ?? '').trim()) {
+        throw new Error(`AI 意见必须带改法（after）：来源 ${row?.source} 只找问题不给改法会被拒绝。请直接给整段替换文本。`)
+      }
       if (String(row?.issue ?? '').length > 200) throw new Error('issue 超过 200 字：写清问题即可，不要长篇分析。')
       if (String(row?.after ?? '').length > 4000) throw new Error('after 超过 4000 字：只替换指到的那一段，整段成文即可。')
       if (String(row?.quote ?? '').length > 400) throw new Error('quote 超过 400 字：只引指到的那一段/一句。')
@@ -2417,6 +2434,7 @@ const attentionTool = {
         const points = Array.isArray(patch.points) ? patch.points.filter((point) => point && String(point.comment ?? '').trim()) : []
         if (points.length > 20) throw new Error('冷读 points 最多 20 条：只写值得写下来的。')
         for (const point of points) {
+          if (String(point.kind ?? '') === 'weakness' && !String(point.after ?? '').trim()) throw new Error('冷读的不足（weakness）必须带 after：给出这一段怎么改，否则作者无法采纳。')
           if (String(point.comment ?? '').length > 120) throw new Error('point.comment 超过 120 字：写清为什么即可（目标 ≤80 字）。')
           if (String(point.after ?? '').length > 4000) throw new Error('point.after 超过 4000 字：只给指到的那一段成文。')
         }
