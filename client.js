@@ -2516,7 +2516,7 @@ window.__ModuleLoader__.load({
             ),
             h(AttentionBars, { row: activeAtt, chapter: active, projectId, onSaved: onChanged }),
             h('div', { className: 'nd-actions', style: { flexWrap: 'wrap' } },
-              h(Btn, { small: true, onClick: () => go('reviews', { source: 'all', chapter: active, recheck: 1 }) }, '❄️ 冷读本章'),
+              h(Btn, { small: true, onClick: () => go('reviews', { coldChapter: active }) }, '❄️ 冷读本章'),
               h(Btn, { small: true, onClick: () => go('reviews', { ask: 'logic', chapter: active }) }, '⚖️ 逻辑审核本章'),
               h(Btn, { small: true, onClick: () => go('reviews', { ask: 'ai-style', chapter: active }) }, '🤖 去 AI 化本章'),
             ),
@@ -2966,11 +2966,38 @@ window.__ModuleLoader__.load({
       }
       const chaptersForWorkorder = () => (toc || []).map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' })).filter((row) => row.chapter > 0)
       const makeColdWorkorder = async () => {
+        if (busy) return
         setBusy('cold'); setNotice(null)
         try {
-          const value = await api('chat.send', { projectId, workorder: 'attentionRecheckWorkorder', chapters: chaptersForWorkorder(), focus: coldFocus.trim() || undefined, dryRun: true })
-          setWorkorder({ title: '冷读工作单（注意力）', text: String(value.prompt || ''), sending: false })
+          const value = await api('coldRead.prepare', scope(projectId, { scope: 'book' }))
+          const sent = await sendToChat(projectId, { prompt: String(value.prompt || ''), preferContext: true })
           setColdOpen(false)
+          setNotice({
+            tone: 'ok',
+            text: `已导出全文稿（${value.words} 字）并发给对话：${value.filePath}${sent && sent.created ? '（新开对话）' : ''}。AI 会一次读完并直接回答评分/接纳/不足。`,
+          })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const coldReadChapter = async (chapter) => {
+        if (!projectId || busy) return
+        setBusy(`cold-${chapter}`); setNotice(null)
+        try {
+          const value = await api('coldRead.prepare', scope(projectId, { scope: 'chapter', chapter }))
+          const sent = await sendToChat(projectId, { prompt: String(value.prompt || '') })
+          setNotice({ tone: 'ok', text: `已导出第 ${chapter} 章（${value.words} 字）并发给对话${sent && sent.created ? '（新开对话）' : ''}。` })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
+      const splitColdRead = async (row) => {
+        if (!projectId || busy) return
+        setBusy(`split-${row.id}`); setNotice(null)
+        try {
+          const value = await api('coldRead.split', scope(projectId, { id: row.id }))
+          const prompt = String(value.prompt || '')
+          setWorkorder({ title: '冷读意见 · 按章拆分工作单', text: prompt, sending: false })
+          await sendToChat(projectId, { prompt, preferContext: true }).catch(() => {})
+          setNotice({ tone: 'ok', text: '已把拆分工作单发到对话：AI 会按章拆成子意见，进意见页待处理。' })
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
@@ -3095,7 +3122,9 @@ window.__ModuleLoader__.load({
       const askRef = useRef(false)
       useEffect(() => {
         if (askRef.current) return
-        if (!pageArg || !pageArg.ask) return
+        if (!pageArg) return
+        if (pageArg.coldChapter) { askRef.current = true; coldReadChapter(Number(pageArg.coldChapter)); return }
+        if (!pageArg.ask) return
         askRef.current = true
         const chapter = Number(pageArg.chapter) || 0
         makeReviewWorkorder(String(pageArg.ask), chapter ? [chapter] : [])
@@ -3193,6 +3222,9 @@ window.__ModuleLoader__.load({
                 row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, Number(row.chapter) === 0 ? '采纳并替换（自动定位）' : '采纳并替换') : null,
                 row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, row.after ? '我的建议重新生成' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
+                (String(row.role || '') === '冷读审稿人' || String(row.role || '') === 'attention') && Number(row.chapter) === 0
+                  ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => splitColdRead(row) }, '按章拆分')
+                  : null,
                 row.status === 'rejected' ? h(Btn, { small: true, onClick: async () => {
                   setBusy(`reopen-${row.id}`); setNotice(null)
                   try { await api('opinions.patch', scope(projectId, { id: row.id, patch: { status: 'open' } })); setNotice({ tone: 'ok', text: '已撤销驳回，重新放回待处理' }); res.reload() }
@@ -3247,7 +3279,7 @@ window.__ModuleLoader__.load({
             h(Btn, { kind: 'primary', onClick: makeColdWorkorder, disabled: busy === 'cold' }, busy === 'cold' ? '生成中…' : '生成冷读工作单'),
           ),
         },
-          h('p', { className: 'nd-hint' }, '零上下文通读全书 → 一个 0–100 注意力分 + 地址评价（亮点/不足）；不会改正文。'),
+          h('p', { className: 'nd-hint' }, '把全文导出成一份 txt 交给 AI（独立审稿人/出版社编辑），一次读完直接回答：评分、接纳与否、哪里不足。结果落成 1 条冷读意见，可再按章拆分。'),
           h('div', { className: 'nd-field' },
             h('span', { className: 'nd-label' }, '本次关注（可留空）'),
             h('textarea', { className: 'nd-input nd-textarea', rows: 3, value: coldFocus, placeholder: '例：重点看第 12–20 章有没有让人想继续读。', onChange: (e) => setColdFocus(e.target.value) }),

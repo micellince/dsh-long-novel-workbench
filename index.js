@@ -12,7 +12,7 @@
  */
 
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs'
-import { mkdir as mkdirP } from 'node:fs/promises'
+import { mkdir as mkdirP, writeFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -79,6 +79,8 @@ export const READ_OPS = [
   'diagnostics',
   'chapter.index',
   'checks.local',
+  'coldRead.prepare',
+  'coldRead.split',
   'opinions.list',
   'ledger.digest',
   'ledger.entities',
@@ -1365,6 +1367,61 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const dir = projectId ? await s.projectDir(root, projectId) : ''
       return bookdb.storageStatus(dir)
     }
+    case 'coldRead.prepare': {
+      const projectId = String(need(payload, 'projectId'))
+      const scope = String(payload.scope ?? 'book') === 'chapter' ? 'chapter' : 'book'
+      const chapter = Number(payload.chapter) || 0
+      const chapters = listOf(await s.listChapters(root, projectId))
+      const picked = scope === 'chapter'
+        ? chapters.filter((row) => Number(row.chapter) === chapter)
+        : chapters
+      if (picked.length === 0) throw invalid('没有可冷读的章节')
+      const dir = await s.projectDir(root, projectId)
+      const manuscriptDir = join(dir, 'manuscripts')
+      await mkdir(manuscriptDir, { recursive: true })
+      const parts = []
+      for (const row of picked) {
+        const doc = await s.readChapter(root, projectId, Number(row.chapter))
+        const text = String(doc.text ?? '').trim()
+        if (!text) continue
+        parts.push(text)
+      }
+      if (parts.length === 0) throw invalid('选中的章节正文都是空的')
+      const project = await s.getProject(root, projectId)
+      const name = String(project.title ?? project.name ?? projectId)
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+      const fileName = scope === 'chapter' ? `冷读-${name}-第${chapter}章-${stamp}.txt` : `冷读-${name}-全文.txt`
+      const filePath = join(manuscriptDir, fileName)
+      await writeFile(filePath, `${name}\n\n${parts.join('\n\n')}\n`, 'utf8')
+      const range = scope === 'chapter' ? `第 ${chapter} 章` : `第 ${picked[0].chapter}–${picked[picked.length - 1].chapter} 章`
+      const prompt = [
+        '你是一个独立审稿人，同时是出版社编辑。',
+        `这是一本新投稿的书（${name}，${range}，约 ${parts.reduce((sum, text) => sum + text.length, 0)} 字）。`,
+        `全文在：${filePath}`,
+        '请用 read 工具直接读这个 txt，一次读完，不要再拆章节、不要调用其他工具。',
+        '',
+        '读完后直接回答三件事（不要客套、不要分段复述剧情）：',
+        '1. 评分：0–100 的读者吸引力分；',
+        '2. 接纳与否：建议接纳 / 退修 / 拒稿，并给一句理由；',
+        '3. 不足：哪里不足，写到章和段（能指出具体句子更好），每条约 1–2 句，最多 10 条；可分「硬伤」和「观感」。',
+        '',
+        '回答完以后，只调用一次极简工具上报结果：novel_desk_attention(op="measured", dispatchId, score, verdict, notes=[{chapter, comment, after?}])（notes 可选；after 只在你能直接给出整段替换时填）。',
+      ].join('\n')
+      return { filePath, fileName, scope, chapters: picked.map((row) => Number(row.chapter)), words: parts.reduce((sum, text) => sum + text.length, 0), prompt }
+    }
+    case 'coldRead.split': {
+      const projectId = String(need(payload, 'projectId'))
+      const parentId = String(need(payload, 'id'))
+      const dir = await s.projectDir(root, projectId)
+      const parent = await bookdb.getOpinion(dir, parentId)
+      if (!parent) throw invalid('冷读意见不存在')
+      const chapters = listOf(await s.listChapters(root, projectId)).map((row) => ({
+        chapter: Number(row.chapter), title: String(row.title ?? ''), words: Number(row.words) || 0, path: row.path || '',
+      }))
+      const prompt = prompts.coldReadSplitWorkorder({ project: await s.getProject(root, projectId).catch(() => null), coldRead: parent.text, chapters })
+      const hint = '先调 novel_desk_dispatch(projectId=' + JSON.stringify(projectId) + ', role="cold-reader", task="拆分冷读意见") 拿 dispatchId，再调 novel_desk_cold_split(projectId, dispatchId, parentId=' + JSON.stringify(parentId) + ', items=[...])。'
+      return { prompt: prompt + '\n\n## 派单\n' + hint, parentId }
+    }
     case 'checks.local': {
       const projectId = String(need(payload, 'projectId'))
       const limit = Math.max(1, Math.min(200, Number(payload.limit) || 200))
@@ -2437,6 +2494,21 @@ const attentionTool = {
           cliff: { type: 'number' },
         },
       },
+      notes: {
+        type: 'array',
+        description: 'measured：冷读的不足/亮点（可选），每项 {chapter, comment, after?}',
+        items: {
+          type: 'object',
+          properties: {
+            chapter: { type: 'number' },
+            comment: { type: 'string' },
+            after: { type: 'string' },
+            kind: { type: 'string', enum: ['highlight', 'weakness'] },
+          },
+          required: ['chapter', 'comment'],
+          additionalProperties: false,
+        },
+      },
       points: {
         type: 'array',
         description: 'measured：指定地址的评价（数量不限）。每条 para 段号（正文段落，从 0 开始）、quote 逐字引文、kind=highlight|weakness、comment≤80字、weakness 必须带 after（整段替换成文）',
@@ -2470,8 +2542,25 @@ const attentionTool = {
     const op = String(args.op ?? '')
     const projectRow = { id: projectId, name: project.name ?? project.title ?? '' }
     if (op === 'measured') {
-      const ticket = requireTicket(args.dispatchId, { projectId: projectId })
-      if (ticket.role !== 'cold-reader') throw new Error(`冷读必须由冷读审稿人子 agent 提交：请 novel_desk_dispatch(role="cold-reader") 拿 dispatchId。`)
+      const ticket = requireTicket(args.dispatchId, { projectId })
+      if (ticket.role !== 'cold-reader') throw new Error('冷读必须由冷读审稿人子 agent 提交：请 novel_desk_dispatch(role="cold-reader") 拿 dispatchId。')
+      // 极简口径：一次冷读 = 一个总分 + 一段结论；统一落成「1 条冷读意见」，不进待处理
+      if (args.score !== undefined || Array.isArray(args.notes)) {
+        const score = Number(args.score)
+        if (!Number.isFinite(score) || score < 0 || score > 100) throw new Error('score 必须是 0–100')
+        const notes = Array.isArray(args.notes) ? args.notes.filter((row) => row && String(row.comment ?? '').trim()).slice(0, 30) : []
+        const textLines = notes.length ? notes.map((row) => `第${Number(row.chapter) || 0}章：${String(row.comment).slice(0, 200)}`) : []
+        const dir = await s.projectDir(root, projectId)
+        const summary = await bookdb.addColdReadSummary({
+          dir,
+          score,
+          verdict: String(args.verdict ?? ''),
+          text: [String(args.detail ?? '').trim(), ...textLines].filter(Boolean).join('\n'),
+          chapters: [...new Set(notes.map((row) => Number(row.chapter)).filter((n) => n > 0))],
+        })
+        requireTicket(args.dispatchId, { projectId, consume: true })
+        return `已记录冷读：${score}/100${args.verdict ? `｜${String(args.verdict)}` : ''}。统一意见 id=${summary.id}（1 条，作者可在意见页「按章拆分」）`
+      }
     }
     if (op === 'design' || op === 'measured') {
       const flatKeys = ['type', 'hook', 'tension', 'payoff', 'cliff', 'question', 'designScore', 'status', 'score', 'breakdown', 'dropPoints', 'points', 'verdict', 'weakest', 'detail']
@@ -2777,7 +2866,52 @@ const mapTool = {
   },
 }
 
-export const TOOLS = [readTool, dispatchTool, reviewTool, proposeTool, attentionTool, writeTool, runTool, mapTool]
+// ⑧ 冷读统一意见的按章拆分（子意见进正常 AI 意见流程；不需要再读全文）
+const coldSplitTool = {
+  name: 'novel_desk_cold_split',
+  description: '把一条冷读统一意见拆成按章子意见（作者在意见页点「按章拆分」后由你执行）：你只需按已知内容分章，不必重读全文。',
+  parameters: {
+    type: 'object',
+    properties: {
+      projectId: { type: 'string' },
+      dispatchId: { type: 'string', description: '派单票据（role=cold-reader 或 continuity 皆可）' },
+      parentId: { type: 'string', description: '冷读统一意见 id' },
+      items: {
+        type: 'array',
+        description: '按章拆出的子意见',
+        items: {
+          type: 'object',
+          properties: {
+            chapter: { type: 'number' },
+            text: { type: 'string', description: '这一章要改什么（≤200 字）' },
+            after: { type: 'string', description: '可选：能直接替换的整段成文' },
+          },
+          required: ['chapter', 'text'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['dispatchId', 'parentId', 'items'],
+    additionalProperties: false,
+  },
+  output: textOutput,
+  async execute(args = {}) {
+    const s = store
+    const root = s.defaultRoot()
+    await s.ensureRoot(root)
+    const project = await resolveProject(s, root, args.projectId)
+    const ticket = requireTicket(args.dispatchId, { projectId: project.id })
+    if (!['cold-reader', 'continuity'].includes(ticket.role)) throw new Error('拆分派单角色需为 cold-reader 或 continuity')
+    const items = Array.isArray(args.items) ? args.items.filter((row) => row && Number(row.chapter) > 0 && String(row.text ?? '').trim()) : []
+    if (!items.length) throw new Error('items 不能为空')
+    const dir = await s.projectDir(root, project.id)
+    const result = await bookdb.addColdReadChildren({ dir, parentId: String(args.parentId), items })
+    requireTicket(args.dispatchId, { projectId: project.id, consume: true })
+    return `已拆出 ${result.added} 条按章子意见（进了意见页待处理，可逐条采纳；不会自动改正文）。`
+  },
+}
+
+export const TOOLS = [readTool, dispatchTool, reviewTool, proposeTool, attentionTool, writeTool, runTool, mapTool, coldSplitTool]
 
 // ── 入口 ────────────────────────────────────────────────────
 
