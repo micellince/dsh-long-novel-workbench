@@ -2948,10 +2948,22 @@ window.__ModuleLoader__.load({
       const [workorder, setWorkorder] = useState(null)
       const [target, setTarget] = useState('')
       const res = useAsync(() => api('opinions.list', scope(projectId)), [projectId])
-      // 本地检查只在作者点「扫描」时跑；不挂 useAsync，避免进页面/切页就整个盘扫一遍
-      const [localChecks, setLocalChecks] = useState(null)
+      // 本地检查只在作者点「扫描」时跑；结果按作品缓存到 localStorage，切页/重进不用重扫
+      const localCacheKey = `nd.localChecks.${projectId}`
+      const readLocalCache = () => {
+        try {
+          const raw = lsGet(localCacheKey, '')
+          const value = raw ? JSON.parse(raw) : null
+          return value && Array.isArray(value.items) ? value : null
+        } catch { return null }
+      }
+      const [localChecks, setLocalChecks] = useState(readLocalCache)
       const [localScanning, setLocalScanning] = useState(false)
-      const [localAt, setLocalAt] = useState('')
+      const localFormatAt = (value) => {
+        const stamp = value && value.scannedAt ? new Date(value.scannedAt) : null
+        return stamp && !Number.isNaN(stamp.getTime()) ? stamp.toLocaleString() : ''
+      }
+      const [localAt, setLocalAt] = useState(() => localFormatAt(readLocalCache()))
       const rows = res.data && Array.isArray(res.data.rows) ? res.data.rows : []
       const counts = (res.data && res.data.counts) || {}
       const titleOf = (chapter) => {
@@ -2988,8 +3000,10 @@ window.__ModuleLoader__.load({
         setLocalScanning(true); setNotice(null)
         try {
           const value = await api('checks.local', scope(projectId))
-          setLocalChecks(value || { items: [], counts: {} })
-          setLocalAt(new Date().toLocaleString())
+          const saved = { ...(value || { items: [], counts: {} }), scannedAt: new Date().toISOString() }
+          setLocalChecks(saved)
+          setLocalAt(localFormatAt(saved))
+          try { lsSet(localCacheKey, JSON.stringify(saved)) } catch { /* 存不下就只留内存 */ }
         } catch (error) {
           setNotice({ tone: 'error', text: friendlyError(error) })
         } finally { setLocalScanning(false) }
@@ -3251,7 +3265,7 @@ window.__ModuleLoader__.load({
         h('section', { className: 'nd-card' },
           h('div', { className: 'nd-card-head' },
             h('h3', null, '🧪 本地检查（0 AI 成本）'),
-            localChecks ? h('span', { className: 'nd-hint' }, `事实逻辑 ${localChecks.counts?.logic || 0} ｜ 去 AI 化 ${localChecks.counts?.deai || 0}${localAt ? ` ｜ 上次扫描 ${localAt}` : ''}`) : h('span', { className: 'nd-hint' }, '只在点「扫描」时跑，不会后台反复扫盘'),
+            localChecks ? h('span', { className: 'nd-hint' }, `事实逻辑 ${localChecks.counts?.logic || 0} ｜ 去 AI 化 ${localChecks.counts?.deai || 0}${localAt ? ` ｜ 上次扫描 ${localAt}` : ''}（正文改过再点重新扫描）`) : h('span', { className: 'nd-hint' }, '只在点「扫描」时跑；结果会保留，切页回来不用重扫'),
             h(Btn, { small: true, kind: localChecks ? undefined : 'primary', onClick: scanLocal, disabled: localScanning }, localScanning ? '扫描中…' : localChecks ? '重新扫描' : '扫描全文'),
             localChecks && localChecks.items && localChecks.items.length && go ? h(Btn, { small: true, onClick: () => go('read', { chapter: Number(localChecks.items[0].chapter), marks: localChecks.items.map((row) => ({ chapter: row.chapter, para: row.para, quote: row.quote, kind: row.kind, message: row.message })) }) }, '全部高亮') : null,
             localChecks && localChecks.items && localChecks.items.length ? h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点') : null,
