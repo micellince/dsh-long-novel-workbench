@@ -1417,10 +1417,12 @@ window.__ModuleLoader__.load({
       )
       // 定位到「第几段」：阅读页会滚到该段并高亮
       const openChapterAt = useCallback(
-        (chapter, para) => {
+        (chapter, para, mark = null) => {
           const n = Number(chapter)
           const p = para == null ? null : Number(para)
-          go('read', { chapter: n, ...(Number.isInteger(p) && p >= 0 ? { para: p } : {}) })
+          const arg = { chapter: n, ...(Number.isInteger(p) && p >= 0 ? { para: p } : {}) }
+          if (mark) arg.marks = [{ chapter: n, para: p, quote: String(mark.quote || ''), kind: String(mark.kind || ''), message: String(mark.message || '') }]
+          go('read', arg)
         },
         [go],
       )
@@ -2383,7 +2385,14 @@ window.__ModuleLoader__.load({
           return next
         })
 
+      const pageMarks = Array.isArray(pageArg && pageArg.marks) ? pageArg.marks : []
       const readerBody = h('div', { className: 'nd-reader-body', onMouseUp: onReaderMouseUp, style: { fontSize: `${prefs.size}px`, lineHeight: prefs.lead } },
+        pageMarks.length
+          ? h('div', { className: 'nd-banner nd-banner-warn nd-mark-banner' },
+              h('span', null, `已高亮本地检查 ${pageMarks.length} 处：黄＝去 AI 化，红＝事实逻辑；点「定位」会跳到对应段落`),
+              h(Btn, { small: true, onClick: () => go('read', { chapter: active }) }, '清除高亮'),
+            )
+          : null,
         docs.length === 0 && docsLoading ? h(Loading, null, '正在加载全书正文…') : null,
         docsError ? h(ErrorBox, { error: docsError }) : null,
         docs.length === 0 && !docsLoading && !docsError
@@ -2399,6 +2408,7 @@ window.__ModuleLoader__.load({
             registerRef,
             focusOffset: jumpOffset && jumpOffset.chapter === doc.chapter && jumpOffset.offset >= 0 ? jumpOffset.offset : null,
             focusRef,
+            marks: (Array.isArray(pageArg && pageArg.marks) ? pageArg.marks : []).filter((m) => Number(m.chapter) === Number(doc.chapter)),
           }),
         ),
         docs.length > 0 && docsLoading ? h('div', { className: 'nd-loading-more' }, `正在加载其余章节…（${docs.length}/${tocNums.length}）`) : null,
@@ -2733,7 +2743,7 @@ window.__ModuleLoader__.load({
     }
 
     // 全本连续渲染：memo 避免滚动切换当前章时重渲染所有章节
-    const ChapterBlock = memo(function ChapterBlock({ doc, info, attention, highlight, registerRef, focusOffset, focusRef }) {
+    const ChapterBlock = memo(function ChapterBlock({ doc, info, attention, highlight, registerRef, focusOffset, focusRef, marks }) {
       // 0.7：编辑器只渲染 .txt 原文。首行标题原样显示；不再由代码拼「第 N 章」、状态、注意力、字数。
       const meta = doc.meta || {}
       const metaTitle = (info && chapterTitle(info)) || (meta.title ? String(meta.title) : '')
@@ -2742,6 +2752,10 @@ window.__ModuleLoader__.load({
       const spans = useMemo(() => paragraphSpans(parsed.body), [parsed.body])
       const localOffset = focusOffset == null ? -1 : Number(focusOffset) - parsed.bodyStart
       const target = localOffset < 0 ? -1 : spans.findIndex((span) => localOffset >= span.start && localOffset < span.end)
+      const markByPara = new Map()
+      for (const mark of Array.isArray(marks) ? marks : []) {
+        if (mark && Number.isInteger(Number(mark.para))) markByPara.set(Number(mark.para), mark)
+      }
       return h(
         'section',
         {
@@ -2754,11 +2768,16 @@ window.__ModuleLoader__.load({
           : (metaTitle ? h('h3', { className: 'nd-ch-title nd-ch-title-meta', title: '标题尚未写入正文（迁移后可直接选中批注）', style: { userSelect: 'none' } }, metaTitle) : null),
         doc.error ? h('div', { className: 'nd-errorline' }, `正文读取失败：${doc.error}`) : null,
         paragraphs.length === 0 && !doc.error ? h('p', { className: 'nd-muted' }, '（本章暂无正文）') : null,
-        paragraphs.map((paragraph, index) => h('p', {
-          className: index === target ? 'nd-para nd-target' : 'nd-para',
-          key: index,
-          ref: index === target && focusRef ? (el) => { focusRef.current = el } : undefined,
-        }, ...renderSegments(paragraph, highlight))),
+        paragraphs.map((paragraph, index) => {
+          const mark = markByPara.get(index)
+          const className = `nd-para${index === target ? ' nd-target' : ''}${mark ? ` nd-mark nd-mark-${mark.kind === 'deai' ? 'deai' : 'logic'}` : ''}`
+          return h('p', {
+            className,
+            key: index,
+            title: mark ? String(mark.message || '') : undefined,
+            ref: index === target && focusRef ? (el) => { focusRef.current = el } : undefined,
+          }, ...renderSegments(paragraph, mark && mark.quote ? String(mark.quote) : highlight))
+        }),
       )
     })
 
@@ -2910,7 +2929,7 @@ window.__ModuleLoader__.load({
     }
 
     // ── 意见页：AI 意见 / 作者意见 分开；AI 意见分 去AI化 / 事实逻辑 / 注意力（冷读）──
-    function OpinionsPage({ projectId, toc, pageArg, openChapter, openChapterAt, onChanged }) {
+    function OpinionsPage({ projectId, toc, pageArg, openChapter, openChapterAt, go, onChanged }) {
       const [notice, setNotice] = useState(null)
       const [busy, setBusy] = useState('')
       const [who, setWho] = useState('ai')
@@ -3234,6 +3253,7 @@ window.__ModuleLoader__.load({
             h('h3', null, '🧪 本地检查（0 AI 成本）'),
             localChecks ? h('span', { className: 'nd-hint' }, `事实逻辑 ${localChecks.counts?.logic || 0} ｜ 去 AI 化 ${localChecks.counts?.deai || 0}${localAt ? ` ｜ 上次扫描 ${localAt}` : ''}`) : h('span', { className: 'nd-hint' }, '只在点「扫描」时跑，不会后台反复扫盘'),
             h(Btn, { small: true, kind: localChecks ? undefined : 'primary', onClick: scanLocal, disabled: localScanning }, localScanning ? '扫描中…' : localChecks ? '重新扫描' : '扫描全文'),
+            localChecks && localChecks.items && localChecks.items.length && go ? h(Btn, { small: true, onClick: () => go('read', { chapter: Number(localChecks.items[0].chapter), marks: localChecks.items.map((row) => ({ chapter: row.chapter, para: row.para, quote: row.quote, kind: row.kind, message: row.message })) }) }, '全部高亮') : null,
             localChecks && localChecks.items && localChecks.items.length ? h(Btn, { small: true, kind: 'primary', onClick: makeLocalWorkorder, disabled: busy === 'local' }, busy === 'local' ? '生成中…' : '让 AI 判这些点') : null,
           ),
           localChecks
@@ -3248,7 +3268,7 @@ window.__ModuleLoader__.load({
                   h('span', { className: 'nd-hint' }, `第 ${row.chapter} 章 · 第 ${Number(row.para) + 1} 段`),
                   h('span', null, row.message),
                   row.quote ? h('span', { className: 'nd-hint' }, `「${String(row.quote).slice(0, 40)}」`) : null,
-                  openChapterAt ? h(Btn, { small: true, onClick: () => openChapterAt(row.chapter, row.para) }, '定位') : null,
+                  openChapterAt ? h(Btn, { small: true, onClick: () => openChapterAt(row.chapter, row.para, { quote: row.quote, kind: row.kind, message: row.message }) }, '定位') : null,
                 )),
                 localChecks.items.length > 20 ? h('p', { className: 'nd-hint' }, `还有 ${localChecks.items.length - 20} 条；点「让 AI 判这些点」会全部带上。`) : null,
               )
@@ -6625,6 +6645,10 @@ const CSS_EXTRA = `
 .nd-reader-body .nd-ch-num,.nd-reader-body .nd-ch-words,.nd-reader-body .nd-muted,.nd-reader-body .nd-loading-more{color:var(--nd-paper-muted)}
 .nd-reader-body .nd-hl{background:rgba(214,168,42,.30)}
 .nd-reader-body .nd-target{background:rgba(214,168,42,.18);box-shadow:0 0 0 6px rgba(214,168,42,.10)}
+.nd-mark-logic{background:rgba(220,38,38,.10);box-shadow:inset 3px 0 0 rgba(220,38,38,.75);border-radius:4px}
+.nd-mark-deai{background:rgba(217,119,6,.13);box-shadow:inset 3px 0 0 rgba(217,119,6,.8);border-radius:4px}
+.nd-mark-banner{position:sticky;top:0;z-index:3;justify-content:space-between}
+.nd-mark .nd-hl{background:rgba(250,204,21,.55)}
 .nd-reader-scroll .nd-empty{border-color:var(--nd-paper-line);color:var(--nd-paper-muted)}
 .nd-reader-scroll .nd-tag{background:rgba(122,98,60,.10);color:#6f6149}
 .nd-reader-scroll .nd-tag-brand{background:rgba(180,83,9,.14);color:#9a3412}
