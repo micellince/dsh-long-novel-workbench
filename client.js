@@ -2940,14 +2940,9 @@ window.__ModuleLoader__.load({
       const accept = async (id) => {
         setBusy(id); setNotice(null)
         try {
-          const row = rows.find((item) => item.id === id)
-          if (row && Number(row.chapter) === 0) {
-            await api('opinions.patch', scope(projectId, { id, patch: { status: 'accepted' } }))
-            setNotice({ tone: 'ok', text: '全书级意见已标记为采纳（不会直接改正文，按章改法需逐章处理）' })
-          } else {
-            await api('opinions.accept', scope(projectId, { id }))
-            setNotice({ tone: 'ok', text: '已采纳' })
-          }
+          const value = await api('opinions.accept', scope(projectId, { id }))
+          if (value && value.applied) setNotice({ tone: 'ok', text: `已定位第 ${value.applied.chapter} 章第 ${Number(value.applied.para) + 1} 段并替换（相似度 ${value.applied.score}%）` })
+          else setNotice({ tone: 'ok', text: '已采纳' })
           reload()
         }
         catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }); reload() }
@@ -3188,7 +3183,7 @@ window.__ModuleLoader__.load({
                   )
                 : null,
               h('div', { className: 'nd-opinion-actions' },
-                row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, Number(row.chapter) === 0 ? '标记已采纳' : '采纳并替换') : null,
+                row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, Number(row.chapter) === 0 ? '采纳并替换（自动定位）' : '采纳并替换') : null,
                 row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, '生成建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => { setNoteFor(row.id); setNoteText(row.authorNote || '') } }, row.authorNote ? '改我的建议' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,

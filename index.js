@@ -1582,6 +1582,49 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const dir = await s.projectDir(root, projectId)
       const opinion = await bookdb.getOpinion(dir, id)
       if (!opinion) throw invalid('意见不存在')
+      if (opinion.kind !== 'highlight' && Number(opinion.chapter) === 0 && String(opinion.after || '').trim()) {
+        // 全书级意见：按 after 在书中自动定位最相似的一段，定位到就直接替换
+        const afterText = String(opinion.after).trim()
+        const mentioned = [...String(opinion.text || '').matchAll(/第\s*([0-9]+(?:\s*[、，,和\/]\s*[0-9]+)*)/g)]
+          .flatMap((hit) => (hit[1].match(/[0-9]+/g) || []).map((num) => Number(num)))
+          .filter((n) => n > 0)
+        const allChapters = listOf(await s.listChapters(root, projectId)).map((row) => Number(row.chapter)).filter((n) => n > 0)
+        const candidates = mentioned.length ? [...new Set(mentioned)] : allChapters
+        const bigrams = (text) => {
+          const clean = String(text || '').replace(/\s+/g, '')
+          const map = new Map()
+          for (let i = 0; i < clean.length - 1; i += 1) {
+            const key = clean.slice(i, i + 2)
+            map.set(key, (map.get(key) || 0) + 1)
+          }
+          return map
+        }
+        const dice = (a, b) => {
+          const A = bigrams(a); const B = bigrams(b)
+          let inter = 0; let na = 0; let nb = 0
+          for (const value of A.values()) na += value
+          for (const value of B.values()) nb += value
+          for (const [key, value] of A) if (B.has(key)) inter += Math.min(value, B.get(key))
+          return na + nb ? (2 * inter) / (na + nb) : 0
+        }
+        let best = { score: 0, chapter: 0, para: -1, text: '' }
+        for (const chapterNo of candidates) {
+          let doc
+          try { doc = await s.readChapter(root, projectId, chapterNo) } catch { continue }
+          const titleHint = String(doc.meta?.title ?? '')
+          const parsed = splitTitle(doc.text, titleHint)
+          const paragraphs = splitParagraphs(parsed.body)
+          paragraphs.forEach((para, index) => {
+            const score = dice(afterText, para.text)
+            if (score > best.score) best = { score, chapter: chapterNo, para: index, text: para.text, raw: doc.text, parsed, paragraphs }
+          })
+        }
+        if (!best.raw || best.score < 0.55) throw invalid('这条全书级意见定位不到对应段落（相似度不足），请让它按章给出带地址的意见')
+        const nextBody = best.paragraphs.map((row, index) => (index === best.para ? afterText : row.text)).join('\n\n')
+        const nextText = best.parsed.title ? `${best.parsed.title}\n\n${nextBody}\n` : `${nextBody}\n`
+        await s.saveChapter(root, projectId, best.chapter, nextText, {}, { source: 'opinion-accept-global' })
+        return { ok: true, applied: { chapter: best.chapter, para: best.para, score: Math.round(best.score * 100) }, opinion: await bookdb.patchOpinion(dir, id, { status: 'accepted' }) }
+      }
       if (opinion.kind === 'highlight') {
         await bookdb.addHighlight(dir, {
           chapter: opinion.chapter,
@@ -2237,6 +2280,9 @@ const reviewTool = {
     }
     if (reviews.length > 5) throw new Error(`一次最多提交 5 条意见（收到 ${reviews.length} 条）：分多次调用，避免一个大 JSON 解析失败。`)
     for (const row of reviews) {
+      if (Number(row?.chapter) === 0 && String(row?.after ?? '').trim()) {
+        throw new Error('全书级意见不能带 after：请拆成按章意见，每个受影响段落一条（chapter>0 + para/quote + after）。')
+      }
       if (String(row?.issue ?? '').length > 200) throw new Error('issue 超过 200 字：写清问题即可，不要长篇分析。')
       if (String(row?.after ?? '').length > 4000) throw new Error('after 超过 4000 字：只替换指到的那一段，整段成文即可。')
       if (String(row?.quote ?? '').length > 400) throw new Error('quote 超过 400 字：只引指到的那一段/一句。')
