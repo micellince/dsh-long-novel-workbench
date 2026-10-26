@@ -810,6 +810,7 @@ async function chatSend(ctx, s, root, payload) {
           reviews: payload.reviews,
           run: payload.run,
           sources: payload.sources,
+          roleOverride: payload.roleOverride,
           focus: payload.focus,
           world: payload.world,
           locations: payload.locations,
@@ -2363,9 +2364,12 @@ const reviewTool = {
     const reviews = Array.isArray(args.reviews) ? args.reviews : []
     if (reviews.length === 0) throw new Error('reviews 不能为空')
     const ticket = requireTicket(args.dispatchId, { projectId: project.id })
+    const GENERAL_ROLES = ['author', 'editor', 'publisher']
     for (const row of reviews) {
       const needRole = roleForSource(row?.source).id
-      if (ticket.role !== needRole) throw new Error(`票据角色 ${ticket.role} 与意见来源 ${row?.source} 需要的角色 ${needRole} 不符：每条路请单独 dispatch。`)
+      if (ticket.role !== needRole && !GENERAL_ROLES.includes(ticket.role)) {
+        throw new Error(`票据角色 ${ticket.role} 与意见来源 ${row?.source} 需要的角色 ${needRole} 不符：每条路请单独 dispatch。`)
+      }
     }
     if (reviews.length > 5) throw new Error(`一次最多提交 5 条意见（收到 ${reviews.length} 条）：分多次调用，避免一个大 JSON 解析失败。`)
     for (const row of reviews) {

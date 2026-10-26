@@ -3064,6 +3064,8 @@ window.__ModuleLoader__.load({
       }
       const ROLE_TO_SOURCE = { continuity: 'logic', 'ai-auditor': 'ai-style', 'cold-reader': 'attention', stylist: 'reader' }
       const SUGGEST_ROLES = [
+        { id: 'author', name: '作者', hint: '从人物/剧情意图出发，给出具体改法' },
+        { id: 'editor', name: '责任编辑', hint: '判断值不值得改、改哪、怎么改' },
         { id: 'continuity', name: '事实逻辑设计师', hint: '因果 / 动机 / 连续性 / 设定矛盾' },
         { id: 'ai-auditor', name: '审核 AI 化的 AI', hint: 'AI 味 / 套话 / 文笔机械' },
         { id: 'cold-reader', name: '冷读审稿人', hint: '读者会不会继续读 / 哪里弃读' },
@@ -3082,7 +3084,7 @@ window.__ModuleLoader__.load({
         if (!row) return
         if (!suggestRole) { setNotice({ tone: 'warn', text: '先选一个子 agent（这次交给谁出建议）' }); return }
         if (busy) return
-        const source = ROLE_TO_SOURCE[suggestRole] || 'logic'
+        const source = ROLE_TO_SOURCE[suggestRole] || (categoryOf(row) === 'logic' ? 'logic' : categoryOf(row) === 'attention' ? 'attention' : 'ai-style')
         const roleName = (SUGGEST_ROLES.find((item) => item.id === suggestRole) || {}).name || suggestRole
         const allRows = chaptersForWorkorder()
         const chapterNumbers = new Set([Number(row.chapter)])
@@ -3115,7 +3117,7 @@ window.__ModuleLoader__.load({
         ].filter(Boolean).join('\n')
         setBusy(`suggest-${row.id}`); setNotice(null)
         try {
-          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rowsForChapter, sources: [source], focus, dryRun: true })
+          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rowsForChapter, sources: [source], roleOverride: suggestRole, focus, dryRun: true })
           setWorkorder({ title: `第 ${row.chapter} 章 · 生成建议（${roleName}）`, text: String(value.prompt || ''), sending: false })
           setSuggestFor('')
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
