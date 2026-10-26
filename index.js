@@ -28,6 +28,7 @@ import { ROLES, ROLE_BY_ID, roleForSource } from './lib/roles.js'
 import { issueTicket, requireTicket, dispatchPrompt } from './lib/dispatch.js'
 import * as ledgerdb from './lib/ledgerdb.js'
 import { scanChapterLocal } from './lib/localchecks.js'
+import { applyMapPlan, parseMapPlan } from './lib/mapplan.js'
 import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
 
 export const name = 'novel-desk'
@@ -107,6 +108,7 @@ export const WRITE_OPS = [
   'run.reset',
   'chat.send',
   'map.background',
+  'map.applyPlan',
   'import.scan',
   'import.run',
   'opinions.merge',
@@ -1750,6 +1752,10 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       return chatSessions(ctx, root, payload)
     case 'map.background':
       return generateMapBackground(s, root, payload)
+    case 'map.applyPlan': {
+      const projectId = String(need(payload, 'projectId'))
+      return applyMapPlan({ store: s, root, projectId, text: String(payload.text ?? ''), savedAt: String(payload.savedAt ?? '') })
+    }
     case 'app.open':
       return openInBrowser(ctx, options)
     case 'project.create': {
@@ -2634,13 +2640,13 @@ const runTool = {
 // ⑦ 地图：让 AI 自己把「区域 / 路线 / 画风」方案存进世界，不用人再复制粘贴
 const mapTool = {
   name: 'novel_desk_map',
-  description: '世界地图方案：plan=看现有地形候选与画风；save=把 AI 写好的区域/路线/绘制提示词存进 world.json（mapStyle.aiPlan），可顺带换画风重生成底图。',
+  description: '世界地图方案：plan=看现有地形候选与画风；save=把 AI 方案的区域/路线/坐标/绘制提示词存进 world（mapStyle.aiPlan），并直接把【坐标】段写进地点的 x/y。',
   parameters: {
     type: 'object',
     properties: {
       projectId: { type: 'string', description: '作品 id 或名称；只有一部时可省略' },
       op: { type: 'string', enum: ['plan', 'save'] },
-      aiPlan: { type: 'string', description: 'op=save：完整方案文本（区域 / 路线 / 绘制提示词）' },
+      aiPlan: { type: 'string', description: 'op=save：完整方案文本，必须包含【区域】【路线】【坐标】【绘制提示词】四段' },
       palette: { type: 'string', description: 'op=save：画风 id 或名称（ink 水墨绢本 / ochre 赭石古卷 / jade 青绿山河 / sepia 羊皮纸 / steel 冷灰史诗 / wine 暗红纪事）' },
       seed: { type: 'number', description: 'op=save：底图种子；想换一版就换个正整数' },
     },
@@ -2685,9 +2691,12 @@ const mapTool = {
     const palette = String(args.palette ?? '').trim()
     const baseStyle = palette || args.seed ? generateTerrain(ledger, seed, { palette: palette || undefined }) : (style || {})
     const nextStyle = { ...baseStyle, aiPlan: { text, savedAt, source: 'ai' } }
-    await s.upsertLedgerItem(root, projectId, 'world', { mapStyle: nextStyle, mapStyleUpdatedAt: savedAt })
+    const applied = await applyMapPlan({ store: s, root, projectId, text, savedAt, baseMapStyle: nextStyle })
     const redraw = palette ? `，底图已换成「${nextStyle.paletteName || nextStyle.palette}」` : ''
-    return `已把地图方案存进《${project.title || project.name || projectId}》的 world.json（${text.length} 字）${redraw}。用户打开 账本 → 世界地图 会看到「AI 方案（已贴回）」，点开可以看全文。`
+    const coordLine = applied.total
+      ? `坐标已入库：${applied.updated.length}/${applied.total} 个地点有坐标${applied.missing.length ? `；未匹配：${applied.missing.slice(0, 5).join('、')}` : ''}`
+      : '方案里没有【坐标】段：地点坐标未更新（下次请按格式给每个地点 x/y）'
+    return `已把地图方案存进《${project.title || project.name || projectId}》（${text.length} 字）${redraw}。${coordLine}。用户打开 账本 → 世界地图 会直接看到地点。`
   },
 }
 
