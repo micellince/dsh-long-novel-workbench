@@ -2771,7 +2771,7 @@ const mapTool = {
     const applied = await applyMapPlan({ store: s, root, projectId, text, savedAt, baseMapStyle: nextStyle })
     const redraw = palette ? `，底图已换成「${nextStyle.paletteName || nextStyle.palette}」` : ''
     const coordLine = applied.total
-      ? `坐标已入库：${applied.updated.length}/${applied.total} 个地点有坐标${applied.missing.length ? `；未匹配：${applied.missing.slice(0, 5).join('、')}` : ''}`
+      ? `坐标已入库：更新 ${applied.updated.length} 个、新建 ${applied.created.length} 个${applied.missing.length ? `；未匹配：${applied.missing.slice(0, 5).join('、')}` : ''}`
       : '方案里没有【坐标】段：地点坐标未更新（下次请按格式给每个地点 x/y）'
     return `已把地图方案存进《${project.title || project.name || projectId}》（${text.length} 字）${redraw}。${coordLine}。用户打开 账本 → 世界地图 会直接看到地点。`
   },
