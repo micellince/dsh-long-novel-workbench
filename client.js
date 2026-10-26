@@ -3023,6 +3023,7 @@ window.__ModuleLoader__.load({
       const [who, setWho] = useState('ai')
       const [cat, setCat] = useState('all')
       const [status, setStatus] = useState('all')
+      const [chapterFilter, setChapterFilter] = useState('')
       const [picked, setPicked] = useState([])
       const [noteFor, setNoteFor] = useState('')
       const [noteText, setNoteText] = useState('')
@@ -3071,6 +3072,7 @@ window.__ModuleLoader__.load({
       const filtered = sourceRows.filter((row) => {
         if (who === 'ai' && cat !== 'all' && categoryOf(row) !== cat) return false
         if (status !== 'all' && String(row.status) !== status) return false
+        if (chapterFilter && String(row.chapter) !== String(chapterFilter)) return false
         return true
       })
       const STATUS_LABEL = { open: '待处理', accepted: '已采纳', rejected: '已驳回', merged: '已合并', stale: '失效', resolved: '已处理' }
@@ -3153,15 +3155,19 @@ window.__ModuleLoader__.load({
           setNotice({ tone: 'warn', text: '先在意见列表里勾选要生成改法的意见（章级/整章总结不能直接改，先按章拆分）' })
           return
         }
+        const chapterNums = [...new Set(pickedRows.map((row) => Number(row.chapter)))]
+        if (pickedRows.length > 25 || chapterNums.length > 5) {
+          setNotice({ tone: 'warn', text: `一次最多批量 25 条 / 5 章（当前 ${pickedRows.length} 条、${chapterNums.length} 章）：请用章节筛选，或按章分批，避免工单过长和烧 token。` })
+          return
+        }
         setBusy('fix'); setNotice(null)
         try {
           const items = pickedRows.map((row) => ({ id: row.id, chapter: Number(row.chapter), para: row.para, anchor: row.anchor, text: row.text, kind: row.kind }))
-          const chapterNums = [...new Set(items.map((row) => row.chapter))]
           const chapters = (toc || [])
             .filter((row) => chapterNums.includes(chapterNo(row)))
             .map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' }))
           const value = await api('chat.send', { projectId, workorder: 'opinionFixWorkorder', items, chapters, dryRun: true })
-          setWorkorder({ title: `批量改法工作单（${items.length} 条）`, text: String(value.prompt || ''), sending: false })
+          setWorkorder({ title: `批量改法工作单（${items.length} 条 / ${chapterNums.length} 章：第 ${chapterNums.join('、')} 章）`, text: String(value.prompt || ''), sending: false })
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
@@ -3371,6 +3377,11 @@ window.__ModuleLoader__.load({
           chip('accepted', `已采纳 ${counts.accepted || 0}`, status, setStatus),
           chip('rejected', `已驳回 ${counts.rejected || 0}`, status, setStatus),
           chip('all', `全部 ${rows.length}`, status, setStatus),
+          h(Select, {
+            value: chapterFilter,
+            onChange: setChapterFilter,
+            options: [{ value: '', label: '全部章节' }, ...(toc || []).map((row) => ({ value: String(chapterNo(row)), label: `第 ${chapterNo(row)} 章` }))],
+          }),
         ),
         who === 'ai' ? h('div', { className: 'nd-toolbar' }, cats.map((item) => chip(item.id, item.label, cat, setCat))) : null,
         h('div', { className: 'nd-toolbar nd-selectbar' },
@@ -3378,7 +3389,11 @@ window.__ModuleLoader__.load({
             h('input', { type: 'checkbox', checked: allVisibleChecked, onChange: toggleAllVisible }),
             h('span', null, '全选当前'),
           ),
-          h('span', { className: 'nd-hint' }, `已选 ${picked.length} 条`),
+          h('span', { className: 'nd-hint' }, (() => {
+            const selectedRows = rows.filter((row) => picked.includes(row.id))
+            const chapters = [...new Set(selectedRows.map((row) => Number(row.chapter)).filter((n) => n > 0))]
+            return `已选 ${picked.length} 条${chapters.length ? ` ｜ 跨 ${chapters.length} 章（第 ${chapters.join('、')} 章）` : ''}`
+          })()),
           h(Btn, { small: true, onClick: toggleAllVisible, disabled: !visibleIds.length }, allVisibleChecked ? '取消全选' : '全选'),
           h(Btn, { small: true, onClick: () => setPicked([]), disabled: !picked.length }, '清空'),
           h(Btn, { small: true, kind: 'primary', onClick: makeFixWorkorder, disabled: !picked.length || Boolean(busy) }, busy === 'fix' ? '生成中…' : `🤖 让 AI 批量改${picked.length ? `（${picked.length}）` : ''}`),
