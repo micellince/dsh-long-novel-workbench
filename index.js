@@ -1408,7 +1408,7 @@ export async function handleRpc(body, ctx = {}, options = {}) {
         '3. 不足：哪里不足，**每行以「第N章：」开头**，写到章和段（能指出具体句子更好），每条约 1–2 句，最多 10 条；可分「硬伤」和「观感」。',
         '4. 高光：真有写得极好的地方，单独一两行「高光：第N章……」，这类会自动进高光账本，不需要作者处理。',
         '',
-        '回答完以后，只调用一次极简工具上报结果：novel_desk_attention(op="measured", dispatchId, score, verdict, notes=[{chapter, comment, after?}])（notes 可选；after 只在你能直接给出整段替换时填）。',
+        '回答完以后，只调用一次极简工具上报结果：novel_desk_attention(op="measured", dispatchId, score, verdict, notes=[{chapter, kind:"weakness"|"highlight", comment, quote, after?}])。高光必须 kind="highlight" 且带 quote（逐字原文），否则不会入高光账本；弱点要带 after 才能一键采纳。',
       ].join('\n')
       return { filePath, fileName, scope, chapters: picked.map((row) => Number(row.chapter)), words: parts.reduce((sum, text) => sum + text.length, 0), prompt }
     }
@@ -2563,20 +2563,28 @@ const attentionTool = {
       if (args.score !== undefined || Array.isArray(args.notes)) {
         const score = Number(args.score)
         if (!Number.isFinite(score) || score < 0 || score > 100) throw new Error('score 必须是 0–100')
-        const notes = Array.isArray(args.notes) ? args.notes.filter((row) => row && String(row.comment ?? '').trim()).slice(0, 30) : []
+        const notes = (Array.isArray(args.notes) ? args.notes : []).map((row) => {
+          const chapter = Number(row?.chapter) || 0
+          const raw = String(row?.comment ?? row?.text ?? row?.note ?? '').trim()
+          const explicitKind = String(row?.kind ?? row?.type ?? '').toLowerCase()
+          const isHighlight = explicitKind === 'highlight' || /^高光[:：]/.test(raw)
+          const comment = raw.replace(/^高光[:：]\s*/, '').trim()
+          const quote = String(row?.quote ?? '').trim() || (raw.match(/[“"「]([^”"」]{2,80})[”"」]/)?.[1] ?? '')
+          return { chapter, comment, kind: isHighlight ? 'highlight' : 'weakness', quote, after: String(row?.after ?? '') }
+        }).filter((row) => row.chapter > 0 && row.comment).slice(0, 30)
         const textLines = notes.length ? notes.map((row) => `第${Number(row.chapter) || 0}章：${String(row.comment).slice(0, 200)}`) : []
         const dir = await s.projectDir(root, projectId)
-        const highlights = notes.filter((row) => String(row.kind ?? '') === 'highlight')
         const summary = await bookdb.addColdReadSummary({
           dir,
           score,
           verdict: String(args.verdict ?? ''),
           text: [String(args.detail ?? '').trim(), ...textLines].filter(Boolean).join('\n'),
           chapters: [...new Set(notes.map((row) => Number(row.chapter)).filter((n) => n > 0))],
-          highlights,
+          highlights: notes.filter((row) => row.kind === 'highlight'),
+          notes,
         })
         requireTicket(args.dispatchId, { projectId, consume: true })
-        return `已记录冷读：${score}/100${args.verdict ? `｜${String(args.verdict)}` : ''}。统一意见 id=${summary.id}（1 条，可在意见页「按章拆分」）；高光 ${summary.highlights} 条已自动入高光账本。`
+        return `已记录冷读：${score}/100${args.verdict ? `｜${String(args.verdict)}` : ''}。统一意见 id=${summary.id}；逐章意见 ${summary.notes ?? 0} 条；高光 ${summary.highlights} 条已入高光账本。`
       }
     }
     if (op === 'design' || op === 'measured') {

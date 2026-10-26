@@ -3022,7 +3022,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [who, setWho] = useState('ai')
       const [cat, setCat] = useState('all')
-      const [status, setStatus] = useState('open')
+      const [status, setStatus] = useState('all')
       const [picked, setPicked] = useState([])
       const [noteFor, setNoteFor] = useState('')
       const [noteText, setNoteText] = useState('')
