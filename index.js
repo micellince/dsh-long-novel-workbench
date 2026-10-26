@@ -806,6 +806,7 @@ async function chatSend(ctx, s, root, payload) {
           scope: payload.scope,
           attention: payload.attention ?? context?.attention ?? [],
           outline: outlineRows,
+          items: payload.items,
           chapter: payload.chapter,
           reviews: payload.reviews,
           run: payload.run,
@@ -2386,18 +2387,32 @@ const reviewTool = {
       source: String(row?.source ?? 'logic'),
       origin: String(row?.origin ?? args.origin ?? 'review'),
     }))
-    const result = await s.addReviews(root, String(project.id), items)
+    const patchItems = reviews.filter((row) => String(row?.opinionId ?? '').trim())
+    const addItems = reviews.filter((row) => !String(row?.opinionId ?? '').trim())
+    let patched = 0
+    if (patchItems.length) {
+      const dir = await s.projectDir(root, String(project.id))
+      for (const row of patchItems) {
+        const after = String(row?.after ?? '').trim()
+        if (!after) throw new Error(`意见 ${row.opinionId} 没有 after：批量改法每条都必须给整段替换。`)
+        await bookdb.patchOpinion(dir, String(row.opinionId).trim(), { after, status: 'open' })
+        patched += 1
+      }
+    }
+    const result = addItems.length ? await s.addReviews(root, String(project.id), addItems) : { added: 0 }
     requireTicket(args.dispatchId, { projectId: project.id, consume: true })
     const count = Number(result?.added) || 0
     const skipped = Number(result?.skipped) || 0
     const reasons = Array.isArray(result?.skippedReasons) ? result.skippedReasons : []
-    if (count === 0) {
+    if (count === 0 && patched === 0) {
       throw new Error(`没有写入任何审阅（${skipped} 条被跳过）${reasons.length > 0 ? `：${reasons.slice(0, 3).join('；')}` : ''}；chapter>0 时 quote 必须 ≥4 字、逐字出现在该章正文里且只出现一次；全书级问题用 chapter=0。`)
     }
     const tail = skipped > 0
       ? `，跳过 ${skipped} 条（引文未逐字命中、无法唯一定位或重复${reasons.length > 0 ? `：${reasons.slice(0, 3).join('；')}` : ''}）`
       : ''
-    return `已提交 ${count} 条审阅${tail}（作品《${project.name ?? project.title ?? project.id}》）。作者在「意见」页逐条处理。`
+    return patched
+      ? `已为 ${patched} 条意见生成整段改法${count ? `，另外新增 ${count} 条审阅` : ''}（作品《${project.name ?? project.title ?? project.id}》）。作者在「意见」页逐条采纳即可替换。`
+      : `已提交 ${count} 条审阅${tail}（作品《${project.name ?? project.title ?? project.id}》）。作者在「意见」页逐条处理。`
   },
 }
 

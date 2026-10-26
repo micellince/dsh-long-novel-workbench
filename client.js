@@ -3144,6 +3144,25 @@ window.__ModuleLoader__.load({
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
+      const makeFixWorkorder = async () => {
+        if (!projectId || busy) return
+        const pickedRows = rows.filter((row) => picked.includes(row.id) && Number(row.chapter) > 0)
+        if (!pickedRows.length) {
+          setNotice({ tone: 'warn', text: '先在意见列表里勾选要生成改法的意见（章级/整章总结不能直接改，先按章拆分）' })
+          return
+        }
+        setBusy('fix'); setNotice(null)
+        try {
+          const items = pickedRows.map((row) => ({ id: row.id, chapter: Number(row.chapter), para: row.para, anchor: row.anchor, text: row.text, kind: row.kind }))
+          const chapterNums = [...new Set(items.map((row) => row.chapter))]
+          const chapters = (toc || [])
+            .filter((row) => chapterNums.includes(chapterNo(row)))
+            .map((row) => ({ chapter: chapterNo(row), title: chapterTitle(row), words: Number(row.words) || 0, path: row.path || row.file || '' }))
+          const value = await api('chat.send', { projectId, workorder: 'opinionFixWorkorder', items, chapters, dryRun: true })
+          setWorkorder({ title: `批量改法工作单（${items.length} 条）`, text: String(value.prompt || ''), sending: false })
+        } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
+        finally { setBusy('') }
+      }
       const coldReadChapter = async (chapter) => {
         if (!projectId || busy) return
         setBusy(`cold-${chapter}`); setNotice(null)
