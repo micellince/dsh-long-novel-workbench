@@ -2894,6 +2894,9 @@ window.__ModuleLoader__.load({
       const [picked, setPicked] = useState([])
       const [noteFor, setNoteFor] = useState('')
       const [noteText, setNoteText] = useState('')
+      const [suggestFor, setSuggestFor] = useState('')
+      const [suggestRole, setSuggestRole] = useState('')
+      const [suggestText, setSuggestText] = useState('')
       const [coldOpen, setColdOpen] = useState(Boolean(pageArg && pageArg.recheck))
       const [coldFocus, setColdFocus] = useState('')
       const [workorder, setWorkorder] = useState(null)
@@ -3007,26 +3010,41 @@ window.__ModuleLoader__.load({
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
-      const makeFixWorkorder = async (row) => {
-        if (!projectId || busy) return
-        const source = categoryOf(row) === 'logic' ? 'logic' : categoryOf(row) === 'attention' ? 'attention' : 'ai-style'
+      const ROLE_TO_SOURCE = { continuity: 'logic', 'ai-auditor': 'ai-style', 'cold-reader': 'attention', stylist: 'reader' }
+      const SUGGEST_ROLES = [
+        { id: 'continuity', name: '事实逻辑设计师', hint: '因果 / 动机 / 连续性 / 设定矛盾' },
+        { id: 'ai-auditor', name: '审核 AI 化的 AI', hint: 'AI 味 / 套话 / 文笔机械' },
+        { id: 'cold-reader', name: '冷读审稿人', hint: '读者会不会继续读 / 哪里弃读' },
+        { id: 'stylist', name: '文笔文风优化师', hint: '语感 / 节奏 / 用词' },
+      ]
+      const openSuggest = (row) => {
+        setSuggestFor(row.id)
+        setSuggestRole('')
+        setSuggestText(String(row.authorNote || ''))
+      }
+      const submitSuggest = async () => {
+        const row = rows.find((item) => item.id === suggestFor)
+        if (!row) return
+        if (!suggestRole) { setNotice({ tone: 'warn', text: '先选一个子 agent（这次交给谁出建议）' }); return }
+        if (busy) return
+        const source = ROLE_TO_SOURCE[suggestRole] || 'logic'
+        const roleName = (SUGGEST_ROLES.find((item) => item.id === suggestRole) || {}).name || suggestRole
         const allRows = chaptersForWorkorder()
-        const rows = allRows.filter((item) => item.chapter === Number(row.chapter))
-        if (!rows.length) { setNotice({ tone: 'warn', text: '这一章找不到正文' }); return }
-        const note = noteFor === row.id ? String(noteText || '').trim() : String(row.authorNote || '').trim()
+        const rowsForChapter = allRows.filter((item) => item.chapter === Number(row.chapter))
+        if (!rowsForChapter.length) { setNotice({ tone: 'warn', text: '这一章找不到正文' }); return }
         const focus = [
-          '只针对这一条已有意见重新出改法，不要找新问题、不要重审全章：',
+          `只针对这一条已有意见给出建议/改法，不要重审全章、不要找新问题；交给「${roleName}」判断。`,
           `- 第${row.chapter}章 第${Number(row.para) + 1}段`,
           `- 问题：${row.text}`,
           row.after ? `- AI 原改法：${row.after}` : '',
-          note ? `- 作者建议（必须遵守）：${note}` : '',
-          '输出 1 条 AI 意见，必须带整段替换 after；op 走 review。',
+          String(suggestText || '').trim() ? `- 作者建议（必须遵守）：${String(suggestText).trim()}` : '',
+          '输出：1 条 AI 意见；如果能给整段替换就带 after，只给判断也可以。',
         ].filter(Boolean).join('\n')
-        setBusy(`fix-${row.id}`); setNotice(null)
+        setBusy(`suggest-${row.id}`); setNotice(null)
         try {
-          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rows, sources: [source], focus, dryRun: true })
-          const label = source === 'logic' ? '逻辑审核' : source === 'attention' ? '注意力' : '去 AI 化'
-          setWorkorder({ title: `第 ${row.chapter} 章 · 按意见重出改法（${label}）`, text: String(value.prompt || ''), sending: false })
+          const value = await api('chat.send', { projectId, workorder: 'reviewWorkorder', chapters: rowsForChapter, sources: [source], focus, dryRun: true })
+          setWorkorder({ title: `第 ${row.chapter} 章 · 生成建议（${roleName}）`, text: String(value.prompt || ''), sending: false })
+          setSuggestFor('')
         } catch (error) { setNotice({ tone: 'error', text: friendlyError(error) }) }
         finally { setBusy('') }
       }
@@ -3136,19 +3154,39 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'nd-actions' },
                       h(Btn, { small: true, kind: 'primary', onClick: () => saveNote(row.id), disabled: busy === `note-${row.id}` }, '保存建议'),
                       h(Btn, { small: true, onClick: () => setNoteFor('') }, '取消'),
-                      h(Btn, { small: true, onClick: () => makeFixWorkorder(row), disabled: Boolean(busy) }, '按建议让 AI 出改法'),
+                      h(Btn, { small: true, onClick: () => { setNoteFor(''); setSuggestFor(row.id); setSuggestRole(''); setSuggestText(noteText) }, disabled: Boolean(busy) }, '按我的建议生成'),
                     ),
                   )
                 : null,
               h('div', { className: 'nd-opinion-actions' },
                 row.status === 'open' && row.after ? h(Btn, { small: true, kind: 'primary', disabled: busy === row.id, onClick: () => accept(row.id) }, '采纳并替换') : null,
-                row.status === 'open' && !row.after ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => makeFixWorkorder(row) }, '让 AI 出改法') : null,
+                row.status === 'open' ? h(Btn, { small: true, kind: row.after ? undefined : 'primary', disabled: Boolean(busy), onClick: () => openSuggest(row) }, '生成建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => { setNoteFor(row.id); setNoteText(row.authorNote || '') } }, row.authorNote ? '改我的建议' : '我的建议') : null,
                 row.status === 'open' ? h(Btn, { small: true, disabled: busy === row.id, onClick: () => reject(row.id) }, '驳回') : null,
               ),
             )),
           )
         }),
+        suggestFor ? h(Modal, {
+          title: '生成建议（指定子 agent）',
+          onClose: () => setSuggestFor(''),
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setSuggestFor('') }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submitSuggest, disabled: Boolean(busy) }, busy ? '生成中…' : '生成工作单'),
+          ),
+        },
+          h('p', { className: 'nd-hint' }, '这次让哪个子 agent 出建议？不默认，由你选；逻辑 bug 选「事实逻辑设计师」，AI 味选「审核 AI 化的 AI」，弃读/节奏选「冷读审稿人」，语感选「文笔文风优化师」。'),
+          h(Field, { label: '子 agent' },
+            h(Select, {
+              value: suggestRole,
+              onChange: setSuggestRole,
+              options: [{ value: '', label: '请选择' }].concat(SUGGEST_ROLES.map((role) => ({ value: role.id, label: `${role.name}（${role.hint}）` }))),
+            }),
+          ),
+          h(Field, { label: '我的建议（可留空）' },
+            h(TextArea, { rows: 4, value: suggestText, onChange: setSuggestText, placeholder: '例：这里死了人下一章却像没事发生，逻辑不成立；让事实逻辑设计师判断。' }),
+          ),
+        ) : null,
         coldOpen ? h(Modal, {
           title: '冷读（注意力）',
           onClose: () => setColdOpen(false),
