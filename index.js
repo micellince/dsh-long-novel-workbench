@@ -1380,7 +1380,7 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       if (picked.length === 0) throw invalid('没有可冷读的章节')
       const dir = await s.projectDir(root, projectId)
       const manuscriptDir = join(dir, 'manuscripts')
-      await mkdir(manuscriptDir, { recursive: true })
+      await mkdirP(manuscriptDir, { recursive: true })
       const parts = []
       for (const row of picked) {
         const doc = await s.readChapter(root, projectId, Number(row.chapter))
