@@ -7,7 +7,7 @@
 
 一个装在 **DeepSeek Harness（DSH）** 里的长篇中文小说工作台：**打开就能看全文；AI 只负责找问题和写修改稿，稿采纳进正文才生效**。
 
-> 当前版本 **0.7.1**（2026-10-26 发布）。这是 0.7 线第一次公开发布：把「审阅」重做成「问题单 + 修改稿」，提案不再参与审阅改稿。`0.7.0-dev.0` 是未发布的开发线，对外统一使用 `0.7.1`。
+> 当前版本 **0.7.2**（2026-10-27 发布）。0.7.1 把「审阅」重做成「问题单 + 修改稿」；0.7.2 把作者自己的意见接进同一张问题单（「＋ 作者提问题」「💭 宏观提议」），并让全文动作开工前先问「本次要求」、改写 / 扩写必须两次确认。
 
 ## 它解决什么痛点
 
@@ -57,9 +57,9 @@ dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 
 > 截图来自演示数据：一部 24 章的合成武侠长篇《云隐剑歌》，用于展示界面，不涉及任何真实作品。
 
-**问题页（0.7.1 新界面，截图待补）** —— 「通读审」「事实与逻辑」两个入口；一张问题单，按类型 / 状态 / 范围 / 章节筛选；每条问题带修改稿，稿可以采纳、继续改或忽略，也可以勾选多条批量出稿。
+**问题页（0.7 新界面，截图待补）** —— 「通读审」「事实与逻辑」两个入口；一张问题单，按类型 / 状态 / 范围 / 章节筛选；每条问题带修改稿，稿可以采纳、继续改或忽略，也可以勾选多条批量出稿。
 
-> 下面的截图来自 0.6.11：正文页、全文动作、账本、地图、沉浸与手机布局在 0.7.1 没有改。
+> 下面的截图来自 0.6.11：正文页、全文动作、账本、地图、沉浸与手机布局在 0.7 线没有改。
 
 **正文页：打开就是全文** —— 左目录、中间连续阅读、右栏是本章注意力与问题统计。
 
@@ -98,7 +98,7 @@ dsh plugin --profile <你的 profile> add dsh-long-novel-workbench
 | **找问题** | 选范围（单章 / 跨章 / 全局），跑「通读审」或「事实与逻辑」 | 一份 TXT 交给一个 AI 一次读完：通读审给评分 + AI 化 / 文风 / 其他问题 + 高光；事实与逻辑先自动扫库，可选再让 AI 审这版 |
 | **改** | 看修改稿 → 采纳；不满意写「我的要求」继续改；AI 误报可以「忽略」；多条可以批量出稿 | 段级稿替换该段、整章稿整章替换；采纳后问题关闭并标出写入位置；原文变了的稿不删、问题回到继续改；忽略不删除、可撤销 |
 
-> **0.7.1 只重做「审阅 → 问题单 → 修改稿 → 采纳 / 继续改」这一块。** 编辑器（含自由增删段落）、注意力打分机制、账本、数据库与同步、全文生成 / 改写、导出、世界地图、写作预设都没有动；旧意见数据保留在数据里，但不再迁移进问题单，旧的审阅 / 冷读 / 拆分链路已经下线。
+> **0.7 线只重做「审阅 → 问题单 → 修改稿 → 采纳 / 继续改」这一块（0.7.1 落地；0.7.2 补上作者提问题 / 宏观提议与全文动作要求）。** 编辑器（含自由增删段落）、注意力打分机制、账本、数据库与同步、全文生成 / 改写、导出、世界地图、写作预设都没有动；旧意见数据保留在数据里，但不再迁移进问题单，旧的审阅 / 冷读 / 拆分链路已经下线。
 
 AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入（仍走写入闸门）。批量写 / 扩 / 改走「全文动作」的 run，同样按阶段推进、可暂停可中止。
 
@@ -124,6 +124,7 @@ AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入�
 - **铁律**：必须给 TXT、一个 AI 读完，不拆子 agent、不分章合并——跨章和全局问题只有一次读完才看得出来。
 - **问题分四类**：**AI 化 / 逻辑与事实 / 文风漂移·较差 / 其他**；每条都带范围（单章 / 跨章 / 全局）、严重度（最严重 / 严重 / 一般 / 提醒）、位置（章 + 段或逐字引文；跨章 / 全局列出涉及章）、一句话说明和修改稿。同一段上不同类就是不合并的两条，各自出稿、各自采纳。
 - **审稿记录**：问题页顶部保留最近 5 条审稿记录（通读审 / 事实与逻辑 / 事实扫库），显示范围、平均注意力分、候选数与「待 AI 交回 / 已交回」；「事实扫库」记录可以直接点「让 AI 审这版」。
+- **作者自己的问题（0.7.2）**：问题页「＋ 作者提问题」——四类问题 + 范围 + 可选段号 / 引文，写了「我的要求」就直接出稿；想不出一条条问题就点「💭 宏观提议」把想法丢进去，AI 陪你聊，聊定后交稿；问题卡可以「💬 继续聊」。作者问题与 AI 发现进同一张问题单，来源只做标签。
 
 ### 修改稿：采纳 / 继续改 / 忽略 / 批量
 
@@ -138,8 +139,8 @@ AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入�
 ### 全文动作 run
 
 - 三种动作：**从头写**（`continue`，按大纲接着写新章，过闸门直接落盘）、**扩写**（`expand`）、**改写**（`rewrite`，再细分 文风 / 逻辑与事实 / 结构与节奏）。
-- 范围可以是全书、单章或区间；run 有阶段进度与预算（tokens / 费用），可暂停、恢复、中止。
-- 点「开工」才把工作单发进本书对话；**除「从头写」外，产物不直接改正文**，由你逐章采纳（账本相关改动仍走提案）。
+- 范围可以是全书、单章或区间；run 有阶段进度与预算（tokens / 费用），可暂停、恢复、中止（暂停 / 中止只是标记，不停止对话）；run 绑定本书对话，作者要求可保存、开工后还能补发。
+- 点「开工」才把工作单发进本书对话；开工前可写 **「本次要求 / 我的意见」**，随工作单发给 AI，并在提示词里列为最高优先级。**从头写** = 新章直接落盘；**整书 / 区间改写、扩写** = 你两次确认后直接覆盖正文（覆盖前自动备份，可从章节「历史版本」找回）；**单章重写**改走问题页「整章改写稿」，采纳后才覆盖。账本相关改动仍走提案。
 - run 的第一个阶段仍是「先定注意力目标」：写一句本章靠什么抓人；注意力评分由通读审独立给出。
 
 ### 账本与全书同步
@@ -179,12 +180,12 @@ AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入�
 
 工作台自己不写正文。所有 AI 动作都是同一条链路：**工作台生成工作单 → 发到你选的对话 → AI 调 `novel_desk_*` 工具 → 结果以问题单（问题 + 修改稿）回到工作台**。你也可以直接在对话里让 AI「审一下第 2 章」，它会先读 TXT / 账本再动手。
 
-0.7.1 的 7 个工具（新的对话里就能看到）：
+0.7.2 的 7 个工具（新的对话里就能看到）：
 
 | 工具 | 用途 |
 | --- | --- |
 | `novel_desk_read` | 读作品列表 / 设定与账本摘要 / 目录 / 单章正文 / 账本 / 全文搜索（返回紧凑文本，不是 JSON 大块） |
-| `novel_desk_dispatch` | 派单票据（兼容保留）：老的「主对话派子 agent」流程用；0.7.1 的审稿工作单要求一个 AI 读完，明确不使用子 agent |
+| `novel_desk_dispatch` | 派单票据（兼容保留）：老的「主对话派子 agent」流程用；0.7.2 的审稿工作单要求一个 AI 读完，明确不使用子 agent |
 | `novel_desk_problems` | 提交 / 继续改问题与修改稿：`submit` 写整份问题单（评分 / 问题 / 高光），`revise` 为选中的问题出新稿 |
 | `novel_desk_propose` | 账本修订与全文动作的提案（`ledger-fix` 等），不改正文 |
 | `novel_desk_write` | 经闸门写入整章正文（全文动作的写章入口），失败不落盘 |
@@ -221,11 +222,11 @@ AI 产出的修改稿不会背着你改正文：只有你点采纳才会写入�
 
 数据根可以用环境变量 `STORY_DESK_ROOT` 覆盖（测试 / 多套数据时很有用）。
 
-### 0.6.11 → 0.7.1 升级
+### 0.6.11 → 0.7.2 升级
 
 - **数据形态变了**：0.6.11 的作品在 `~/StoryDesk/projects/<id>/`；0.7 起插件索引在 `~/.dsh/data/dsh-long-novel-workbench/`，每本书的数据放在它自己的 DSH 工作区，正文 / 账本 / 问题都在同一目录 + `novel.db`。**0.7 不会自动迁移 0.6 作品。**
 - **迁移**：`node scripts/migrate-book-0.7.mjs --project <作品id>` 先 dry-run；确认后加 `--apply` 写盘；旧作品目录原样保留。迁移后旧意见 / 提案记录保留在数据里，但**不再进入新的问题单**（旧意见数据不迁移）。
-- **同一包升级**：在 DSH 插件管理里把 `dsh-long-novel-workbench` 升到 0.7.1（或 `dsh plugin --profile <你的 profile> add dsh-long-novel-workbench@0.7.1`），重载插件 + 刷新页面。升级前建议先备份 `~/StoryDesk` 与作品工作区（含 `novel.db*`）。
+- **同一包升级**：在 DSH 插件管理里把 `dsh-long-novel-workbench` 升到 0.7.2（或 `dsh plugin --profile <你的 profile> add dsh-long-novel-workbench@0.7.2`），重载插件 + 刷新页面。升级前建议先备份 `~/StoryDesk` 与作品工作区（含 `novel.db*`）。
 - **旧格式仍可读**：0.5.x 的 `chapters/NNNN.md`（带 frontmatter）继续可读、原地写回，未知 frontmatter 字段原样保留；`.txt + meta.json` 与旧审阅 / 账本数据都能读。
 
 ## 开发、测试与发布
@@ -239,27 +240,36 @@ cd dsh-long-novel-workbench
 npm run check       # node --check：index.js / client.js / lib/*.js 语法检查
 ```
 
-> **0.7.1 的测试状态**：按项目当前规则，本版**没有运行自动化测试**，发布验收以作者手测为准；`test/` 目录仍是 0.6 行为断言，尚未随 0.7 的问题单模型更新。`e2e` / `smoke` 脚本依赖真实作品数据与无头 Chrome，不随发布运行。
+> **0.7.2 的测试状态**：按项目当前规则，本版**没有运行自动化测试**，发布验收以作者手测为准；`test/` 目录仍是 0.6 行为断言，尚未随 0.7 的问题单模型更新。`e2e` / `smoke` 脚本依赖真实作品数据与无头 Chrome，不随发布运行。
 
 ### 发布方式
 
 发布只走「**推 tag → GitHub Actions → npm**」：
 
 1. 作者在本地提交、推 `main`；
-2. 作者打 `v0.7.1` tag 并推送——`.github/workflows/publish.yml` 会先校验 tag 与 `package.json` 版本一致，再用仓库密钥 `NPM_TOKEN` 执行 `npm publish --access public`；
-3. 发布后在 npm 上校验 `version` / `dist-tags`，GitHub Release 用 [docs/releases/v0.7.1.md](docs/releases/v0.7.1.md) 做正文并挂上打包好的 `.tgz`。
+2. 作者打 `v0.7.2` tag 并推送——`.github/workflows/publish.yml` 会先校验 tag 与 `package.json` 版本一致，再用仓库密钥 `NPM_TOKEN` 执行 `npm publish --access public`；
+3. 发布后在 npm 上校验 `version` / `dist-tags`，GitHub Release 用 [docs/releases/v0.7.2.md](docs/releases/v0.7.2.md) 做正文并挂上打包好的 `.tgz`。
 
-每个版本的发布说明在 [docs/releases/](docs/releases/)（本版：[v0.7.1](docs/releases/v0.7.1.md)）。发布与打 tag 一律由作者本人发起，Agent 不推送、不打 tag、不发布。
+每个版本的发布说明在 [docs/releases/](docs/releases/)（本版：[v0.7.2](docs/releases/v0.7.2.md)）。发布与打 tag 一律由作者本人发起，Agent 不推送、不打 tag、不发布。
 
 - 改 Host 代码（`index.js`、`lib/*.js`）后需要重载插件；改 `client.js` 后刷新页面即可。
 
-## 文档索引
+## 仓库目录
 
-| 文档 | 内容 |
+| 路径 | 作用 |
 | --- | --- |
-| [`docs/releases/`](docs/releases/) | 每个版本的发布说明（GitHub Release 正文） |
-| [`docs/screenshots/`](docs/screenshots/) | 界面截图（README 与市场共用） |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更记录 |
+| `index.js` | 宿主入口：注册 HTTP 路由与 Agent 工具 |
+| `client.js` | 浏览器端：整个工作台界面 |
+| `lib/` | 宿主模块：存储、写入闸门、账本、导出、提示词 |
+| `scripts/` | 命令行脚本：迁移、体检、界面冒烟 |
+| `test/` | 单元测试（0.6 行为断言，未随 0.7 更新） |
+| `locale/` | 中英文界面文案 |
+| `docs/releases/` | 每个版本的发布说明（GitHub Release 正文） |
+| `docs/screenshots/` | 界面截图（README 与市场共用） |
+| `.github/workflows/` | CI 与 npm 发布流程 |
+| `screenshots.json` | 市场详情页截图清单 |
+| `cordis.patch.yml` | DSH 插件装配补丁 |
+| `CHANGELOG.md` | 版本变更记录 |
 
 ## 问题与反馈
 
@@ -281,4 +291,4 @@ npm run check       # node --check：index.js / client.js / lib/*.js 语法检�
 - Every problem carries scope (chapter / cross-chapter / global), severity, location and a **draft** (paragraph or whole-chapter). Accept a draft to replace the text, ask for a revision, or ignore a false positive; batch selected problems in one go.
 - Proposals are no longer part of review/rewrite: the review chain produces problems and drafts only. Proposals remain for ledger fixes and full-text actions.
 - How to find problems: author annotations + two AI lanes; how to fix: accept / request revision / ignore. Editor, attention scoring, ledger, database, full-text generation/rewrite, export, map and presets are unchanged.
-- Version 0.7.1, released 2026-10-26 (first public release of the 0.7 line). Install from DSH *Settings → Plugins* with the package name `dsh-long-novel-workbench`.
+- Version 0.7.2, released 2026-10-27. Install from DSH *Settings → Plugins* with the package name `dsh-long-novel-workbench`.
