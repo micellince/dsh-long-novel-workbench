@@ -1,3 +1,6 @@
+# DSH 插件装配补丁：由 package.json 的 dsh.bundle.patch 指向本文件，
+# 把「📖 小说工作台」注册进 cordis。
+
 - insert:
     - id: novel-desk
       name: dsh-long-novel-workbench
