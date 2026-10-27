@@ -1,1 +1,6 @@
-{ "meta": { "title": "Novel Desk", "description": "Reading-first writing workbench: continuous reading, in-page editing, reader notes, four-way review and proposal batches." } }
+{
+  "meta": {
+    "title": "Novel Desk",
+    "description": "Reading-first Chinese novel workbench: continuous reading, in-page editing, reader notes; AI problem reports with adoptable revision drafts."
+  }
+}
