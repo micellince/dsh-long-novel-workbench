@@ -1,6 +1,6 @@
 {
   "name": "dsh-long-novel-workbench",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "长篇中文小说工作台（DSH 插件）0.7 开发版：编辑器原文优先、段落级意见与合并审阅、冷读=注意力、SQLite 账本本地增量同步。",
   "type": "module",
   "main": "index.js",
