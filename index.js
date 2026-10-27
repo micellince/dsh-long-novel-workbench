@@ -30,14 +30,14 @@ import * as ledgerdb from './lib/ledgerdb.js'
 import { scanChapterLocal } from './lib/localchecks.js'
 import * as problems from './lib/problems.js'
 import { exportManuscript, scanFactsCandidates } from './lib/review-doc.js'
-import { readingPrompt, factsPrompt, revisePrompt } from './lib/problems-prompts.js'
+import { readingPrompt, factsPrompt, revisePrompt, authorBriefPrompt } from './lib/problems-prompts.js'
 import { applyMapPlan, parseMapPlan } from './lib/mapplan.js'
 import { checkLatest, updateHint, installMode, installLatest, rollback } from './lib/update.js'
 
 export const name = 'novel-desk'
 export const inject = ['tools']
 
-export const VERSION = '0.7.1'
+export const VERSION = '0.7.2'
 
 /** 启动期错误（装配失败不拖垮 DSH，只记录并在诊断里显示）。 */
 const bootErrors = []
@@ -137,6 +137,8 @@ export const WRITE_OPS = [
   'problems.prepareReading',
   'problems.prepareFacts',
   'problems.prepareRevise',
+  'problems.prepareBrief',
+  'problems.chat',
   'problems.setReviewSession',
 ]
 
@@ -1013,12 +1015,26 @@ async function chatSend(ctx, s, root, payload) {
   }
   const data = project?.project ?? project ?? {}
   let projectRow = data?.project && typeof data.project === 'object' ? data.project : data
-  // 作品还没有登记工作区时先补建（老作品 / 导入作品 / 新建失败兜底），否则新会话建不出来
-  if (projectRow?.id && !String(projectRow.workspaceId ?? '').trim()) {
-    const ensured = await ensureProjectWorkspace(ctx, s, root, projectRow).catch(() => projectRow)
-    if (ensured?.workspaceId) {
-      projectRow = ensured
-      project = { ...(project && typeof project === 'object' ? project : {}), project: ensured }
+  // 工作区被重建/改名后，project.json 里的 workspaceId 可能过期（宿主报 workspace not found）。
+  // 发消息前先校验；不存在就按路径找回/补建，并写回 project.json 自愈。
+  if (projectRow?.id) {
+    const wantedWorkspaceId = String(projectRow.workspaceId ?? '').trim()
+    const registry = ctx?.get?.('workspaceRegistry')
+    let workspaceAlive = Boolean(wantedWorkspaceId)
+    if (wantedWorkspaceId && registry && typeof registry.list === 'function') {
+      try {
+        const rows = registry.list()
+        workspaceAlive = (Array.isArray(rows) ? rows : []).some((row) => String(row?.id ?? '') === wantedWorkspaceId)
+      } catch {
+        workspaceAlive = true // 查不到注册表时不要乱改
+      }
+    }
+    if (!workspaceAlive) {
+      const ensured = await ensureProjectWorkspace(ctx, s, root, projectRow).catch(() => projectRow)
+      if (ensured?.workspaceId) {
+        projectRow = ensured
+        project = { ...(project && typeof project === 'object' ? project : {}), project: ensured }
+      }
     }
   }
   const workspacePath = String(projectRow?.workspacePath ?? projectRow?.rootPath ?? '')
@@ -1074,9 +1090,21 @@ async function chatSend(ctx, s, root, payload) {
     if (typeof controller.create !== 'function') return ''
     const workspaceId = String(projectRow?.workspaceId ?? '').trim()
     if (!workspaceId) throw invalid('作品还没有注册工作区（workspaceId），无法新建会话')
-    const made = await controller.create({ workspaceId })
-    created = true
-    return String(made?.sessionId ?? '')
+    try {
+      const made = await controller.create({ workspaceId })
+      created = true
+      return String(made?.sessionId ?? '')
+    } catch (error) {
+      // 宿主报 workspace not found（工作区被重建/改名后 id 过期）：按路径解析并写回，再重试一次
+      const ensured = await ensureProjectWorkspace(ctx, s, root, projectRow).catch(() => projectRow)
+      const nextWorkspaceId = String(ensured?.workspaceId ?? '').trim()
+      if (!nextWorkspaceId || nextWorkspaceId === workspaceId) throw error
+      projectRow = ensured
+      project = { ...(project && typeof project === 'object' ? project : {}), project: ensured }
+      const made = await controller.create({ workspaceId: nextWorkspaceId })
+      created = true
+      return String(made?.sessionId ?? '')
+    }
   }
   // 子代理会话不能投递（会报 owned by subagent routing），只挑普通会话
   const isDeliveryTarget = (row) => Boolean(row) && row.origin !== 'subagent' && !row.parentSessionId && row.agentAvailable !== false
@@ -1708,10 +1736,23 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       const projectId = String(need(payload, 'projectId'))
       const dir = await s.projectDir(root, projectId)
       const { db } = await bookdb.openBook(dir)
-      const rows = problems.listProblems(db, {}).map((problem) => ({
-        ...problem,
-        drafts: problems.listDrafts(db, { problemId: problem.id }),
-      }))
+      const reviewCache = new Map()
+      const rows = problems.listProblems(db, {}).map((problem) => {
+        let reviewKind = ''
+        let reviewSessionId = ''
+        if (problem.reviewId) {
+          if (!reviewCache.has(problem.reviewId)) reviewCache.set(problem.reviewId, problems.getReview(db, problem.reviewId))
+          const review = reviewCache.get(problem.reviewId)
+          reviewKind = String(review?.kind || '')
+          reviewSessionId = String(review?.sessionId || '')
+        }
+        return {
+          ...problem,
+          drafts: problems.listDrafts(db, { problemId: problem.id }),
+          reviewKind,
+          reviewSessionId,
+        }
+      })
       return { rows, counts: problems.problemCounts(db) }
     }
     case 'problems.reviews': {
@@ -1800,6 +1841,56 @@ export async function handleRpc(body, ctx = {}, options = {}) {
       })
       return { prompt, problemCount: rows.length, sessionId }
     }
+    case 'problems.prepareBrief': {
+      // 作者宏观提议：一个问题绑定一条 author-brief 审阅记录，用于绑定对话、支持多轮继续聊。
+      const projectId = String(need(payload, 'projectId'))
+      const problemId = String(need(payload, 'problemId'))
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const problem = problems.getProblem(db, problemId)
+      if (!problem) throw invalid('问题不存在')
+      if (problem.status === 'ignored') throw invalid('这条问题已被忽略：先撤销忽略')
+      let review = problem.reviewId ? problems.getReview(db, problem.reviewId) : null
+      if (!review || review.kind !== 'author-brief') {
+        review = problems.createReview(db, {
+          kind: 'author-brief',
+          scope: problem.scope,
+          chapters: problem.chapters,
+          status: 'prepared',
+        })
+        problems.patchProblem(db, problem.id, { reviewId: review.id })
+      }
+      const project = await s.getProject(root, projectId).catch(() => null)
+      const prompt = authorBriefPrompt({
+        projectName: projectDisplayName(project, projectId),
+        problem: { ...problem, reviewId: review.id },
+        projectId,
+      })
+      return { reviewId: review.id, prompt, sessionId: String(review.sessionId || '') }
+    }
+    case 'problems.chat': {
+      // 多轮沟通：把作者补充想法发进这条提议绑定的对话（不生成工作单、不改正文）。
+      const projectId = String(need(payload, 'projectId'))
+      const problemId = String(need(payload, 'problemId'))
+      const message = String(payload.message ?? '').trim()
+      if (!message) throw invalid('先写要跟 AI 说的话')
+      const dir = await s.projectDir(root, projectId)
+      const { db } = await bookdb.openBook(dir)
+      const problem = problems.getProblem(db, problemId)
+      if (!problem) throw invalid('问题不存在')
+      if (!problem.reviewId) throw invalid('这条问题还没有绑定对话：先发一次「宏观提议工作单」')
+      const review = problems.getReview(db, problem.reviewId)
+      const sessionId = String(review?.sessionId || '')
+      if (!sessionId) throw invalid('这条问题还没有绑定对话：先发一次「宏观提议工作单」')
+      const prompt = [
+        '【作者补充想法（继续讨论）】',
+        message,
+        '',
+        `继续按「作者宏观提议」的约定：先讨论/确认，谈定后用 novel_desk_problems(op="revise", projectId=${JSON.stringify(projectId)}, revisions=[{problemId:${JSON.stringify(problemId)}, drafts:[...]}]) 提交修改稿；不改正文、不新增问题、不改范围外内容。`,
+      ].join('\n')
+      const sent = await chatSend(ctx, s, root, { projectId, sessionId, prompt })
+      return { ok: true, sessionId: String(sent?.sessionId || sessionId) }
+    }
     case 'problems.setReviewSession': {
       const projectId = String(need(payload, 'projectId'))
       const dir = await s.projectDir(root, projectId)
@@ -1812,21 +1903,44 @@ export async function handleRpc(body, ctx = {}, options = {}) {
     }
     case 'problems.add': {
       const projectId = String(need(payload, 'projectId'))
-      const chapter = needNumber(payload, 'chapter')
       const text = String(payload.text ?? '').trim()
       if (!text) throw invalid('请先写问题内容')
       const type = problems.PROBLEM_TYPES.includes(String(payload.type ?? '')) ? String(payload.type) : 'other'
+      const severity = problems.PROBLEM_SEVERITIES.includes(String(payload.severity ?? '')) ? String(payload.severity) : 'major'
+      // 作者提问题：单章 / 跨章（明确章号）/ 全局；可选段号或引文定位。
+      const wantedChapters = [...new Set((Array.isArray(payload.chapters) ? payload.chapters : [payload.chapter])
+        .map(Number).filter((number) => number > 0))]
+      const rawScope = String(payload.scope ?? '').trim()
+      const scope = ['chapter', 'cross', 'global'].includes(rawScope)
+        ? rawScope
+        : (wantedChapters.length > 1 ? 'cross' : 'chapter')
+      let chapter = Number(payload.chapter) || wantedChapters[0] || 0
+      if (scope === 'global') chapter = 0
+      if (scope !== 'global' && !chapter) throw invalid('请选择章节')
+      if (scope === 'cross' && wantedChapters.length < 2) throw invalid('跨章问题至少要选两章')
+      if (scope === 'chapter' && wantedChapters.length > 1) throw invalid('单章问题只能选一章')
+      const chapterList = scope === 'global' ? [] : (wantedChapters.length ? wantedChapters : [chapter])
       const dir = await s.projectDir(root, projectId)
       const addr = await resolveProblemAddress(s, root, projectId, {
-        scope: 'chapter', chapters: [chapter], chapter, para: payload.para, quote: payload.quote,
+        scope, chapters: chapterList, chapter: scope === 'global' ? 0 : chapter,
+        para: payload.para, quote: payload.quote,
       })
       const { db } = await bookdb.openBook(dir)
       const row = problems.addProblem(db, {
-        reviewId: '', type, scope: 'chapter', chapters: [chapter], chapter,
-        para: addr.para, paraHash: addr.paraHash, quote: addr.quote,
-        severity: 'major', text, source: 'author',
+        reviewId: '',
+        type,
+        scope: addr.scope,
+        chapters: addr.chapters,
+        chapter: addr.chapter,
+        para: addr.para,
+        paraHash: addr.paraHash,
+        quote: addr.quote,
+        severity,
+        text,
+        source: 'author',
+        authorNote: String(payload.authorNote ?? payload.note ?? payload.requirement ?? '').trim(),
       })
-      return { ok: true, id: row.id, chapter, para: addr.para }
+      return { ok: true, id: row.id, chapter: addr.chapter, para: addr.para, scope: addr.scope, chapters: addr.chapters }
     }
     case 'problems.note': {
       const projectId = String(need(payload, 'projectId'))
@@ -2276,16 +2390,24 @@ export async function handleRpc(body, ctx = {}, options = {}) {
     case 'run.save': {
       const projectId = String(need(payload, 'projectId'))
       const patch = { ...(payload.run ?? payload.patch ?? omit(payload, ['projectId'])) }
+      // 新建/替换动作：先重置旧 run，避免继承旧备注/开始时间/结束时间。
+      if (payload.replace === true) await s.resetRun(root, projectId)
       if (patch.kind !== undefined) {
         const normalized = normalizeRunKind(patch.kind, patch.variant)
         patch.kind = normalized.kind
         patch.variant = normalized.variant
+        if (['rewrite', 'expand'].includes(normalized.kind) && String(patch.scope ?? '') === 'chapter') {
+          throw invalid('单章改写请回正文页「重写本章」走整章改写稿（可采纳/继续改）；全文动作用于整书/区间改写。')
+        }
       }
-      // 新建 run 时补阶段模板（RunDialog 只提交 kind/scope/budget，阶段由宿主统一给）
+      // 新建 run 时补阶段模板：创建（ready）全部 pending，开工（running）才把第一阶段置 running。
       if (patch.kind && (!Array.isArray(patch.stages) || patch.stages.length === 0)) {
-        const stages = runStageDefaults(patch.kind, patch.variant).map((stage, index) => ({ ...stage, status: index === 0 ? 'running' : 'pending' }))
+        const stages = runStageDefaults(patch.kind, patch.variant).map((stage, index) => ({
+          ...stage,
+          status: patch.status === 'running' && index === 0 ? 'running' : 'pending',
+        }))
         patch.stages = stages
-        patch.currentStage = stages[0]?.id ?? ''
+        patch.currentStage = patch.status === 'running' ? (stages[0]?.id ?? '') : ''
       }
       return s.saveRun(root, projectId, patch)
     }
@@ -3154,7 +3276,7 @@ const writeTool = {
 
 const runTool = {
   name: 'novel_desk_run',
-  description: '全文动作 run：start=开始（kind: continue 从头写新章 / expand 扩写 / rewrite 改写+variant style|logic|structure；scope: book|chapter|range）/ status=进度 / advance / pause / resume / finish / abort。continue 写新章并落盘，其余产物进提案。',
+  description: '全文动作 run：start=开始（kind: continue 从头写新章 / expand 扩写 / rewrite 改写+variant style|logic|structure；scope: book|range；单章改写请走问题页整章改写稿）/ status=进度 / advance / pause / resume / finish / abort。continue 写新章并落盘；rewrite/expand 需作者两次确认（confirmed=true）后直接覆盖正文，覆盖前自动备份、可从章节历史版本找回。',
   parameters: {
     type: 'object',
     properties: {
@@ -3165,6 +3287,7 @@ const runTool = {
       scope: { type: 'string', enum: ['book', 'chapter', 'range'], description: 'op=start；continue 一般用 book 或 range' },
       chapter: { type: 'number', description: 'op=start & scope=chapter|range 的起始章' },
       endChapter: { type: 'number', description: 'op=start & scope=range 的结束章（包含）' },
+      confirmed: { type: 'boolean', description: 'rewrite/expand 必须传 true：作者已在工作台两次确认会直接覆盖正文（覆盖前自动备份，可从章节历史版本找回）。' },
       budget: { type: 'object', description: '{maxTokens,maxCostCNY}' },
       stageId: { type: 'string', description: 'op=advance 目标阶段' },
       note: { type: 'string', description: '进度说明' },
@@ -3195,6 +3318,13 @@ const runTool = {
       }
       const normalized = normalizeRunKind(rawKind, rawVariant)
       const scope = ['book', 'chapter', 'range'].includes(String(args.scope ?? '')) ? String(args.scope) : 'book'
+      const overwriting = normalized.kind === 'rewrite' || normalized.kind === 'expand'
+      if (overwriting && args.confirmed !== true) {
+        throw new Error('改写/扩写会直接覆盖正文，需要作者两次确认（工作台创建时勾选 + 开工确认）；确认后调用请传 confirmed=true。')
+      }
+      if (normalized.kind === 'rewrite' && scope === 'chapter') {
+        throw new Error('单章重写请回正文页「重写本章」走整章改写稿（可采纳/继续改）；run 只用于整书/区间改写。')
+      }
       const chapter = args.chapter ?? base.chapter ?? (scope === 'chapter' || scope === 'range' ? 1 : null)
       const endChapter = args.endChapter ?? base.endChapter ?? (scope === 'range' ? chapter : null)
       const stages = runStageDefaults(normalized.kind, normalized.variant).map((stage, index) => ({
