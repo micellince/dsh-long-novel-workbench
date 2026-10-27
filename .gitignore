@@ -4,3 +4,6 @@ node_modules/
 *.log
 .npm/
 .ui-cache/
+
+# 本地干净包 / tgz 产物
+release/
