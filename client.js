@@ -2652,12 +2652,12 @@ window.__ModuleLoader__.load({
             h('div', { className: 'nd-actions' },
               h(Btn, { small: true, kind: 'primary', onClick: () => setRunDialog({ kind: 'continue', scope: 'chapter', chapter: (tocNums.length ? Math.max(...tocNums) : 0) + 1, title: `从头写第 ${(tocNums.length ? Math.max(...tocNums) : 0) + 1} 章` }) }, '从头写下一章'),
               h(Btn, { small: true, onClick: () => setRunDialog({ kind: 'expand', scope: 'chapter', chapter: active, title: `续写第 ${active} 章` }) }, '续写本章'),
-              h(Btn, { small: true, onClick: () => setRunDialog({ kind: 'rewrite', variant: 'logic', scope: 'chapter', chapter: active, title: `重写第 ${active} 章` }) }, '重写本章'),
+              h(Btn, { small: true, disabled: !(active > 0), onClick: () => go('problems', { ask: 'chapterRewrite', chapter: active }) }, '重写本章（整章改写稿）'),
               active > 0
                 ? h(Btn, { small: true, kind: 'danger', disabled: deletingChapter, onClick: () => deleteActiveChapter(active) }, deletingChapter ? '删除中…' : '删除本章')
                 : null,
             ),
-            h('p', { className: 'nd-hint' }, '「从头写下一章」会直接让 AI 写新章并落盘（过闸门）；续写/重写只创建全文动作，产物进提案。'),
+            h('p', { className: 'nd-hint' }, '从头写=新章直接落盘（过闸门）；单章重写=整章改写稿，采纳后才覆盖正文；整书/区间改写、扩写=开工后双次确认后直接覆盖正文（覆盖前自动备份，可在该章「历史版本」找回）。'),
           ),
         ),
         pop
@@ -3530,7 +3530,7 @@ window.__ModuleLoader__.load({
     const PROBLEM_STATUS_LABEL = { open: '待处理', accepted: '已采纳', outdated: '原文已变', ignored: '已忽略' }
     const PROBLEM_STATUS_TONE = { open: 'warn', accepted: 'ok', outdated: 'error', ignored: 'muted' }
     const PROBLEM_SOURCE_LABEL = { ai: 'AI', author: '作者', scan: '扫库' }
-    const PROBLEM_REVIEW_KIND_LABEL = { reading: '通读审', 'facts-scan': '事实扫库', 'facts-ai': '事实与逻辑' }
+    const PROBLEM_REVIEW_KIND_LABEL = { reading: '通读审', 'facts-scan': '事实扫库', 'facts-ai': '事实与逻辑', 'author-brief': '作者提议' }
     const PROBLEM_DRAFT_KIND_LABEL = { paragraph: '段级稿', chapter: '整章改写稿' }
     const PROBLEM_FILTER_TYPES = ['ai-style', 'logic-fact', 'style', 'other']
     const PROBLEM_FILTER_STATUS = ['open', 'accepted', 'outdated', 'ignored']
@@ -3557,6 +3557,10 @@ window.__ModuleLoader__.load({
       const [target, setTarget] = useState('auto')
       const [sending, setSending] = useState(false)
       const [revise, setRevise] = useState(null)
+      const [authorDialog, setAuthorDialog] = useState(null)
+      const [rewriteDialog, setRewriteDialog] = useState(null)
+      const [macroDialog, setMacroDialog] = useState(null)
+      const [chatDialog, setChatDialog] = useState(null)
 
       /** 本地时间展示：服务端存的是 UTC ISO，不能直接截字符串（否则会显示成 UTC 的 4 点）。 */
       const whenText = (value, withTime = true) => {
@@ -3669,6 +3673,152 @@ window.__ModuleLoader__.load({
         if (rangeScope === 'chapter') chapters = Number(dialog.chapter) > 0 ? [Number(dialog.chapter)] : []
         else if (rangeScope === 'cross') chapters = (dialog.chapters || []).map(Number).filter((n) => n > 0)
         return { scope: rangeScope, chapters, payload: payloadOf(rangeScope, chapters) }
+      }
+
+      // ── 作者提问题：同一张问题单，来源标记作者；写了「我的要求」就直接生成改法工作单 ──
+      const openAuthorDialog = () => {
+        if (!projectId) return
+        const chapter = currentChapter()
+        setNotice(null)
+        setAuthorDialog({
+          type: 'other',
+          scope: 'chapter',
+          chapter: chapter > 0 ? chapter : (chapterNumbers[0] || 0),
+          chapters: chapter > 0 ? [chapter] : [],
+          para: '',
+          quote: '',
+          text: '',
+          authorNote: '',
+        })
+      }
+      const setAuthorScope = (nextScope) => setAuthorDialog((prev) => {
+        if (!prev) return prev
+        const chapters = prev.chapters && prev.chapters.length ? prev.chapters : (prev.chapter ? [prev.chapter] : [])
+        return { ...prev, scope: nextScope, chapters }
+      })
+      const submitAuthorDialog = async () => {
+        if (!projectId || !authorDialog || busy) return
+        const text = String(authorDialog.text || '').trim()
+        if (!text) { setNotice({ tone: 'warn', text: '先写清楚这条问题（问题说明必填）。' }); return }
+        const authorScope = String(authorDialog.scope || 'chapter')
+        const payload = { type: String(authorDialog.type || 'other'), scope: authorScope, text }
+        if (authorScope === 'chapter') {
+          const chapter = Number(authorDialog.chapter) || 0
+          if (!chapter) { setNotice({ tone: 'warn', text: '先选一章。' }); return }
+          payload.chapter = chapter
+          payload.chapters = [chapter]
+          const paraRaw = String(authorDialog.para == null ? '' : authorDialog.para).trim()
+          if (paraRaw !== '') {
+            const para = Number(paraRaw)
+            if (!Number.isInteger(para) || para < 0) { setNotice({ tone: 'warn', text: '段号从 0 开始（可留空）：请填 0 或正整数。' }); return }
+            payload.para = para
+          }
+          const quote = String(authorDialog.quote || '').trim()
+          if (quote) payload.quote = quote
+        } else if (authorScope === 'cross') {
+          const chapters = (authorDialog.chapters || []).map(Number).filter((n) => n > 0)
+          if (chapters.length < 2) { setNotice({ tone: 'warn', text: '跨章问题至少选 2 章（按住 ⌘/Ctrl 多选）。' }); return }
+          payload.chapters = chapters
+          payload.chapter = chapters[0]
+        }
+        const authorNote = String(authorDialog.authorNote || '').trim()
+        if (authorNote) payload.authorNote = authorNote
+        setBusy('author-add')
+        setNotice(null)
+        try {
+          const created = await api('problems.add', scope(projectId, payload))
+          const problemId = String((created && created.id) || '')
+          setAuthorDialog(null)
+          reload()
+          if (authorNote && problemId) {
+            try {
+              const value = await api('problems.prepareRevise', scope(projectId, { problemIds: [problemId], requirement: authorNote }))
+              const sessionId = String((value && value.sessionId) || '')
+              setTarget(sessionId || 'auto')
+              setWorkorder({ title: '作者问题改法工作单', prompt: String((value && value.prompt) || ''), reviewId: '', meta: value || {} })
+              if (!value || !value.prompt) setNotice({ tone: 'warn', text: '问题已加入，但服务端没有返回工作单文本；可点这条的「继续改」重试。' })
+              else setNotice({ tone: 'ok', text: '已加入问题单，并生成改法工作单：确认后发到对话。' })
+            } catch (error) {
+              setNotice({ tone: 'error', text: `问题已加入，但生成改法工作单失败：${friendlyError(error)}；可点这条的「继续改」重试。` })
+            }
+          } else {
+            setNotice({ tone: 'ok', text: '已加入问题单；点这条的「继续改」可以让 AI 出稿。' })
+          }
+        } catch (error) {
+          setNotice({ tone: 'error', text: `加入问题单失败：${friendlyError(error)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      // ── 整章改写：正文页「重写本章」跳过来，先入问题单再生成整章改写工作单 ──
+      const submitRewriteDialog = async () => {
+        if (!projectId || !rewriteDialog || busy) return
+        const chapter = Number(rewriteDialog.chapter) || 0
+        if (!chapter) { setNotice({ tone: 'warn', text: '没有章号可以重写。' }); return }
+        const requirement = String(rewriteDialog.requirement || '').trim()
+        const text = requirement ? `作者要求整章重写：${requirement}` : `作者要求整章重写第 ${chapter} 章`
+        setBusy('chapter-rewrite')
+        setNotice(null)
+        try {
+          const created = await api('problems.add', scope(projectId, { chapter, text, type: 'other', severity: 'major' }))
+          const problemId = String((created && created.id) || '')
+          setRewriteDialog(null)
+          reload()
+          if (!problemId) throw new Error('问题单没有返回 id')
+          const value = await api('problems.prepareRevise', scope(projectId, { problemIds: [problemId], requirement }))
+          setTarget('auto')
+          setWorkorder({ title: `第 ${chapter} 章 · 整章改写工作单`, prompt: String((value && value.prompt) || ''), reviewId: '', meta: value || {} })
+          if (!value || !value.prompt) setNotice({ tone: 'warn', text: '服务端没有返回工作单文本，请重试。' })
+        } catch (error) {
+          setNotice({ tone: 'error', text: `准备整章改写失败：${friendlyError(error)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+
+      // ── 作者宏观提议：想到哪说到哪 → 入问题单 → 讨论工作单 → 可多轮继续聊 ──
+      const submitMacroDialog = async () => {
+        if (!projectId || !macroDialog || busy) return
+        const text = String(macroDialog.text || '').trim()
+        if (!text) { setNotice({ tone: 'warn', text: '先随便写点什么：哪里不对、想怎么改、担心什么都可以。' }); return }
+        setBusy('macro')
+        setNotice(null)
+        try {
+          const created = await api('problems.add', scope(projectId, { scope: 'global', type: 'other', severity: 'major', text }))
+          const problemId = String((created && created.id) || '')
+          if (!problemId) throw new Error('问题单没有返回 id')
+          const value = await api('problems.prepareBrief', scope(projectId, { problemId }))
+          setMacroDialog(null)
+          setTarget('auto')
+          reload()
+          setWorkorder({
+            title: '作者宏观提议 · 讨论工作单',
+            prompt: String((value && value.prompt) || ''),
+            reviewId: String((value && value.reviewId) || ''),
+          })
+          if (!value || !value.prompt) setNotice({ tone: 'warn', text: '已加入问题单，但服务端没有返回讨论工作单；可在问题卡上点「继续改」。' })
+        } catch (error) {
+          setNotice({ tone: 'error', text: `准备宏观提议失败：${friendlyError(error)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+      const submitChatDialog = async () => {
+        if (!projectId || !chatDialog || busy) return
+        const message = String(chatDialog.text || '').trim()
+        if (!message) { setNotice({ tone: 'warn', text: '先写要跟 AI 说的话。' }); return }
+        setBusy('chat')
+        setNotice(null)
+        try {
+          await api('problems.chat', scope(projectId, { problemId: chatDialog.problemId, message }))
+          setChatDialog(null)
+          reload()
+          setNotice({ tone: 'ok', text: '已发进绑定对话；AI 回复或交回修改稿后，点「刷新」看问题页。' })
+        } catch (error) {
+          setNotice({ tone: 'error', text: `发送失败：${friendlyError(error)}` })
+        } finally {
+          setBusy('')
+        }
       }
 
       const submitReviewDialog = async () => {
@@ -3861,18 +4011,23 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // pageArg.ask：正文页「审稿本章」等入口跳过来时，先按指定范围打开选范围弹窗
-      const askRef = useRef('')
+      // pageArg.ask：正文页「审稿本章 / 重写本章」等入口跳过来时，先打开对应弹窗（同一入口只弹一次）
+      const askRef = useRef(null)
       useEffect(() => {
-        if (!pageArg) return
+        if (!pageArg || askRef.current === pageArg) return
         const ask = String(pageArg.ask || '')
+        if (ask === 'chapterRewrite') {
+          askRef.current = pageArg
+          const wanted = Number(pageArg.chapter) || chapterNumbers[0] || 0
+          setRewriteDialog({ chapter: wanted, requirement: '' })
+          setNotice(null)
+          return
+        }
         if (ask !== 'reading' && ask !== 'facts') return
+        askRef.current = pageArg
         const neededScope = pageArg.scope === 'global' ? 'global' : pageArg.scope === 'cross' ? 'cross' : 'chapter'
         const wantedChapter = Number(pageArg.chapter) || 0
         const askedChapters = Array.isArray(pageArg.chapters) ? pageArg.chapters.map(Number).filter((n) => n > 0) : []
-        const key = `${ask}:${neededScope}:${wantedChapter}:${askedChapters.join(',')}`
-        if (askRef.current === key) return
-        askRef.current = key
         const fallbackChapter = wantedChapter > 0 ? wantedChapter : (chapterNumbers[0] || 0)
         setReviewDialog({
           mode: ask,
@@ -3969,6 +4124,7 @@ window.__ModuleLoader__.load({
                 },
               }, '定位正文') : null,
               canRevise ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: () => openRevise([rowId]) }, '继续改') : null,
+              row.reviewSessionId ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => setChatDialog({ problemId: rowId, text: '', sessionId: row.reviewSessionId }) }, '💬 继续聊') : null,
               rowStatus === 'ignored'
                 ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => ignoreProblem(rowId, false) }, '撤销忽略')
                 : rowStatus !== 'accepted' ? h(Btn, { small: true, disabled: Boolean(busy), onClick: () => ignoreProblem(rowId, true) }, '忽略') : null,
@@ -4052,10 +4208,12 @@ window.__ModuleLoader__.load({
           h('div', { className: 'nd-page-head' },
             h('div', null,
               h('h2', null, '问题'),
-              h('p', { className: 'nd-hint' }, '审稿一次读完一份 TXT，产出「问题」；每条问题带能直接顶替原文的修改稿。采纳 → 正文更新；不满意就「继续改」（可勾选批量）。'),
+              h('p', { className: 'nd-hint' }, '审稿一次读完一份 TXT，产出「问题」；每条问题带能直接顶替原文的修改稿。采纳 → 正文更新；不满意就「继续改」（可勾选批量）。作者自己提问题用「＋ 作者提问题」；想到哪说到哪、需要 AI 边聊边改，用「💭 宏观提议」。'),
             ),
             h('div', { className: 'nd-page-actions' },
               h(Btn, { small: true, onClick: reload, disabled: res.loading || Boolean(busy) }, res.loading ? '刷新中…' : '刷新'),
+              h(Btn, { small: true, onClick: openAuthorDialog, disabled: Boolean(busy) }, '＋ 作者提问题'),
+              h(Btn, { small: true, onClick: () => { setNotice(null); setMacroDialog({ text: '' }) }, disabled: Boolean(busy) }, '💭 宏观提议（想到哪说哪）'),
               h(Btn, { small: true, kind: 'primary', onClick: () => openReviewDialog('reading'), disabled: Boolean(busy) }, '📖 通读审（冷读+去 AI 化）'),
               h(Btn, { small: true, onClick: () => openReviewDialog('facts'), disabled: Boolean(busy) }, '⚖️ 事实与逻辑'),
               h(Btn, { small: true, onClick: () => openRevise(picked), disabled: !picked.length || Boolean(busy) }, `✍️ 批量继续改（${picked.length}）`),
@@ -4105,7 +4263,7 @@ window.__ModuleLoader__.load({
                 action: rows.length
                   ? h(Btn, { small: true, onClick: resetFilters }, '清空筛选')
                   : h(Btn, { kind: 'primary', onClick: () => openReviewDialog('reading'), disabled: Boolean(busy) }, '📖 开始通读审'),
-              }, rows.length ? '当前筛选下没有问题。' : '还没有问题。两个入口：通读审（冷读+去 AI 化）、事实与逻辑；作者批注也进同一张问题单。')
+              }, rows.length ? '当前筛选下没有问题。' : '还没有问题。作者可点「＋ 作者提问题」（具体问题）或「💭 宏观提议」（想到哪说哪、可与 AI 多轮沟通）；正文批注 / 整章意见也进同一张问题单。')
             : h('div', { className: 'nd-opinions' }, visibleRows.map(renderProblem)),
         ),
         reviewDialog ? h(Modal, {
@@ -4197,6 +4355,108 @@ window.__ModuleLoader__.load({
           revise.reviewSessionId || (target && target !== 'auto' && target !== 'new')
             ? h('p', { className: 'nd-hint' }, `默认会话：${revise.reviewSessionId ? '产生这些问题的审稿对话' : '已选会话'}${target && target !== 'auto' && target !== 'new' ? `（${String(target).slice(0, 8)}…）` : ''}；也可以改成新开对话。`)
             : h('p', { className: 'nd-hint' }, '没有绑定审稿会话：默认发到最近在用的对话；想干净上下文就选「新开一个对话」。'),
+        ) : null,
+        macroDialog ? h(Modal, {
+          title: '作者宏观提议 · 想到哪说哪',
+          wide: true,
+          onClose: () => { if (!busy) setMacroDialog(null) },
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setMacroDialog(null), disabled: Boolean(busy) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submitMacroDialog, disabled: Boolean(busy) }, busy === 'macro' ? '准备中…' : '生成讨论工作单'),
+          ),
+        },
+          h('p', { className: 'nd-hint' }, '不用讲结构：哪几章、哪里不对劲、想怎么改、担心什么，想到哪写到哪。会先入问题单，再发一份「讨论工作单」给 AI；AI 先和你讨论、可多轮补充，谈定后把修改稿交回问题页。'),
+          h(Field, { label: '想到什么写什么（必填）' },
+            h(TextArea, { rows: 8, value: macroDialog.text, placeholder: '例：第 12–18 章节奏太拖，我想让男主早点发现玉佩有问题，但又不能这么快摊牌；还有第 15 章那个配角说话太现代……你看着办，先说说你打算怎么改。', onChange: (value) => setMacroDialog((prev) => (prev ? { ...prev, text: value } : prev)) }),
+          ),
+        ) : null,
+        chatDialog ? h(Modal, {
+          title: '继续聊 · 作者补充想法',
+          onClose: () => { if (!busy) setChatDialog(null) },
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setChatDialog(null), disabled: Boolean(busy) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submitChatDialog, disabled: Boolean(busy) }, busy === 'chat' ? '发送中…' : '发进对话'),
+          ),
+        },
+          h('p', { className: 'nd-hint' }, '发进这条问题绑定过的对话（AI 记得上下文）。AI 可能先反问；谈定后会通过工具把修改稿交回问题页，回来点「刷新」。'),
+          h(Field, { label: '想跟 AI 说' },
+            h(TextArea, { rows: 5, value: chatDialog.text, placeholder: '例：刚才那个方案不行，别让男主直接知道；改成他从账册里看出来，先别点破。', onChange: (value) => setChatDialog((prev) => (prev ? { ...prev, text: value } : prev)) }),
+          ),
+        ) : null,
+        authorDialog ? h(Modal, {
+          title: '作者提问题',
+          onClose: () => { if (!busy) setAuthorDialog(null) },
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setAuthorDialog(null), disabled: Boolean(busy) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submitAuthorDialog, disabled: Boolean(busy) }, busy === 'author-add' ? '提交中…' : '加入问题单'),
+          ),
+        },
+          h('p', { className: 'nd-hint' }, '加入同一张问题单，来源标记「作者」。写了「我的要求」会直接生成改法工作单，发送后 AI 把修改稿交回问题页；不写就只入单，之后再点「继续改」。'),
+          h(Field, { label: '类型' },
+            h(Select, {
+              value: String(authorDialog.type || 'other'),
+              onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, type: value } : prev)),
+              options: PROBLEM_FILTER_TYPES.map((id) => ({ value: id, label: PROBLEM_TYPE_LABEL[id] })),
+            }),
+          ),
+          h(Field, { label: '范围' },
+            h(Select, {
+              value: String(authorDialog.scope || 'chapter'),
+              onChange: setAuthorScope,
+              options: PROBLEM_FILTER_SCOPES.map((id) => ({ value: id, label: PROBLEM_SCOPE_LABEL[id] })),
+            }),
+          ),
+          authorDialog.scope === 'chapter'
+            ? h(Field, { label: '章节' },
+                h(Select, {
+                  value: String(authorDialog.chapter || ''),
+                  onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, chapter: Number(value), chapters: [Number(value)] } : prev)),
+                  options: chapterOptions,
+                }),
+              )
+            : authorDialog.scope === 'cross'
+              ? h(Field, { label: '选章（至少 2 章；按住 ⌘/Ctrl 多选）', hint: `已选 ${(authorDialog.chapters || []).length} 章` },
+                  h('select', {
+                    className: 'nd-input',
+                    multiple: true,
+                    size: 10,
+                    value: (authorDialog.chapters || []).map(String),
+                    onChange: (event) => {
+                      const selected = [...event.target.selectedOptions].map((option) => Number(option.value)).filter((n) => n > 0)
+                      setAuthorDialog((prev) => (prev ? { ...prev, chapters: selected } : prev))
+                    },
+                  }, chapterOptions.map((option) => h('option', { key: option.value, value: option.value }, option.label))),
+                )
+              : h('p', { className: 'nd-hint' }, `全局问题：影响全书 ${chapterNumbers.length} 章；只记录问题单，不导出 TXT。`),
+          authorDialog.scope === 'chapter'
+            ? h('div', { className: 'nd-form-row' },
+                h(Field, { label: '段号（可选，从 0 开始）', hint: '不填按章级问题记录；填了段级稿采纳时会按段校验原文。' },
+                  h(TextInput, { value: authorDialog.para, type: 'number', min: 0, placeholder: '例如 0（第一段）', onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, para: value } : prev)) }),
+                ),
+                h(Field, { label: '引文（可选，逐字原文）', hint: '从正文复制这一段原文，帮 AI 与采纳定位。' },
+                  h(TextInput, { value: authorDialog.quote, placeholder: '粘贴这段原文（可留空）', onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, quote: value } : prev)) }),
+                ),
+              )
+            : null,
+          h(Field, { label: '问题说明（必填）', hint: '一句话说清读者/你在哪卡住。' },
+            h(TextArea, { rows: 3, value: authorDialog.text, placeholder: '例：这里主角忽然知道内情，前面没交代；或：这段 AI 味太重，读着不像人写的。', onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, text: value } : prev)) }),
+          ),
+          h(Field, { label: '我的要求（可选）', hint: '写了会立刻生成改法工作单；不写就只入单，之后再点「继续改」。' },
+            h(TextArea, { rows: 3, value: authorDialog.authorNote, placeholder: '例：改成主角从细节里推断出来；不要加新人物；只动这一段。', onChange: (value) => setAuthorDialog((prev) => (prev ? { ...prev, authorNote: value } : prev)) }),
+          ),
+        ) : null,
+        rewriteDialog ? h(Modal, {
+          title: `重写第 ${rewriteDialog.chapter || '?'} 章 · 整章改写稿`,
+          onClose: () => { if (!busy) setRewriteDialog(null) },
+          footer: h(Fragment, null,
+            h(Btn, { onClick: () => setRewriteDialog(null), disabled: Boolean(busy) }, '取消'),
+            h(Btn, { kind: 'primary', onClick: submitRewriteDialog, disabled: Boolean(busy) }, busy === 'chapter-rewrite' ? '准备中…' : '生成改写工作单'),
+          ),
+        },
+          h('p', { className: 'nd-hint' }, '会生成一份「整章改写稿」进问题单：采纳后才覆盖正文；覆盖前自动备份，可在正文页该章「历史版本」找回。'),
+          h(Field, { label: '本次重写要求（我的意见，可留空）', hint: '例：只动语言层，事实/专名/数字冻结；或：改因果，让上一章的伏笔接上。' },
+            h(TextArea, { rows: 4, value: rewriteDialog.requirement, placeholder: '这次想怎么重写这一章？（可留空：按整章改写常规处理）', onChange: (value) => setRewriteDialog((prev) => (prev ? { ...prev, requirement: value } : prev)) }),
+          ),
         ) : null,
         workorder ? h(Modal, {
           title: workorder.title,
@@ -4525,6 +4785,13 @@ window.__ModuleLoader__.load({
       const [maxCost, setMaxCost] = useState('20')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
+      const [brief, setBrief] = useState((defaults && defaults.brief) || '')
+      const [overwriteAgreed, setOverwriteAgreed] = useState(false)
+
+      const overwriting = kind === 'rewrite' || kind === 'expand'
+      // 单章改写/扩写走问题页整章改写稿；服务端 run.save 也会拒绝，这里先禁用并说明。
+      const chapterRewriteBlocked = kind === 'rewrite' && scopeMode === 'chapter'
+      const needsAgree = overwriting && !chapterRewriteBlocked
 
       const submit = async () => {
         setBusy(true)
@@ -4543,10 +4810,11 @@ window.__ModuleLoader__.load({
             scope: scopeMode,
             chapter: scopeMode === 'book' ? null : start,
             endChapter: scopeMode === 'range' ? Math.max(start, toNumber(endChapter, start)) : null,
+            brief: String(brief || '').trim(),
             budget,
             status: 'ready',
           }
-          await api('run.save', scope(projectId, { patch, run: patch, ...patch }))
+          await api('run.save', scope(projectId, { patch, run: patch, ...patch, replace: true }))
           onCreated()
         } catch (err) {
           setError(friendlyError(err))
@@ -4556,8 +4824,9 @@ window.__ModuleLoader__.load({
       }
 
       const hint = kind === 'continue'
-        ? '从头写会把新章直接写进正文（过闸门后落盘）；其余动作的产物只进提案，不会直接改正文。已有动作会被新动作替换。'
-        : '产物只进提案，不会直接改正文。已有动作会被新动作替换。'
+        ? '从头写会把新章直接写进正文（过闸门后落盘）。创建新动作会替换当前全文动作。'
+        : '改写/扩写会直接覆盖已有正文：先勾选下方确认，开工时还会再确认一次；覆盖前自动备份，可在正文页对应章「历史版本」找回。创建新动作会替换当前全文动作。'
+      const createDisabled = busy || (needsAgree && !overwriteAgreed) || chapterRewriteBlocked
 
       return h(
         Modal,
@@ -4566,14 +4835,14 @@ window.__ModuleLoader__.load({
           onClose,
           footer: h(Fragment, null,
             h(Btn, { onClick: onClose }, '取消'),
-            h(Btn, { kind: 'primary', onClick: submit, disabled: busy }, busy ? '创建中…' : '创建动作'),
+            h(Btn, { kind: 'primary', onClick: submit, disabled: createDisabled }, busy ? '创建中…' : '创建动作'),
           ),
         },
         h('p', { className: 'nd-hint' }, hint),
         h(Field, { label: '动作类型' },
           h(Select, {
             value: kind,
-            onChange: (value) => { setKind(value); if (value === 'continue') { setScopeMode('book') } },
+            onChange: (value) => { setKind(value); setOverwriteAgreed(false); if (value === 'continue') { setScopeMode('book') } },
             options: [
               { value: 'continue', label: '从头写（从下一章开始写新章）' },
               { value: 'expand', label: '扩写（把已有章节写足）' },
@@ -4618,6 +4887,18 @@ window.__ModuleLoader__.load({
         scopeMode !== 'book' && toc.length === 0
           ? h('p', { className: 'nd-hint' }, '这本书还没有章节：直接填章号（从头写默认从第 1 章开始）。')
           : null,
+        chapterRewriteBlocked
+          ? h('p', { className: 'nd-hint' }, '⚠ 单章改写请回正文页「重写本章」走整章改写稿（采纳后才覆盖正文）；全文动作用于整书/区间。')
+          : null,
+        overwriting
+          ? h('label', { className: 'nd-checkline', style: { alignItems: 'flex-start', padding: '4px 0' } },
+              h(Check, { checked: overwriteAgreed, onChange: setOverwriteAgreed }),
+              h('span', { className: 'nd-hint' }, '我明白：改写/扩写会直接覆盖已有正文；覆盖前自动备份，可在正文页对应章「历史版本」找回'),
+            )
+          : null,
+        h(Field, { label: '本次要求 / 我的意见（可选）', hint: '会作为「作者要求（最高优先级）」写进开工工作单。' },
+          h(TextArea, { rows: 3, value: brief, placeholder: '例：只动语言层，事实/专名/数字冻结；或：第 3–5 章压缩，别加新情节。', onChange: setBrief }),
+        ),
         h('div', { className: 'nd-form-row' },
           h(Field, { label: '预算 tokens' }, h(TextInput, { value: maxTokens, onChange: setMaxTokens, type: 'number', min: 0 })),
           h(Field, { label: '预算（元）' }, h(TextInput, { value: maxCost, onChange: setMaxCost, type: 'number', min: 0 })),
@@ -4638,6 +4919,14 @@ window.__ModuleLoader__.load({
         return value.id ? value : null
       }, [runRes.data])
       const runStatus = run && run.status ? run.status : ''
+      const runBrief = run ? String(run.brief || '') : ''
+      const [brief, setBrief] = useState('')
+      const [target, setTarget] = useState('auto')
+
+      // 服务端保存过的「作者要求」变化时同步输入框（用户正在输入时 runBrief 不变，不会被覆盖）。
+      useEffect(() => {
+        setBrief(runBrief)
+      }, [runBrief])
 
       useEffect(() => {
         if (runStatus !== 'running') return undefined
@@ -4673,21 +4962,73 @@ window.__ModuleLoader__.load({
           setBusy('')
         }
       }
-      // 开工：把当前 run 的 goal 工作单发进本书对话（0.6 之前只有状态，没有真正派活入口）。
+      // 开工：把当前 run 的 goal 工作单发进本书对话（改写/扩写先要作者确认会覆盖正文）。
       const sendWorkorder = async () => {
         if (!run) return
+        if (['rewrite', 'expand', 'rephrase'].includes(String(run.kind || ''))) {
+          const agreed = window.confirm('确认开工？AI 会直接覆盖正文；覆盖前自动备份，可在正文页该章「历史版本」找回。')
+          if (!agreed) return
+        }
         setBusy('开工')
         setNotice(null)
         try {
-          const res = await api('chat.send', scope(projectId, { workorder: 'runGoalPrompt', run, newSession: false }))
-          const patch = { status: 'running', startedAt: run.startedAt || new Date().toISOString(), updatedAt: new Date().toISOString() }
-          await api('run.save', scope(projectId, { patch, run: { ...run, ...patch }, ...patch }))
-          const session = res && res.sessionId ? String(res.sessionId).slice(0, 8) : '当前会话'
-          setNotice({ tone: 'ok', text: `工作单已发进对话（${session}），AI 会按阶段推进；进度用「刷新」看。` })
+          const briefText = String(brief || '').trim()
+          let runForSend = run
+          if (briefText !== runBrief) {
+            await api('run.save', scope(projectId, { patch: { brief: briefText }, run: { brief: briefText }, brief: briefText }))
+            runForSend = { ...run, brief: briefText }
+          }
+          const chatPayload = { workorder: 'runGoalPrompt', run: runForSend }
+          if (target === 'new') chatPayload.newSession = true
+          else if (target && target !== 'auto') chatPayload.sessionId = target
+          const res = await api('chat.send', scope(projectId, chatPayload))
+          const sessionId = res && res.sessionId ? String(res.sessionId) : ''
+          const firstPending = Array.isArray(run.stages)
+            ? run.stages.findIndex((stage) => String((stage && stage.status) || 'pending') === 'pending')
+            : -1
+          const nextStages = firstPending >= 0
+            ? run.stages.map((stage, index) => (index === firstPending ? { ...stage, status: 'running' } : stage))
+            : null
+          const patch = {
+            status: 'running',
+            sessionId,
+            startedAt: run.startedAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }
+          if (Array.isArray(nextStages)) patch.stages = nextStages
+          await api('run.save', scope(projectId, { patch, run: { ...runForSend, ...patch }, ...patch }))
+          const sessionLabel = sessionId ? sessionId.slice(0, 8) : '当前会话'
+          setNotice({ tone: 'ok', text: `工作单已发进对话（${sessionLabel}），会话已绑定；AI 会按阶段推进，进度用「刷新」看。` })
           runRes.reload()
           if (onChanged) onChanged()
         } catch (err) {
           setNotice({ tone: 'error', text: `开工失败：${friendlyError(err)}` })
+        } finally {
+          setBusy('')
+        }
+      }
+
+      // 把「作者要求」发进已绑定的会话，让 AI 按补充要求继续当前动作。
+      const continueWithBrief = async () => {
+        if (!run) return
+        if (!run.sessionId) {
+          setNotice({ tone: 'warn', text: '这个动作还没绑定会话：先点「开工（发工作单）」；之后这里可以直接把补充要求发进同一个对话。' })
+          return
+        }
+        const briefText = String(brief || '').trim()
+        setBusy('继续')
+        setNotice(null)
+        try {
+          await api('run.save', scope(projectId, { patch: { brief: briefText }, run: { brief: briefText }, brief: briefText }))
+          const sent = await api('chat.send', scope(projectId, {
+            sessionId: String(run.sessionId),
+            prompt: `【作者补充要求（最高优先级）】\n${briefText}\n\n请按这个要求继续当前全文动作；不改本次范围外内容。`,
+          }))
+          const label = sent && sent.sessionId ? String(sent.sessionId).slice(0, 8) : String(run.sessionId).slice(0, 8)
+          setNotice({ tone: 'ok', text: `已把作者补充要求发进绑定会话（${label}），AI 会按它继续。` })
+          runRes.reload()
+        } catch (err) {
+          setNotice({ tone: 'error', text: `发送失败：${friendlyError(err)}` })
         } finally {
           setBusy('')
         }
@@ -4704,7 +5045,7 @@ window.__ModuleLoader__.load({
       let content
       if (!run) {
         content = h(Empty, { action: h(Btn, { kind: 'primary', onClick: () => setDialog(true) }, '新建全文动作') },
-          '还没有全文动作。从头写新章 / 扩写 / 改写整本书；只有「从头写」会把新章直接写进正文，其余产物只进提案。',
+          '还没有全文动作。从头写新章 / 扩写 / 改写整本或区间；从头写=新章直接落盘；改写/扩写=两次确认后直接覆盖正文（覆盖前自动备份，可从该章「历史版本」找回）；单章重写请回正文页「重写本章」。',
         )
       } else {
         content = h(
@@ -4720,6 +5061,7 @@ window.__ModuleLoader__.load({
               h('span', null, `开始 ${run.startedAt ? new Date(run.startedAt).toLocaleString('zh-CN') : '—'}`),
               h('span', null, `结束 ${run.finishedAt ? new Date(run.finishedAt).toLocaleString('zh-CN') : '—'}`),
               h('span', null, `更新 ${fmtAgo(run.updatedAt)}`),
+              h('span', null, `会话 ${run.sessionId ? `${String(run.sessionId).slice(0, 8)}…` : '未绑定'}`),
             ),
           ),
           h('div', { className: 'nd-run-actions' },
@@ -4727,17 +5069,25 @@ window.__ModuleLoader__.load({
             (run.status === 'idle' || run.status === 'ready' || !run.status)
               ? h(Btn, { small: true, onClick: () => saveRun({ status: 'running', startedAt: new Date().toISOString() }, '开始'), disabled: !!busy }, '开始')
               : null,
-            run.status === 'running' ? h(Btn, { small: true, onClick: () => saveRun({ status: 'paused' }, '暂停'), disabled: !!busy }, '暂停') : null,
+            run.status === 'running' ? h(Btn, { small: true, onClick: () => saveRun({ status: 'paused' }, '暂停'), disabled: !!busy }, '标记暂停（不停止对话）') : null,
             run.status === 'paused' ? h(Btn, { small: true, kind: 'primary', onClick: () => saveRun({ status: 'running' }, '继续'), disabled: !!busy }, '继续') : null,
             (run.status === 'running' || run.status === 'paused')
               ? h(Btn, { small: true, onClick: () => saveRun({ status: 'done', finishedAt: new Date().toISOString() }, '完成'), disabled: !!busy }, '完成')
               : null,
             (run.status === 'running' || run.status === 'paused' || run.status === 'ready')
-              ? h(Btn, { small: true, onClick: () => { if (window.confirm('确定中止这个全文动作？')) saveRun({ status: 'failed', finishedAt: new Date().toISOString() }, '中止') }, disabled: !!busy }, '中止')
+              ? h(Btn, { small: true, onClick: () => { if (window.confirm('确定标记中止这个全文动作？工作台只改状态，不会停止对话里的 AI。')) saveRun({ status: 'failed', finishedAt: new Date().toISOString() }, '中止') }, disabled: !!busy }, '标记中止（不停止对话）')
               : null,
             h(Btn, { small: true, onClick: () => setDialog(true), disabled: !!busy }, '新建/替换'),
             h(Btn, { small: true, onClick: resetRun, disabled: !!busy }, '重置'),
             h(Btn, { small: true, onClick: runRes.reload }, '刷新'),
+          ),
+          h('div', { className: 'nd-run-meta' },
+            h(TargetPicker, { projectId, value: target, onChange: setTarget }),
+            h('span', { className: 'nd-hint' }, target === 'new'
+              ? '开工会新开一个对话（零上下文）。'
+              : target === 'auto'
+                ? '开工发到最近在用的对话；也可以指定已有会话或新开一个。'
+                : `开工发到会话 ${String(target).slice(0, 8)}…`),
           ),
           (run.status === 'running' || run.status === 'paused')
             ? h('div', { className: 'nd-banner nd-banner-warn' },
@@ -4756,7 +5106,7 @@ window.__ModuleLoader__.load({
                     h('span', { className: 'nd-stage-title' }, String(stage.title || stage.id || '')),
                     stage.note ? h('span', { className: 'nd-hint' }, String(stage.note)) : null,
                   ))),
-              h('p', { className: 'nd-hint' }, '阶段由宿主推进；这里只用 run.save 改状态。'),
+              h('p', { className: 'nd-hint' }, '阶段由 AI 上报，工作台不校验、也不推进；这里显示的是最新回写的状态。'),
             ),
             h('section', { className: 'nd-card' },
               h('div', { className: 'nd-card-head' }, h('strong', null, '预算')),
@@ -4764,7 +5114,21 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'nd-budget-row' }, h('span', null, 'tokens'), h('span', null, `${fmtInt(budget.usedTokens)} / ${fmtInt(budget.maxTokens)}`), h(Bar, { value: budget.usedTokens, max: budget.maxTokens, tone: 'brand' })),
                 h('div', { className: 'nd-budget-row' }, h('span', null, '费用（元）'), h('span', null, `${toNumber(budget.usedCostCNY, 0).toFixed(2)} / ${toNumber(budget.maxCostCNY, 0).toFixed(2)}`), h(Bar, { value: budget.usedCostCNY, max: budget.maxCostCNY, tone: 'warn' })),
               ),
-              h('p', { className: 'nd-hint' }, run && run.kind === 'continue' ? '点「开工」把工作单发进对话后，AI 会按大纲逐章写新章（过闸门直接落盘）。' : '点「开工」把工作单发进对话后，AI 会按阶段推进；产物只进提案。'),
+              h('p', { className: 'nd-hint' }, run && run.kind === 'continue'
+                ? '点「开工」把工作单发进对话后，AI 会按大纲逐章写新章（过闸门直接落盘）。工作台不统计实际用量；这里的预算只是开工前写进工作单的上限。'
+                : '点「开工」把工作单发进对话后，AI 会按阶段推进；改写/扩写会直接覆盖正文（覆盖前自动备份，可在章节历史版本找回）。工作台不统计实际用量；预算只写进工作单，实际以对话里的用量为准。'),
+            ),
+          ),
+          h('section', { className: 'nd-card' },
+            h('div', { className: 'nd-card-head' },
+              h('strong', null, '作者要求'),
+              h('span', { className: 'nd-hint' }, run.sessionId ? `绑定会话 ${String(run.sessionId).slice(0, 8)}…` : '还没绑定会话：先点「开工（发工作单）」'),
+            ),
+            h('p', { className: 'nd-hint' }, '写给 AI 的补充要求（最高优先级）：开工时会写进工作单；之后也能随时发进当前会话。'),
+            h(TextArea, { rows: 3, value: brief, placeholder: '例：第 3–5 章压缩；改写只动语言层，事实/专名冻结；扩写只补场景与对白。', onChange: setBrief }),
+            h('div', { className: 'nd-actions' },
+              h(Btn, { small: true, onClick: () => saveRun({ brief: String(brief || '').trim() }, '保存要求'), disabled: !!busy }, busy === '保存要求' ? '保存中…' : '保存要求'),
+              h(Btn, { small: true, kind: 'primary', onClick: continueWithBrief, disabled: !!busy }, busy === '继续' ? '发送中…' : '保存并让 AI 继续'),
             ),
           ),
           h('section', { className: 'nd-card' },
@@ -4779,7 +5143,7 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'nd-page' },
         h('div', { className: 'nd-pagehead' },
           h('h2', null, '全文动作'),
-          h('span', { className: 'nd-hint' }, '整本书级动作只有一份状态（run 单例）。产物只进提案，不会直接改正文。'),
+          h('span', { className: 'nd-hint' }, '整本书级动作只有一份状态（run 单例）。从头写=新章过闸门直接落盘；改写/扩写=作者两次确认后直接覆盖正文（覆盖前自动备份，可在正文页该章「历史版本」找回）；单章重写请回正文页「重写本章」。'),
         ),
         h('div', { className: 'nd-attention-note' },
           h('strong', null, '⚡ 第一步永远是注意力设计'),
@@ -7296,7 +7660,7 @@ window.__ModuleLoader__.load({
                       h(Btn, { small: true, onClick: () => setPresetDialog({ initial: null, title: '新建预设' }) }, '＋ 新建'),
                       h(Btn, { small: true, onClick: async () => {
                         const ok = await copyText(PRESET_TEMPLATE)
-                        setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '绝对模板已复制：照字段填好，再点「＋ 新建」粘贴成预设。' : '复制失败：可以打开 docs/PRESET-TEMPLATE.md 手抄。' })
+                        setNotice({ tone: ok ? 'ok' : 'warn', text: ok ? '绝对模板已复制：照字段填好，再点「＋ 新建」粘贴成预设。' : '复制失败：请重试，或点「＋ 新建」按字段手填。' })
                       } }, '复制绝对模板'),
                     ),
                   ),
