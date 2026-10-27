@@ -1,8 +1,10 @@
-[
-  "docs/screenshots/01-read.png",
-  "docs/screenshots/05-overview.png",
-  "docs/screenshots/06-ledger-map.png",
-  "docs/screenshots/07-ledger-characters.png",
-  "docs/screenshots/04-run.png",
-  "docs/screenshots/08-immersive.png"
-]
+{
+  "screenshots": [
+    "docs/screenshots/01-read.png",
+    "docs/screenshots/05-overview.png",
+    "docs/screenshots/06-ledger-map.png",
+    "docs/screenshots/07-ledger-characters.png",
+    "docs/screenshots/04-run.png",
+    "docs/screenshots/08-immersive.png"
+  ]
+}
